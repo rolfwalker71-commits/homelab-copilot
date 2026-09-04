@@ -1111,6 +1111,49 @@ html[data-chrome="android"] .topo-detail {
   gap: 0.45rem 0.6rem;
 }
 
+.topo-tag-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.topo-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 12rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+  color: var(--text);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-chrome="android"] .topo-tag-chip {
+  border-radius: 0.75rem;
+  border-color: transparent;
+}
+
+.topo-guest-power {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.topo-guest-power .btn-icon:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 .topo-detail-name {
   margin: 0;
   font-family: var(--font-display);
@@ -1624,69 +1667,8 @@ html[data-chrome="android"] .topo-storage-row {
   font-variant-numeric: tabular-nums;
 }
 
-.topo-node-guest-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-
-.topo-node-guest-btn {
-  width: 100%;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  column-gap: 0.55rem;
-  align-items: start;
-  margin: 0;
-  padding: 0.55rem 0.7rem;
-  border: 1px solid transparent;
-  border-radius: 0.65rem;
-  background: color-mix(in srgb, var(--background) 40%, var(--card));
-  color: var(--text);
-  cursor: pointer;
-  text-align: left;
-  font: inherit;
-  box-shadow: none;
-}
-
-html[data-chrome="android"] .topo-node-guest-btn {
-  border-radius: 1rem;
-}
-
-.topo-node-guest-btn:hover {
-  background: color-mix(in srgb, var(--primary) 8%, var(--card));
-}
-
-.topo-node-guest-btn:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 1px;
-}
-
-.topo-node-guest-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-  min-width: 0;
-}
-
-.topo-node-guest-name {
-  font-weight: 600;
-  font-size: 0.875rem;
-  line-height: 1.25;
-}
-
-.topo-node-guest-sub,
-.topo-node-guest-status {
-  font-size: 0.6875rem;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.topo-node-guest-status {
-  padding-top: 0.15rem;
-  text-transform: lowercase;
+.topo-guest-storage {
+  margin-bottom: 1rem;
 }
 
 .topo-node-loading {

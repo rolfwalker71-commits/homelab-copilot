@@ -178,6 +178,27 @@ class DiscoveryEngine:
         resp.raise_for_status()
         return resp.json().get("data")
 
+    async def _proxmox_post(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        headers: dict[str, str],
+        data: dict[str, Any] | None = None,
+    ) -> Any:
+        url = f"{self.settings.proxmox_base_url}{path}"
+        resp = await client.post(url, headers=headers, data=data or None)
+        if resp.status_code == 403:
+            raise PermissionError(
+                "Keine Berechtigung für diese Aktion (HTTP 403). "
+                "Dem API-Token fehlt vermutlich VM.PowerMgmt — "
+                "Rolle PVEVMAdmin oder VM.PowerMgmt auf `/` (Propagate) zuweisen."
+            )
+        resp.raise_for_status()
+        try:
+            return resp.json().get("data")
+        except Exception:
+            return None
+
     async def _probe_token_acl(
         self, client: httpx.AsyncClient, headers: dict[str, str]
     ) -> list[str]:
@@ -383,30 +404,44 @@ class DiscoveryEngine:
             discovered_at_iso=stamp_iso,
         )
 
-        if entity.status != EntityStatus.RUNNING:
-            return entity
-
-        # Pull agent / config network info for IPs
-        ips: list[str] = []
+        # Config for tags / LXC nets (also when stopped — tags still useful in UI)
         try:
             if kind == EntityKind.LXC:
                 cfg = await self._proxmox_get(
                     client, f"/nodes/{quote(node)}/lxc/{vmid}/config", headers
                 )
-                ips.extend(self._ips_from_lxc_config(cfg or {}))
                 self._apply_lxc_config_meta(entity.meta, cfg or {})
-            else:
-                # QEMU guest agent interfaces (best-effort)
-                ifaces = await self._proxmox_get(
-                    client,
-                    f"/nodes/{quote(node)}/qemu/{vmid}/agent/network-get-interfaces",
-                    headers,
-                )
-                ips.extend(self._ips_from_qemu_agent(ifaces))
+                if entity.status == EntityStatus.RUNNING:
+                    entity.ip_addresses = sorted(
+                        set(self._ips_from_lxc_config(cfg or {}))
+                    )
+            elif kind == EntityKind.QEMU:
+                if not entity.meta.get("tags_list"):
+                    cfg = await self._proxmox_get(
+                        client, f"/nodes/{quote(node)}/qemu/{vmid}/config", headers
+                    )
+                    cfg_tags = (cfg or {}).get("tags")
+                    if cfg_tags:
+                        tags_list = self._parse_proxmox_tags(cfg_tags)
+                        entity.meta["tags"] = (
+                            cfg_tags if isinstance(cfg_tags, str) else ";".join(tags_list)
+                        )
+                        entity.meta["tags_list"] = tags_list
+                if entity.status == EntityStatus.RUNNING:
+                    try:
+                        ifaces = await self._proxmox_get(
+                            client,
+                            f"/nodes/{quote(node)}/qemu/{vmid}/agent/network-get-interfaces",
+                            headers,
+                        )
+                        entity.ip_addresses = sorted(
+                            set(self._ips_from_qemu_agent(ifaces))
+                        )
+                    except Exception as exc:
+                        logger.debug("QEMU agent IPs for %s failed: %s", entity.id, exc)
         except Exception as exc:
-            logger.debug("IP enrichment for %s failed: %s", entity.id, exc)
+            logger.debug("Config enrichment for %s failed: %s", entity.id, exc)
 
-        entity.ip_addresses = sorted(set(ips))
         return entity
 
     @staticmethod
@@ -452,6 +487,8 @@ class DiscoveryEngine:
         maxmem = raw.get("maxmem")
         disk = raw.get("disk")
         maxdisk = raw.get("maxdisk")
+        tags_raw = raw.get("tags") or ""
+        tags_list = DiscoveryEngine._parse_proxmox_tags(tags_raw)
         meta: dict[str, Any] = {
             "cpus": raw.get("cpus"),
             "cpu": cpu,
@@ -463,7 +500,8 @@ class DiscoveryEngine:
             "netin": raw.get("netin"),
             "netout": raw.get("netout"),
             "template": bool(raw.get("template")),
-            "tags": raw.get("tags") or "",
+            "tags": tags_raw if isinstance(tags_raw, str) else ";".join(tags_list),
+            "tags_list": tags_list,
             "lock": raw.get("lock") or "",
         }
         try:
@@ -484,15 +522,44 @@ class DiscoveryEngine:
         return meta
 
     @staticmethod
-    def _apply_lxc_config_meta(meta: dict[str, Any], cfg: dict[str, Any]) -> None:
+    def _parse_proxmox_tags(raw: Any) -> list[str]:
+        """Split Proxmox ``tags`` (semicolon-separated; occasionally comma)."""
+        if raw is None:
+            return []
+        if isinstance(raw, (list, tuple)):
+            parts = [str(x).strip() for x in raw]
+        else:
+            text = str(raw).strip()
+            if not text:
+                return []
+            parts = re.split(r"[;,]", text)
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in parts:
+            t = p.strip()
+            if not t:
+                continue
+            key = t.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(t)
+        return out
+
+    @classmethod
+    def _apply_lxc_config_meta(cls, meta: dict[str, Any], cfg: dict[str, Any]) -> None:
         unpriv = cfg.get("unprivileged")
         if unpriv is not None:
             meta["unprivileged"] = str(unpriv) in {"1", "true", "True"}
         onboot = cfg.get("onboot")
         if onboot is not None:
             meta["onboot"] = str(onboot) in {"1", "true", "True"}
-        if cfg.get("tags") and not meta.get("tags"):
-            meta["tags"] = cfg.get("tags")
+        cfg_tags = cfg.get("tags")
+        if cfg_tags:
+            tags_list = cls._parse_proxmox_tags(cfg_tags)
+            if tags_list:
+                meta["tags"] = cfg_tags if isinstance(cfg_tags, str) else ";".join(tags_list)
+                meta["tags_list"] = tags_list
 
     async def fetch_guest_rrd(
         self,
@@ -587,7 +654,10 @@ class DiscoveryEngine:
             raise
 
     async def fetch_node_status(self, node: str) -> dict[str, Any]:
-        """Live ``/nodes/{node}/status/current`` normalized for the detail panel."""
+        """Live ``GET /nodes/{node}/status`` normalized for the detail panel.
+
+        Note: qemu/lxc use ``…/status/current``; nodes use ``…/status`` (no ``current``).
+        """
         node = (node or "").strip()
         if not node or node.startswith("__"):
             raise ValueError(f"Ungültiger Node-Name: {node}")
@@ -595,13 +665,13 @@ class DiscoveryEngine:
         client, headers = await self._proxmox_authed_client()
         try:
             raw = await self._proxmox_get(
-                client, f"/nodes/{quote(node)}/status/current", headers
+                client, f"/nodes/{quote(node)}/status", headers
             )
         finally:
             await client.aclose()
 
         if not isinstance(raw, dict):
-            raise RuntimeError("Ungültige Antwort von Proxmox status/current.")
+            raise RuntimeError("Ungültige Antwort von Proxmox /nodes/.../status.")
 
         memory = raw.get("memory") if isinstance(raw.get("memory"), dict) else {}
         rootfs = raw.get("rootfs") if isinstance(raw.get("rootfs"), dict) else {}
@@ -742,16 +812,8 @@ class DiscoveryEngine:
                 cpu.append(round(float(c) * 100.0, 2) if c is not None else None)
             except (TypeError, ValueError):
                 cpu.append(None)
-            m = row.get("mem")
-            try:
-                # Node RRD mem is typically a 0–1 fraction
-                if m is None:
-                    mem.append(None)
-                else:
-                    mv = float(m)
-                    mem.append(round(mv * 100.0 if mv <= 1.5 else mv, 2))
-            except (TypeError, ValueError):
-                mem.append(None)
+            # Node RRD exposes memused/memtotal (bytes), not a fraction field "mem".
+            mem.append(self._node_rrd_mem_pct(row))
             ni, no = row.get("netin"), row.get("netout")
             try:
                 n_val = 0.0
@@ -771,6 +833,23 @@ class DiscoveryEngine:
             "mem": mem,
             "net": net,
         }
+
+    @staticmethod
+    def _node_rrd_mem_pct(row: dict[str, Any]) -> float | None:
+        """Normalize node RRD memory to a 0–100 percentage."""
+        try:
+            used = row.get("memused")
+            total = row.get("memtotal")
+            if used is not None and total is not None and float(total) > 0:
+                return round(100.0 * float(used) / float(total), 2)
+            # Fallback for unusual/older shapes
+            m = row.get("mem")
+            if m is None:
+                return None
+            mv = float(m)
+            return round(mv * 100.0 if mv <= 1.5 else mv, 2)
+        except (TypeError, ValueError):
+            return None
 
     async def fetch_node_storage(self, node: str) -> dict[str, Any]:
         """List storage pools on a node with used/total/avail."""
@@ -820,6 +899,265 @@ class DiscoveryEngine:
             )
         stores.sort(key=lambda s: str(s["storage"]).lower())
         return {"node": node, "storage": stores}
+
+    async def fetch_guest_storage(self, guest_id: str) -> dict[str, Any]:
+        """Disk usage + volume/mount assignment for an LXC or QEMU guest.
+
+        Uses ``status/current`` for live disk gauges and ``config`` for rootfs/mp
+        (LXC) or scsi/virtio/ide/sata disks (QEMU), including storage backend when
+        readable from the volume spec.
+        """
+        parts = guest_id.split(":")
+        if len(parts) != 3 or parts[0] not in {"lxc", "qemu"}:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}")
+        kind, node, vmid_s = parts
+        try:
+            vmid = int(vmid_s)
+        except ValueError as exc:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}") from exc
+
+        client, headers = await self._proxmox_authed_client()
+        try:
+            status = await self._proxmox_get(
+                client,
+                f"/nodes/{quote(node)}/{kind}/{vmid}/status/current",
+                headers,
+            )
+            cfg = await self._proxmox_get(
+                client,
+                f"/nodes/{quote(node)}/{kind}/{vmid}/config",
+                headers,
+            )
+        finally:
+            await client.aclose()
+
+        if not isinstance(status, dict):
+            status = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        disk_used = status.get("disk")
+        disk_total = status.get("maxdisk")
+        disk_pct: float | None = None
+        try:
+            if disk_used is not None and disk_total and float(disk_total) > 0:
+                disk_pct = round(100.0 * float(disk_used) / float(disk_total), 1)
+        except (TypeError, ValueError):
+            pass
+
+        volumes: list[dict[str, Any]] = []
+        if kind == "lxc":
+            volumes.extend(self._volumes_from_lxc_config(cfg))
+        else:
+            volumes.extend(self._volumes_from_qemu_config(cfg))
+
+        return {
+            "guest_id": guest_id,
+            "kind": kind,
+            "node": node,
+            "vmid": vmid,
+            "disk": {
+                "used": disk_used,
+                "total": disk_total,
+                "pct": disk_pct,
+            },
+            "volumes": volumes,
+        }
+
+    async def guest_power(self, guest_id: str, action: str) -> dict[str, Any]:
+        """Start / stop / shutdown / reboot an LXC or QEMU guest via Proxmox.
+
+        Maps to ``POST /nodes/{node}/{lxc|qemu}/{vmid}/status/{action}``.
+        Requires ``VM.PowerMgmt`` (403 → clear German ACL hint).
+        """
+        action = (action or "").strip().lower()
+        allowed = {"start", "stop", "shutdown", "reboot"}
+        if action not in allowed:
+            raise ValueError(
+                f"Ungültige Power-Aktion „{action}“. Erlaubt: {', '.join(sorted(allowed))}."
+            )
+        parts = guest_id.split(":")
+        if len(parts) != 3 or parts[0] not in {"lxc", "qemu"}:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}")
+        kind, node, vmid_s = parts
+        try:
+            vmid = int(vmid_s)
+        except ValueError as exc:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}") from exc
+
+        labels = {
+            "start": "gestartet",
+            "stop": "gestoppt",
+            "shutdown": "heruntergefahren",
+            "reboot": "neu gestartet",
+        }
+        client, headers = await self._proxmox_authed_client()
+        try:
+            try:
+                upid = await self._proxmox_post(
+                    client,
+                    f"/nodes/{quote(node)}/{kind}/{vmid}/status/{action}",
+                    headers,
+                )
+            except PermissionError:
+                raise
+            except httpx.HTTPStatusError as exc:
+                detail = ""
+                try:
+                    body = exc.response.json()
+                    detail = str(
+                        body.get("message")
+                        or body.get("errors")
+                        or body.get("data")
+                        or body
+                    )[:240]
+                except Exception:
+                    detail = (exc.response.text or "")[:240]
+                if exc.response.status_code == 403:
+                    raise PermissionError(
+                        "Keine Berechtigung für Power-Aktionen (HTTP 403). "
+                        "Dem API-Token fehlt VM.PowerMgmt — "
+                        "Rolle PVEVMAdmin oder VM.PowerMgmt auf `/` (Propagate) zuweisen."
+                    ) from exc
+                low = detail.lower()
+                if "already running" in low:
+                    raise RuntimeError(
+                        f"{'LXC' if kind == 'lxc' else 'VM'} {vmid} läuft bereits."
+                    ) from exc
+                if "not running" in low or "isn't running" in low:
+                    raise RuntimeError(
+                        f"{'LXC' if kind == 'lxc' else 'VM'} {vmid} ist nicht gestartet."
+                    ) from exc
+                raise RuntimeError(
+                    f"Proxmox Power-{action} fehlgeschlagen "
+                    f"(HTTP {exc.response.status_code})"
+                    + (f": {detail}" if detail else ".")
+                ) from exc
+        finally:
+            await client.aclose()
+
+        kind_label = "LXC" if kind == "lxc" else "VM"
+        return {
+            "ok": True,
+            "guest_id": guest_id,
+            "action": action,
+            "upid": upid,
+            "message": f"{kind_label} {vmid} wird {labels[action]}…",
+        }
+
+    @staticmethod
+    def _parse_size_to_bytes(raw: str | None) -> int | None:
+        """Parse Proxmox size strings like ``8G``, ``512M``, ``1024K``."""
+        if not raw:
+            return None
+        s = str(raw).strip().upper().replace(" ", "")
+        if not s:
+            return None
+        mult = 1
+        if s[-1] in "KMGT":
+            mult = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}[s[-1]]
+            s = s[:-1]
+        try:
+            return int(float(s) * mult)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _parse_volume_spec(cls, key: str, raw: str, *, kind: str) -> dict[str, Any]:
+        """Normalize a Proxmox disk/rootfs/mp config value into a volume row."""
+        parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+        head = parts[0] if parts else ""
+        opts: dict[str, str] = {}
+        for part in parts[1:]:
+            if "=" in part:
+                k, v = part.split("=", 1)
+                opts[k.strip()] = v.strip()
+
+        storage = ""
+        volume = ""
+        bind_path = ""
+        if ":" in head and not head.startswith("/"):
+            storage, volume = head.split(":", 1)
+        elif head.startswith("/"):
+            bind_path = head
+            volume = head
+        else:
+            volume = head
+
+        size_raw = opts.get("size") or ""
+        size_bytes = cls._parse_size_to_bytes(size_raw)
+        mp = opts.get("mp") or ""
+        if key == "rootfs" and not mp:
+            mp = "/"
+
+        label = key
+        if kind == "lxc":
+            if key == "rootfs":
+                label = "Rootfs"
+            elif key.startswith("mp"):
+                label = f"Mount {key}"
+            else:
+                label = key
+        else:
+            label = key
+
+        return {
+            "key": key,
+            "label": label,
+            "storage": storage,
+            "volume": volume,
+            "bind_path": bind_path,
+            "mountpoint": mp,
+            "size": size_raw,
+            "size_bytes": size_bytes,
+            "backup": opts.get("backup"),
+            "raw": raw,
+            "type": (
+                "rootfs"
+                if key == "rootfs"
+                else "mp"
+                if key.startswith("mp")
+                else "disk"
+            ),
+        }
+
+    @classmethod
+    def _volumes_from_lxc_config(cls, cfg: dict[str, Any]) -> list[dict[str, Any]]:
+        vols: list[dict[str, Any]] = []
+        rootfs = cfg.get("rootfs")
+        if isinstance(rootfs, str) and rootfs.strip():
+            vols.append(cls._parse_volume_spec("rootfs", rootfs, kind="lxc"))
+        mp_keys = sorted(
+            (k for k in cfg if re.fullmatch(r"mp\d+", str(k))),
+            key=lambda k: int(str(k)[2:]) if str(k)[2:].isdigit() else 0,
+        )
+        for key in mp_keys:
+            val = cfg.get(key)
+            if isinstance(val, str) and val.strip():
+                vols.append(cls._parse_volume_spec(str(key), val, kind="lxc"))
+        return vols
+
+    @classmethod
+    def _volumes_from_qemu_config(cls, cfg: dict[str, Any]) -> list[dict[str, Any]]:
+        """QEMU disk keys: scsi/virtio/ide/sata/efidisk/tpmstate/unused."""
+        pattern = re.compile(
+            r"^(scsi|virtio|ide|sata|efidisk|tpmstate|unused)\d+$",
+            re.IGNORECASE,
+        )
+        keys = sorted(
+            (k for k in cfg if pattern.match(str(k))),
+            key=lambda k: str(k).lower(),
+        )
+        vols: list[dict[str, Any]] = []
+        for key in keys:
+            val = cfg.get(key)
+            if isinstance(val, str) and val.strip():
+                # Skip CD-ROM media entries without a real disk volume
+                low = val.lower()
+                if "media=cdrom" in low and ":" not in val.split(",")[0]:
+                    continue
+                vols.append(cls._parse_volume_spec(str(key), val, kind="qemu"))
+        return vols
 
     @staticmethod
     def _ips_from_lxc_config(cfg: dict[str, Any]) -> list[str]:

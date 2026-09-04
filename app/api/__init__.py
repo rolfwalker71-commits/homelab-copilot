@@ -176,6 +176,46 @@ async def guest_rrd(
         ) from exc
 
 
+@router.get("/guests/{guest_id}/storage")
+async def guest_storage(guest_id: str, request: Request) -> dict[str, Any]:
+    """Live disk usage and volume/mount assignment for an LXC or QEMU guest."""
+    engine = request.app.state.discovery_engine
+    try:
+        return await engine.fetch_guest_storage(guest_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Proxmox-Guest-Storage fehlgeschlagen: {exc}",
+        ) from exc
+
+
+@router.post("/guests/{guest_id}/power/{action}")
+async def guest_power(
+    guest_id: str,
+    action: Literal["start", "stop", "shutdown", "reboot"],
+    request: Request,
+) -> dict[str, Any]:
+    """Start / Stop / Shutdown / Reboot an LXC or QEMU guest via Proxmox."""
+    engine = request.app.state.discovery_engine
+    try:
+        return await engine.guest_power(guest_id, action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Proxmox-Power-Aktion fehlgeschlagen: {exc}",
+        ) from exc
+
+
 def _proxmox_node_http_error(exc: Exception, *, label: str) -> HTTPException:
     if isinstance(exc, ValueError):
         return HTTPException(status_code=400, detail=str(exc))

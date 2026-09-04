@@ -1,6 +1,53 @@
 {% extends "base.html" %}
 {% block title %}Topologie — {{ app_name }}{% endblock %}
 
+{% macro guest_tag_chips(g) -%}
+{% set tags = (g.meta or {}).get('tags_list') %}
+{% if not tags %}
+  {% set raw_tags = (g.meta or {}).get('tags') or '' %}
+  {% if raw_tags %}
+    {% set tags = raw_tags.replace(',', ';').split(';') %}
+  {% endif %}
+{% endif %}
+{% if tags %}
+<ul class="topo-tag-list" aria-label="Proxmox-Tags">
+  {% for tag in tags %}
+  {% set t = (tag|string)|trim %}
+  {% if t %}
+  <li class="topo-tag-chip">{{ t }}</li>
+  {% endif %}
+  {% endfor %}
+</ul>
+{% endif %}
+{%- endmacro %}
+
+{% macro guest_power_controls(g) -%}
+{% set running = g.status.value == 'running' %}
+<nav class="topo-guest-power" aria-label="Power {{ g.name }}">
+  <button type="button" class="btn-icon"
+    data-guest-power="start"
+    data-guest-id="{{ g.id }}"
+    data-guest-name="{{ g.name }}"
+    title="Start"
+    aria-label="{{ g.name }} starten"
+    {% if running %}disabled{% endif %}>▶</button>
+  <button type="button" class="btn-icon"
+    data-guest-power="shutdown"
+    data-guest-id="{{ g.id }}"
+    data-guest-name="{{ g.name }}"
+    title="Herunterfahren (Shutdown)"
+    aria-label="{{ g.name }} herunterfahren"
+    {% if not running %}disabled{% endif %}>■</button>
+  <button type="button" class="btn-icon"
+    data-guest-power="reboot"
+    data-guest-id="{{ g.id }}"
+    data-guest-name="{{ g.name }}"
+    title="Neustart"
+    aria-label="{{ g.name }} neu starten"
+    {% if not running %}disabled{% endif %}>↻</button>
+</nav>
+{%- endmacro %}
+
 {% macro docker_controls(parent_id, name, status) -%}
 <nav class="topo-docker-actions" aria-label="Steuerung {{ name }}">
   {% if status != 'running' %}
@@ -387,36 +434,6 @@
         <p class="topo-node-loading text-sm text-[var(--muted)]">Storage wird geladen…</p>
       </div>
     </section>
-
-    {% if node_block.guests %}
-    <section class="topo-node-guests" aria-labelledby="node-guests-{{ node_block.name }}">
-      <div class="topo-node-section-head">
-        <h4 id="node-guests-{{ node_block.name }}" class="topo-node-section-title">Guests</h4>
-        <p class="topo-node-section-hint">{{ node_block.guest_count }} auf {{ node_block.name }}</p>
-      </div>
-      <ul class="topo-node-guest-list" role="list">
-        {% for row in node_block.guests %}
-        {% set g = row.guest %}
-        <li>
-          <button type="button"
-            class="topo-node-guest-btn"
-            data-select-guest="{{ g.id }}"
-            title="{{ g.name }} · {{ g.status.value }}">
-            <span class="topo-rail-status topo-rail-status-{{ g.status.value }}" aria-hidden="true"></span>
-            <span class="topo-node-guest-body">
-              <span class="topo-node-guest-name break-words">{{ g.name }}</span>
-              <span class="topo-node-guest-sub">
-                {{ g.kind.value }}{% if g.vmid %} {{ g.vmid }}{% endif %}
-                {% if row.docker_count %} · {{ row.docker_count }} Docker{% endif %}
-              </span>
-            </span>
-            <span class="topo-node-guest-status">{{ g.status.value }}</span>
-          </button>
-        </li>
-        {% endfor %}
-      </ul>
-    </section>
-    {% endif %}
   </div>
 </article>
 {%- endmacro %}
@@ -540,12 +557,14 @@
               aria-label="{{ g.name }}, Status {{ g.status.value }}"
               title="{{ g.name }} · {{ g.status.value }}"
               data-select-guest="{{ g.id }}"
-              data-filter-text="{{ g.name }} {{ g.ip_addresses | join(' ') }} {{ g.vmid or '' }}">
+              data-filter-text="{{ g.name }} {{ g.ip_addresses | join(' ') }} {{ g.vmid or '' }} {{ ((g.meta or {}).get('tags_list') or []) | join(' ') }}">
               <span class="topo-rail-status topo-rail-status-{{ g.status.value }}" aria-hidden="true"></span>
               <span class="topo-rail-item-body">
                 <span class="topo-rail-item-name break-words">{{ g.name }}</span>
                 <span class="topo-rail-item-sub">
                   {% if g.ip_addresses %}{{ g.ip_addresses[0] }}{% else %}{{ g.kind.value }}{% if g.vmid %} {{ g.vmid }}{% endif %}{% endif %}
+                  {% set rail_tags = (g.meta or {}).get('tags_list') or [] %}
+                  {% if rail_tags %} · {{ rail_tags[:2] | join(', ') }}{% if rail_tags|length > 2 %}…{% endif %}{% endif %}
                 </span>
               </span>
             </button>
@@ -642,6 +661,7 @@
             <div class="topo-detail-heading">
               <div class="topo-detail-title-row">
                 <h3 class="topo-detail-name break-words">{{ g.name }}</h3>
+                {{ guest_tag_chips(g) }}
               </div>
               <p class="topo-detail-meta">
                 {{ g.kind.value }}{% if g.vmid %} · {{ g.vmid }}{% endif %}
@@ -655,6 +675,7 @@
             </div>
           </div>
           <div class="topo-detail-actions">
+            {{ guest_power_controls(g) }}
             {% if g.ip_addresses %}
             <button type="button" class="btn btn-primary btn-sm"
               data-ssh-terminal
@@ -670,6 +691,16 @@
         </header>
 
         <div class="topo-detail-body">
+          <section class="topo-guest-storage" aria-labelledby="guest-storage-{{ g.id }}">
+            <div class="topo-node-section-head">
+              <h4 id="guest-storage-{{ g.id }}" class="topo-node-section-title">Storage</h4>
+              <p class="topo-node-section-hint">Festplatten / Mounts</p>
+            </div>
+            <div class="topo-storage-list" data-guest-storage="{{ g.id }}">
+              <p class="topo-node-loading text-sm text-[var(--muted)]">Storage wird geladen…</p>
+            </div>
+          </section>
+
           {% if row.docker_count %}
           <div class="topo-app-grid">
             {{ docker_panel(row.docker_stacks, row.docker_singles, g.id) }}
@@ -723,10 +754,7 @@
 </section>
 
 <section class="mb-6" aria-labelledby="modules-heading">
-  <h2 id="modules-heading" class="font-display mb-2 text-xl font-bold leading-snug">Module</h2>
-  <p class="mb-4 text-sm text-[var(--muted)]">
-    Plugin-Slots für Phase 2+. Lege <code class="text-[var(--text)]">modules/&lt;name&gt;/module.py</code> ab — kein Core-Rewrite nötig.
-  </p>
+  <h2 id="modules-heading" class="font-display mb-4 text-xl font-bold leading-snug">Module</h2>
   <div class="grid gap-3 sm:grid-cols-2">
     <article class="entity-card" style="border-style: dashed; opacity: 0.85">
       <h3 class="font-semibold break-words leading-snug">AI-Driven Patch-Management</h3>
@@ -847,6 +875,34 @@
       const data = await res.json();
       showToast(data.message || (action + ' OK'));
       setTimeout(() => window.location.reload(), 700);
+    } catch (e) {
+      showToast(String(e.message || e), true);
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function guestPowerAction(action, guestId, guestName, btn) {
+    if (!guestId || !action) return;
+    const labels = {
+      start: 'starten',
+      stop: 'stoppen',
+      shutdown: 'herunterfahren',
+      reboot: 'neu starten',
+    };
+    if (action === 'shutdown' || action === 'stop' || action === 'reboot') {
+      const verb = labels[action] || action;
+      if (!confirm('„' + (guestName || guestId) + '“ wirklich ' + verb + '?')) return;
+    }
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch(
+        '/api/guests/' + encodeURIComponent(guestId) + '/power/' + encodeURIComponent(action),
+        { method: 'POST' }
+      );
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = await res.json();
+      showToast(data.message || (action + ' OK'));
+      setTimeout(() => window.location.reload(), 900);
     } catch (e) {
       showToast(String(e.message || e), true);
       if (btn) btn.disabled = false;
@@ -1237,6 +1293,87 @@
     listEl.innerHTML = parts.join('');
   }
 
+  function renderGuestStorage(listEl, data) {
+    if (!listEl) return;
+    const disk = (data && data.disk) || {};
+    const volumes = (data && data.volumes) || [];
+    const parts = [];
+
+    if (disk.total != null || disk.used != null || disk.pct != null) {
+      const pct = disk.pct != null ? Number(disk.pct) : null;
+      const level = metricLevelJs(pct);
+      const clamped = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+      parts.push(
+        '<div class="topo-storage-row level-' + level + '">' +
+          '<div class="topo-storage-top">' +
+            '<span class="topo-storage-name">Disk-Gesamt</span>' +
+            '<span class="topo-storage-pct">' + (pct != null ? pct.toFixed(1) + '%' : '—') + '</span>' +
+          '</div>' +
+          '<div class="topo-metric-bar" role="meter" aria-label="Disk-Gesamt"' +
+            (pct != null ? ' aria-valuenow="' + Math.round(clamped) + '"' : ' aria-valuetext="unbekannt"') +
+            ' aria-valuemin="0" aria-valuemax="100">' +
+            '<span class="topo-metric-bar-fill" style="width: ' + clamped + '%"></span>' +
+          '</div>' +
+          '<div class="topo-storage-meta">' +
+            '<span>' + formatBytesJs(disk.used) + ' / ' + formatBytesJs(disk.total) + '</span>' +
+          '</div>' +
+        '</div>'
+      );
+    }
+
+    volumes.forEach((v) => {
+      const name = escapeHtml(String(v.label || v.key || 'Volume'));
+      const storage = v.storage ? String(v.storage) : '';
+      const vol = v.volume ? String(v.volume) : '';
+      const mp = v.mountpoint ? String(v.mountpoint) : '';
+      const sizeLabel = v.size
+        ? String(v.size)
+        : (v.size_bytes != null ? formatBytesJs(v.size_bytes) : '');
+      const metaBits = [];
+      if (storage) metaBits.push('<span>Storage ' + escapeHtml(storage) + '</span>');
+      if (vol && vol !== storage) {
+        metaBits.push('<span class="topo-sep" aria-hidden="true">·</span>');
+        metaBits.push('<span class="break-words">' + escapeHtml(vol) + '</span>');
+      }
+      if (mp) {
+        if (metaBits.length) metaBits.push('<span class="topo-sep" aria-hidden="true">·</span>');
+        metaBits.push('<span>Mount ' + escapeHtml(mp) + '</span>');
+      }
+      if (v.bind_path && !storage) {
+        if (metaBits.length) metaBits.push('<span class="topo-sep" aria-hidden="true">·</span>');
+        metaBits.push('<span>Bind ' + escapeHtml(String(v.bind_path)) + '</span>');
+      }
+      if (sizeLabel) {
+        if (metaBits.length) metaBits.push('<span class="topo-sep" aria-hidden="true">·</span>');
+        metaBits.push('<span>Größe ' + escapeHtml(sizeLabel) + '</span>');
+      }
+      if (v.type) {
+        if (metaBits.length) metaBits.push('<span class="topo-sep" aria-hidden="true">·</span>');
+        metaBits.push('<span>' + escapeHtml(String(v.type)) + '</span>');
+      }
+      parts.push(
+        '<div class="topo-storage-row">' +
+          '<div class="topo-storage-top">' +
+            '<span class="topo-storage-name break-words">' + name + '</span>' +
+            (storage
+              ? '<span class="topo-storage-pct" style="font-weight:600;font-size:0.75rem">' +
+                  escapeHtml(storage) + '</span>'
+              : '') +
+          '</div>' +
+          (metaBits.length
+            ? '<div class="topo-storage-meta">' + metaBits.join('') + '</div>'
+            : '') +
+        '</div>'
+      );
+    });
+
+    if (!parts.length) {
+      listEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Keine Storage-/Volume-Daten gefunden.</p>';
+      return;
+    }
+    listEl.innerHTML = parts.join('');
+  }
+
   function escapeHtml(s) {
     return String(s)
       .replace(/&/g, '&amp;')
@@ -1249,22 +1386,58 @@
     if (!guestId || guestId.startsWith('__')) return;
     const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
     const metrics = panel && panel.querySelector('[data-guest-metrics]');
-    if (!metrics) return;
+    const storageEl = panel && panel.querySelector('[data-guest-storage]');
+    if (!metrics && !storageEl) return;
     if (sparkAbort) sparkAbort.abort();
     sparkAbort = new AbortController();
-    try {
-      const res = await fetch(
-        '/api/guests/' + encodeURIComponent(guestId) + '/rrd?timeframe=hour',
-        { signal: sparkAbort.signal }
-      );
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      paintSpark(metrics, 'cpu', data.cpu || []);
-      paintSpark(metrics, 'net', data.net || []);
-    } catch (err) {
-      if (err && err.name === 'AbortError') return;
-      paintSpark(metrics, 'cpu', []);
-      paintSpark(metrics, 'net', []);
+    const signal = sparkAbort.signal;
+    const enc = encodeURIComponent(guestId);
+
+    const fetchJson = async (url) => {
+      const res = await fetch(url, { signal });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = (body && (body.detail || body.message)) || '';
+        } catch (_) {}
+        const err = new Error(detail || ('HTTP ' + res.status));
+        err.status = res.status;
+        throw err;
+      }
+      return res.json();
+    };
+
+    const [rrdRes, storageRes] = await Promise.allSettled([
+      fetchJson('/api/guests/' + enc + '/rrd?timeframe=hour'),
+      fetchJson('/api/guests/' + enc + '/storage'),
+    ]);
+
+    if (metrics) {
+      if (rrdRes.status === 'fulfilled') {
+        const data = rrdRes.value || {};
+        paintSpark(metrics, 'cpu', data.cpu || []);
+        paintSpark(metrics, 'net', data.net || []);
+      } else if (!(rrdRes.reason && rrdRes.reason.name === 'AbortError')) {
+        paintSpark(metrics, 'cpu', []);
+        paintSpark(metrics, 'net', []);
+      }
+    }
+
+    if (storageRes.status === 'fulfilled') {
+      const data = storageRes.value || {};
+      renderGuestStorage(storageEl, data);
+      if (metrics && data.disk) {
+        const pct = data.disk.pct;
+        const sub = data.disk.total != null
+          ? formatBytesJs(data.disk.used) + ' / ' + formatBytesJs(data.disk.total)
+          : '';
+        updateGauge(metrics, 'Disk', pct, pct != null ? pct + '%' : '—', sub);
+      }
+    } else if (!(storageRes.reason && storageRes.reason.name === 'AbortError')) {
+      if (storageEl) {
+        storageEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Live-Daten fehlgeschlagen.</p>';
+      }
     }
   }
 
@@ -1282,17 +1455,20 @@
 
     const fetchJson = async (url) => {
       const res = await fetch(url, { signal });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = (body && (body.detail || body.message)) || '';
+        } catch (_) {}
+        const err = new Error(detail || ('HTTP ' + res.status));
+        err.status = res.status;
+        throw err;
+      }
       return res.json();
     };
 
-    try {
-      const [status, rrd, storage] = await Promise.all([
-        fetchJson('/api/nodes/' + enc + '/status'),
-        fetchJson('/api/nodes/' + enc + '/rrd?timeframe=hour'),
-        fetchJson('/api/nodes/' + enc + '/storage'),
-      ]);
-
+    const applyStatus = (status) => {
       if (status.uptime != null) {
         const up = formatUptimeJs(status.uptime);
         setLiveText(panel, 'uptime', up);
@@ -1302,8 +1478,8 @@
       if (status.loadavg && status.loadavg.length) {
         setLiveText(panel, 'loadavg', status.loadavg.join(' / '));
       }
-      const pve = status.pveversion || '—';
-      const kern = status.kversion || '—';
+      const pve = (status.pveversion && String(status.pveversion).trim()) || '—';
+      const kern = (status.kversion && String(status.kversion).trim()) || '—';
       setLiveText(panel, 'pveversion', pve);
       setLiveText(panel, 'kversion', kern);
 
@@ -1329,22 +1505,42 @@
       updateGauge(metrics, 'CPU', cpuPct, cpuPct != null ? cpuPct + '%' : '—', cpuSub);
       updateGauge(metrics, 'RAM', memPct, memPct != null ? memPct + '%' : '—', memSub);
       updateGauge(metrics, 'Rootfs', rootPct, rootPct != null ? rootPct + '%' : '—', rootSub);
+    };
 
+    // Fetch independently so one endpoint failure does not blank charts/storage.
+    const [statusRes, rrdRes, storageRes] = await Promise.allSettled([
+      fetchJson('/api/nodes/' + enc + '/status'),
+      fetchJson('/api/nodes/' + enc + '/rrd?timeframe=hour'),
+      fetchJson('/api/nodes/' + enc + '/storage'),
+    ]);
+
+    if (statusRes.status === 'fulfilled') {
+      applyStatus(statusRes.value);
+    } else if (!(statusRes.reason && statusRes.reason.name === 'AbortError')) {
+      // Do not claim "PVE unavailable" — version fields simply failed to load.
+      setLiveText(panel, 'pveversion', 'Status fehlgeschlagen');
+      setLiveText(panel, 'kversion', '—');
+      setLiveText(panel, 'loadavg', '—');
+    }
+
+    if (rrdRes.status === 'fulfilled') {
+      const rrd = rrdRes.value || {};
       if (charts) {
         paintChart(charts, 'cpu', rrd.cpu || []);
         paintChart(charts, 'mem', rrd.mem || []);
         paintChart(charts, 'net', rrd.net || []);
       }
-      renderNodeStorage(storageEl, (storage && storage.storage) || []);
-    } catch (err) {
-      if (err && err.name === 'AbortError') return;
-      setLiveText(panel, 'pveversion', 'nicht verfügbar');
-      setLiveText(panel, 'kversion', '—');
+    } else if (!(rrdRes.reason && rrdRes.reason.name === 'AbortError')) {
       if (charts) {
         paintChart(charts, 'cpu', []);
         paintChart(charts, 'mem', []);
         paintChart(charts, 'net', []);
       }
+    }
+
+    if (storageRes.status === 'fulfilled') {
+      renderNodeStorage(storageEl, (storageRes.value && storageRes.value.storage) || []);
+    } else if (!(storageRes.reason && storageRes.reason.name === 'AbortError')) {
       if (storageEl) {
         storageEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Live-Daten fehlgeschlagen.</p>';
       }
@@ -1671,6 +1867,17 @@
   document.getElementById('fab-refresh')?.addEventListener('click', (e) => runRefresh(e.currentTarget));
 
   document.addEventListener('click', async (e) => {
+    const powerBtn = e.target.closest('[data-guest-power]');
+    if (powerBtn) {
+      e.preventDefault();
+      guestPowerAction(
+        powerBtn.getAttribute('data-guest-power'),
+        powerBtn.getAttribute('data-guest-id'),
+        powerBtn.getAttribute('data-guest-name'),
+        powerBtn
+      );
+      return;
+    }
     const actionBtn = e.target.closest('[data-docker-action]');
     if (actionBtn) {
       e.preventDefault();
