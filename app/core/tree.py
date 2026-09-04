@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.core.models import TopologyEntity, TopologySnapshot
+from app.core.models import EntityStatus, TopologyEntity, TopologySnapshot
 
 _REPLICA_SUFFIX = re.compile(r"^(.+)-(\d+)$")
 _COMPOSE_PROJECT = "com.docker.compose.project"
@@ -198,13 +198,19 @@ def build_topology_tree(snapshot: TopologySnapshot | None) -> dict[str, Any]:
                 }
             )
         node_ent = nodes_by_name.get(name)
+        running = sum(1 for g in guests if g.status == EntityStatus.RUNNING)
+        stopped = sum(1 for g in guests if g.status == EntityStatus.STOPPED)
+        meta = dict(node_ent.meta) if node_ent and node_ent.meta else {}
         nodes_out.append(
             {
                 "name": name,
                 "node": node_ent,
                 "status": node_ent.status.value if node_ent else "unknown",
+                "meta": meta,
                 "guests": guest_rows,
                 "guest_count": len(guest_rows),
+                "guest_running": running,
+                "guest_stopped": stopped,
                 "docker_count": node_docker,
             }
         )

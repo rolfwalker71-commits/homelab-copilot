@@ -210,6 +210,217 @@
 </div>
 {%- endmacro %}
 
+{% macro node_detail_panel(node_block) -%}
+{% set m = node_block.meta or {} %}
+{% set cpu_pct = m.get('cpu_pct') %}
+{% set mem_pct = m.get('mem_pct') %}
+{% set disk_pct = m.get('disk_pct') %}
+{% set maxcpu = m.get('maxcpu') %}
+{% set cpu_sub = (maxcpu|string ~ ' Kerne') if maxcpu else '' %}
+{% set mem_sub = (format_bytes(m.get('mem')) ~ ' / ' ~ format_bytes(m.get('maxmem'))) if m.get('maxmem') else '' %}
+{% set disk_sub = (format_bytes(m.get('disk')) ~ ' / ' ~ format_bytes(m.get('maxdisk'))) if m.get('maxdisk') else '' %}
+{% set icon_clock %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.25"/><path d="M8 5v3.25L10.25 10" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>
+{% endset %}
+{% set icon_cpu %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="4.5" y="4.5" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.25"/><path d="M7 2.5v2M9 2.5v2M7 11.5v2M9 11.5v2M2.5 7h2M2.5 9h2M11.5 7h2M11.5 9h2" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
+{% endset %}
+{% set icon_ram %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="4.5" width="13" height="7" rx="1.25" stroke="currentColor" stroke-width="1.25"/><path d="M4 4.5v-1M7 4.5v-1M10 4.5v-1M13 4.5v-1M4 11.5v1M7 11.5v1M10 11.5v1M4.75 7h2M9.25 7h2" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
+{% endset %}
+{% set icon_disk %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><ellipse cx="8" cy="4.25" rx="5" ry="1.75" stroke="currentColor" stroke-width="1.25"/><path d="M3 4.25v3.5c0 .97 2.24 1.75 5 1.75s5-.78 5-1.75V4.25M3 7.75v3.5c0 .97 2.24 1.75 5 1.75s5-.78 5-1.75V7.75" stroke="currentColor" stroke-width="1.25"/></svg>
+{% endset %}
+{% set icon_load %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 11.5l3-4 2.5 2.5 5.5-6.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 3.5h2.5V6" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>
+{% endset %}
+{% set icon_guest %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="2.5" width="12" height="8.5" rx="1.25" stroke="currentColor" stroke-width="1.25"/><path d="M5.5 13.5h5M8 11v2.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
+{% endset %}
+{% set icon_docker %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="5" width="2.2" height="2.2" rx="0.35" stroke="currentColor" stroke-width="1"/><rect x="5.2" y="5" width="2.2" height="2.2" rx="0.35" stroke="currentColor" stroke-width="1"/><rect x="7.9" y="5" width="2.2" height="2.2" rx="0.35" stroke="currentColor" stroke-width="1"/><rect x="5.2" y="2.3" width="2.2" height="2.2" rx="0.35" stroke="currentColor" stroke-width="1"/><path d="M2.5 9.5h9.5c1.2 0 2 .7 2 1.7S13.7 13 12.5 13H4.2C3 13 2 12.1 2 11c0-.7.4-1.3 1-1.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>
+{% endset %}
+<article class="topo-detail-panel topo-node-panel" data-node-panel="{{ node_block.name }}" data-node-detail data-node-detail-key="{{ node_block.name }}" hidden>
+  <header class="topo-detail-head row-status-{{ node_block.status }}"
+    title="{{ node_block.name }} · {{ node_block.status }}"
+    aria-label="Node {{ node_block.name }}, Status {{ node_block.status }}">
+    <div class="topo-detail-lead">
+      <button type="button"
+        class="topo-detail-toggle"
+        data-node-detail-toggle
+        aria-expanded="true"
+        title="{{ node_block.name }} ein- oder ausklappen"
+        aria-label="Node {{ node_block.name }} ein- oder ausklappen">
+        <svg class="topo-detail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+          <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <svg class="topo-detail-kind-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+          <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <div class="topo-detail-heading">
+        <div class="topo-detail-title-row">
+          <h3 class="topo-detail-name break-words">{{ node_block.name }}</h3>
+          <span class="topo-node-status-pill status-{{ node_block.status }}" data-node-live="status-pill">{{ node_block.status }}</span>
+        </div>
+        <p class="topo-detail-meta">
+          Proxmox-Node
+          {% if m.get('uptime') is not none %}
+          · Uptime <span data-node-live="uptime">{{ format_uptime(m.get('uptime')) }}</span>
+          {% else %}
+          · Uptime <span data-node-live="uptime">—</span>
+          {% endif %}
+        </p>
+        <p class="topo-node-versions" data-node-live="versions">
+          <span class="topo-node-ver-label">PVE</span>
+          <span data-node-live="pveversion">…</span>
+          <span class="topo-sep" aria-hidden="true">·</span>
+          <span class="topo-node-ver-label">Kernel</span>
+          <span data-node-live="kversion">…</span>
+        </p>
+      </div>
+    </div>
+  </header>
+
+  <div class="topo-detail-body topo-node-body">
+    <ul class="topo-detail-facts topo-node-facts" aria-label="Node-Kontext">
+      <li class="topo-fact" title="CPU-Kerne">
+        <span class="topo-fact-icon" aria-hidden="true">{{ icon_cpu|safe }}</span>
+        <span class="topo-fact-label">Kerne</span>
+        <span class="topo-fact-value" data-node-live="cores">{% if maxcpu %}{{ maxcpu }}{% else %}—{% endif %}</span>
+      </li>
+      <li class="topo-fact" title="Load Average">
+        <span class="topo-fact-icon" aria-hidden="true">{{ icon_load|safe }}</span>
+        <span class="topo-fact-label">Load</span>
+        <span class="topo-fact-value" data-node-live="loadavg">—</span>
+      </li>
+      <li class="topo-fact" title="Guests laufend / gestoppt / gesamt">
+        <span class="topo-fact-icon" aria-hidden="true">{{ icon_guest|safe }}</span>
+        <span class="topo-fact-label">Guests</span>
+        <span class="topo-fact-value">{{ node_block.guest_running }}/{{ node_block.guest_stopped }}/{{ node_block.guest_count }}</span>
+      </li>
+      <li class="topo-fact" title="Docker-Container auf diesem Node">
+        <span class="topo-fact-icon" aria-hidden="true">{{ icon_docker|safe }}</span>
+        <span class="topo-fact-label">Docker</span>
+        <span class="topo-fact-value">{{ node_block.docker_count }}</span>
+      </li>
+      {% if m.get('uptime') is not none %}
+      <li class="topo-fact" title="Node-Uptime">
+        <span class="topo-fact-icon" aria-hidden="true">{{ icon_clock|safe }}</span>
+        <span class="topo-fact-label">Uptime</span>
+        <span class="topo-fact-value" data-node-live="uptime-fact">{{ format_uptime(m.get('uptime')) }}</span>
+      </li>
+      {% endif %}
+      <li class="topo-fact" title="CPU wait / idle" data-node-live="wait-idle-fact" hidden>
+        <span class="topo-fact-icon" aria-hidden="true">{{ icon_cpu|safe }}</span>
+        <span class="topo-fact-label">Wait/Idle</span>
+        <span class="topo-fact-value" data-node-live="wait-idle">—</span>
+      </li>
+    </ul>
+
+    <div class="topo-detail-metrics topo-node-metrics is-large" data-node-metrics="{{ node_block.name }}" aria-label="Ressourcen {{ node_block.name }}">
+      <div class="topo-metric-gauges topo-node-gauges">
+        {{ metric_gauge('CPU', cpu_pct, (cpu_pct|string ~ '%') if cpu_pct is not none else '—', cpu_sub, icon_cpu) }}
+        {{ metric_gauge('RAM', mem_pct, (mem_pct|string ~ '%') if mem_pct is not none else '—', mem_sub, icon_ram) }}
+        {{ metric_gauge('Rootfs', disk_pct, (disk_pct|string ~ '%') if disk_pct is not none else '—', disk_sub or 'wird geladen…', icon_disk) }}
+      </div>
+    </div>
+
+    <div class="topo-node-charts" data-node-charts="{{ node_block.name }}" aria-label="Verläufe {{ node_block.name }}">
+      <div class="topo-chart-card" data-chart="cpu" title="CPU-Last · letzte Stunde">
+        <div class="topo-chart-head">
+          <span class="topo-chart-label">CPU · 1 Stunde</span>
+          <span class="topo-chart-hint">Auslastung</span>
+        </div>
+        <svg class="topo-chart-svg" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="CPU-Verlauf letzte Stunde">
+          <defs>
+            <linearGradient id="node-grad-cpu-{{ node_block.name }}" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.35"/>
+              <stop offset="100%" stop-color="var(--primary)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <polygon class="topo-chart-area" fill="url(#node-grad-cpu-{{ node_block.name }})" points=""></polygon>
+          <polyline class="topo-chart-line" fill="none" points=""></polyline>
+        </svg>
+      </div>
+      <div class="topo-chart-card" data-chart="mem" title="Arbeitsspeicher · letzte Stunde">
+        <div class="topo-chart-head">
+          <span class="topo-chart-label">RAM · 1 Stunde</span>
+          <span class="topo-chart-hint">Belegung</span>
+        </div>
+        <svg class="topo-chart-svg" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="RAM-Verlauf letzte Stunde">
+          <defs>
+            <linearGradient id="node-grad-mem-{{ node_block.name }}" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#2e7d32" stop-opacity="0.32"/>
+              <stop offset="100%" stop-color="#2e7d32" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <polygon class="topo-chart-area" fill="url(#node-grad-mem-{{ node_block.name }})" points=""></polygon>
+          <polyline class="topo-chart-line topo-chart-line-mem" fill="none" points=""></polyline>
+        </svg>
+      </div>
+      <div class="topo-chart-card" data-chart="net" title="Netzwerk · letzte Stunde">
+        <div class="topo-chart-head">
+          <span class="topo-chart-label">Netz · 1 Stunde</span>
+          <span class="topo-chart-hint">In + Out</span>
+        </div>
+        <svg class="topo-chart-svg" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="Netz-Verlauf letzte Stunde">
+          <defs>
+            <linearGradient id="node-grad-net-{{ node_block.name }}" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="color-mix(in srgb, var(--primary) 40%, #2e7d32)" stop-opacity="0.32"/>
+              <stop offset="100%" stop-color="color-mix(in srgb, var(--primary) 40%, #2e7d32)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <polygon class="topo-chart-area" fill="url(#node-grad-net-{{ node_block.name }})" points=""></polygon>
+          <polyline class="topo-chart-line topo-chart-line-net" fill="none" points=""></polyline>
+        </svg>
+      </div>
+    </div>
+
+    <section class="topo-node-storage" aria-labelledby="node-storage-{{ node_block.name }}">
+      <div class="topo-node-section-head">
+        <h4 id="node-storage-{{ node_block.name }}" class="topo-node-section-title">Storage</h4>
+        <p class="topo-node-section-hint">Pools auf diesem Node</p>
+      </div>
+      <div class="topo-storage-list" data-node-storage="{{ node_block.name }}">
+        <p class="topo-node-loading text-sm text-[var(--muted)]">Storage wird geladen…</p>
+      </div>
+    </section>
+
+    {% if node_block.guests %}
+    <section class="topo-node-guests" aria-labelledby="node-guests-{{ node_block.name }}">
+      <div class="topo-node-section-head">
+        <h4 id="node-guests-{{ node_block.name }}" class="topo-node-section-title">Guests</h4>
+        <p class="topo-node-section-hint">{{ node_block.guest_count }} auf {{ node_block.name }}</p>
+      </div>
+      <ul class="topo-node-guest-list" role="list">
+        {% for row in node_block.guests %}
+        {% set g = row.guest %}
+        <li>
+          <button type="button"
+            class="topo-node-guest-btn"
+            data-select-guest="{{ g.id }}"
+            title="{{ g.name }} · {{ g.status.value }}">
+            <span class="topo-rail-status topo-rail-status-{{ g.status.value }}" aria-hidden="true"></span>
+            <span class="topo-node-guest-body">
+              <span class="topo-node-guest-name break-words">{{ g.name }}</span>
+              <span class="topo-node-guest-sub">
+                {{ g.kind.value }}{% if g.vmid %} {{ g.vmid }}{% endif %}
+                {% if row.docker_count %} · {{ row.docker_count }} Docker{% endif %}
+              </span>
+            </span>
+            <span class="topo-node-guest-status">{{ g.status.value }}</span>
+          </button>
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+  </div>
+</article>
+{%- endmacro %}
+
 {% block content %}
 <section class="animate-in mb-8">
   <h1 class="font-display text-3xl font-extrabold tracking-tight sm:text-4xl leading-snug break-words">{{ app_name }}</h1>
@@ -276,7 +487,7 @@
 <section class="mb-10 animate-in animate-in-delay-3" aria-labelledby="topo-heading">
   <div class="topo-section-head">
     <h2 id="topo-heading" class="font-display text-xl font-bold leading-snug">Infrastruktur-Topologie</h2>
-    <p class="topo-section-hint">Host wählen — Apps erscheinen rechts als Stack-Karten (kein Aufklappen in der Liste).</p>
+    <p class="topo-section-hint">Node oder Guest wählen — Details und Charts erscheinen rechts.</p>
   </div>
 
   {% if topology and topology.has_anything %}
@@ -292,21 +503,31 @@
 
       {% for node_block in topology.nodes %}
       <div class="topo-rail-group" data-rail-node="{{ node_block.name }}">
-        <button type="button"
-          class="topo-rail-group-head"
-          data-rail-toggle
-          aria-expanded="true"
-          title="{{ node_block.name }} · {{ node_block.status }}"
-          aria-label="Node {{ node_block.name }} ein- oder ausklappen">
-          <svg class="topo-rail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
-            <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <svg class="topo-rail-node-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-            <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
-            <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-          </svg>
-          <span class="topo-rail-group-name">{{ node_block.name }}</span>
-        </button>
+        <div class="topo-rail-group-head">
+          <button type="button"
+            class="topo-rail-chevron-btn"
+            data-rail-toggle
+            aria-expanded="true"
+            title="Guests ein- oder ausklappen"
+            aria-label="Node {{ node_block.name }} ein- oder ausklappen">
+            <svg class="topo-rail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+              <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button type="button"
+            class="topo-rail-node-select"
+            data-select-node="{{ node_block.name }}"
+            aria-selected="false"
+            title="{{ node_block.name }} · {{ node_block.status }}"
+            aria-label="Node {{ node_block.name }} auswählen, Status {{ node_block.status }}">
+            <span class="topo-rail-status topo-rail-status-{{ node_block.status }}" aria-hidden="true"></span>
+            <svg class="topo-rail-node-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+              <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+            </svg>
+            <span class="topo-rail-group-name">{{ node_block.name }}</span>
+          </button>
+        </div>
         {% if node_block.guests %}
         <ul class="topo-rail-list" role="listbox" aria-label="Guests auf {{ node_block.name }}">
           {% for row in node_block.guests %}
@@ -339,20 +560,25 @@
 
       {% if topology.orphan_count %}
       <div class="topo-rail-group" data-rail-node="__orphans__">
-        <button type="button"
-          class="topo-rail-group-head"
-          data-rail-toggle
-          aria-expanded="true"
-          aria-label="Lokal / Sonstige ein- oder ausklappen">
-          <svg class="topo-rail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
-            <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <svg class="topo-rail-node-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-            <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
-            <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-          </svg>
-          <span class="topo-rail-group-name">Lokal / Sonstige</span>
-        </button>
+        <div class="topo-rail-group-head">
+          <button type="button"
+            class="topo-rail-chevron-btn"
+            data-rail-toggle
+            aria-expanded="true"
+            title="Liste ein- oder ausklappen"
+            aria-label="Lokal / Sonstige ein- oder ausklappen">
+            <svg class="topo-rail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+              <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <span class="topo-rail-node-static">
+            <svg class="topo-rail-node-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+              <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+            </svg>
+            <span class="topo-rail-group-name">Lokal / Sonstige</span>
+          </span>
+        </div>
         <ul class="topo-rail-list" role="listbox" aria-label="Orphan-Docker">
           <li>
             <button type="button" class="topo-rail-item" role="option" aria-selected="false"
@@ -372,8 +598,12 @@
     <div class="topo-detail" id="topo-detail">
       <div class="topo-detail-empty" id="topo-detail-empty" hidden>
         <p class="font-semibold">Kein Host gewählt</p>
-        <p class="text-sm text-[var(--muted)] mt-1">Wähle links einen Guest — dann erscheinen Compose-Stacks und Aktionen hier.</p>
+        <p class="text-sm text-[var(--muted)] mt-1">Wähle links einen Node oder Guest — Details erscheinen hier.</p>
       </div>
+
+      {% for node_block in topology.nodes %}
+      {{ node_detail_panel(node_block) }}
+      {% endfor %}
 
       {% for node_block in topology.nodes %}
       {% for row in node_block.guests %}
@@ -843,15 +1073,48 @@
     if (sshSocket || sshTerm) closeSshTerminal();
   });
 
-  /* Master-detail: guest rail → detail panel */
+  /* Master-detail: guest/node rail → detail panel */
   let sparkAbort = null;
   let sparkTimer = null;
   let selectedGuestId = '';
+  let selectedNodeName = '';
+
+  function formatBytesJs(value) {
+    const n0 = Number(value);
+    if (!Number.isFinite(n0) || n0 < 0) return '—';
+    let n = n0;
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024;
+      i += 1;
+    }
+    if (i === 0) return String(Math.round(n)) + ' ' + units[i];
+    return n.toFixed(1) + ' ' + units[i];
+  }
+
+  function formatUptimeJs(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor((total % 86400) / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    if (days) return days + 'd ' + hours + 'h';
+    if (hours) return hours + 'h ' + minutes + 'm';
+    return minutes + 'm';
+  }
+
+  function metricLevelJs(pct) {
+    const p = Number(pct);
+    if (!Number.isFinite(p)) return 'unknown';
+    if (p >= 90) return 'danger';
+    if (p >= 70) return 'warn';
+    return 'ok';
+  }
 
   function sparkPoints(values, width, height, pad) {
     const nums = (values || []).map((v) => (v == null || Number.isNaN(Number(v)) ? null : Number(v)));
     const known = nums.filter((v) => v != null);
-    if (!known.length) return { points: '', empty: true };
+    if (!known.length) return { points: '', area: '', empty: true };
     const min = Math.min(...known);
     const max = Math.max(...known);
     const span = max - min || 1;
@@ -862,9 +1125,16 @@
       if (v == null) continue;
       const x = pad + (n === 1 ? (width - 2 * pad) / 2 : (i / (n - 1)) * (width - 2 * pad));
       const y = height - pad - ((v - min) / span) * (height - 2 * pad);
-      pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+      pts.push({ x: x, y: y });
     }
-    return { points: pts.join(' '), empty: pts.length < 2 };
+    const points = pts.map((p) => p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' ');
+    let area = '';
+    if (pts.length >= 2) {
+      const bottom = height - pad;
+      area = pts[0].x.toFixed(1) + ',' + bottom.toFixed(1) + ' ' + points + ' ' +
+        pts[pts.length - 1].x.toFixed(1) + ',' + bottom.toFixed(1);
+    }
+    return { points: points, area: area, empty: pts.length < 2 };
   }
 
   function paintSpark(root, key, values) {
@@ -875,6 +1145,104 @@
     const drawn = sparkPoints(values, 96, 28, 2);
     line.setAttribute('points', drawn.points || '0,14 96,14');
     el.classList.toggle('is-empty', drawn.empty);
+  }
+
+  function paintChart(root, key, values) {
+    const el = root.querySelector('[data-chart="' + key + '"]');
+    if (!el) return;
+    const line = el.querySelector('.topo-chart-line');
+    const area = el.querySelector('.topo-chart-area');
+    if (!line) return;
+    const drawn = sparkPoints(values, 320, 96, 4);
+    line.setAttribute('points', drawn.points || '0,48 320,48');
+    if (area) area.setAttribute('points', drawn.area || '');
+    el.classList.toggle('is-empty', drawn.empty);
+  }
+
+  function updateGauge(metricsRoot, label, pct, valueText, subText) {
+    if (!metricsRoot) return;
+    const gauges = metricsRoot.querySelectorAll('.topo-metric');
+    let target = null;
+    gauges.forEach((g) => {
+      const lab = g.querySelector('.topo-metric-label');
+      if (lab && lab.textContent.trim().toLowerCase() === label.toLowerCase()) target = g;
+    });
+    if (!target) return;
+    const level = metricLevelJs(pct);
+    target.classList.remove('level-ok', 'level-warn', 'level-danger', 'level-unknown');
+    target.classList.add('level-' + level);
+    const val = target.querySelector('.topo-metric-value');
+    if (val) val.textContent = valueText != null ? valueText : '—';
+    const fill = target.querySelector('.topo-metric-bar-fill');
+    const bar = target.querySelector('.topo-metric-bar');
+    const clamped = pct == null || !Number.isFinite(Number(pct))
+      ? 0
+      : Math.max(0, Math.min(100, Number(pct)));
+    if (fill) fill.style.width = clamped + '%';
+    if (bar) {
+      if (pct == null || !Number.isFinite(Number(pct))) {
+        bar.removeAttribute('aria-valuenow');
+        bar.setAttribute('aria-valuetext', 'unbekannt');
+      } else {
+        bar.setAttribute('aria-valuenow', String(Math.round(clamped)));
+        bar.removeAttribute('aria-valuetext');
+      }
+    }
+    const sub = target.querySelector('.topo-metric-sub');
+    if (sub && subText != null) sub.textContent = subText;
+  }
+
+  function setLiveText(panel, key, text) {
+    panel.querySelectorAll('[data-node-live="' + key + '"]').forEach((el) => {
+      el.textContent = text;
+    });
+  }
+
+  function renderNodeStorage(listEl, stores) {
+    if (!listEl) return;
+    if (!stores || !stores.length) {
+      listEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Keine Storage-Pools gefunden.</p>';
+      return;
+    }
+    const parts = stores.map((s) => {
+      const pct = s.pct != null ? Number(s.pct) : null;
+      const level = metricLevelJs(pct);
+      const clamped = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+      const used = formatBytesJs(s.used);
+      const total = formatBytesJs(s.total);
+      const avail = formatBytesJs(s.avail);
+      const type = s.type ? String(s.type) : '';
+      const inactive = s.enabled === false || s.active === false;
+      return (
+        '<div class="topo-storage-row level-' + level + (inactive ? ' is-inactive' : '') + '">' +
+          '<div class="topo-storage-top">' +
+            '<span class="topo-storage-name break-words">' + escapeHtml(String(s.storage || '')) + '</span>' +
+            '<span class="topo-storage-pct">' + (pct != null ? pct.toFixed(1) + '%' : '—') + '</span>' +
+          '</div>' +
+          '<div class="topo-metric-bar" role="meter" aria-label="Storage ' + escapeHtml(String(s.storage || '')) + '"' +
+            (pct != null ? ' aria-valuenow="' + Math.round(clamped) + '"' : ' aria-valuetext="unbekannt"') +
+            ' aria-valuemin="0" aria-valuemax="100">' +
+            '<span class="topo-metric-bar-fill" style="width: ' + clamped + '%"></span>' +
+          '</div>' +
+          '<div class="topo-storage-meta">' +
+            (type ? '<span>' + escapeHtml(type) + '</span><span class="topo-sep" aria-hidden="true">·</span>' : '') +
+            '<span>' + used + ' / ' + total + '</span>' +
+            '<span class="topo-sep" aria-hidden="true">·</span>' +
+            '<span>frei ' + avail + '</span>' +
+            (inactive ? '<span class="topo-sep" aria-hidden="true">·</span><span>inaktiv</span>' : '') +
+          '</div>' +
+        '</div>'
+      );
+    });
+    listEl.innerHTML = parts.join('');
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   async function loadGuestSparks(guestId) {
@@ -900,12 +1268,100 @@
     }
   }
 
-  function scheduleGuestSparks(guestId) {
+  async function loadNodeLive(nodeName) {
+    if (!nodeName || nodeName.startsWith('__')) return;
+    const panel = document.querySelector('[data-node-panel="' + String(nodeName).replace(/"/g, '\\"') + '"]');
+    if (!panel) return;
+    if (sparkAbort) sparkAbort.abort();
+    sparkAbort = new AbortController();
+    const signal = sparkAbort.signal;
+    const enc = encodeURIComponent(nodeName);
+    const metrics = panel.querySelector('[data-node-metrics]');
+    const charts = panel.querySelector('[data-node-charts]');
+    const storageEl = panel.querySelector('[data-node-storage]');
+
+    const fetchJson = async (url) => {
+      const res = await fetch(url, { signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    };
+
+    try {
+      const [status, rrd, storage] = await Promise.all([
+        fetchJson('/api/nodes/' + enc + '/status'),
+        fetchJson('/api/nodes/' + enc + '/rrd?timeframe=hour'),
+        fetchJson('/api/nodes/' + enc + '/storage'),
+      ]);
+
+      if (status.uptime != null) {
+        const up = formatUptimeJs(status.uptime);
+        setLiveText(panel, 'uptime', up);
+        setLiveText(panel, 'uptime-fact', up);
+      }
+      if (status.cores != null) setLiveText(panel, 'cores', String(status.cores));
+      if (status.loadavg && status.loadavg.length) {
+        setLiveText(panel, 'loadavg', status.loadavg.join(' / '));
+      }
+      const pve = status.pveversion || '—';
+      const kern = status.kversion || '—';
+      setLiveText(panel, 'pveversion', pve);
+      setLiveText(panel, 'kversion', kern);
+
+      const waitIdleFact = panel.querySelector('[data-node-live="wait-idle-fact"]');
+      if (waitIdleFact && (status.wait_pct != null || status.idle_pct != null)) {
+        waitIdleFact.hidden = false;
+        const w = status.wait_pct != null ? status.wait_pct + '%' : '—';
+        const idl = status.idle_pct != null ? status.idle_pct + '%' : '—';
+        setLiveText(panel, 'wait-idle', w + ' / ' + idl);
+      }
+
+      const cpuPct = status.cpu_pct;
+      const memPct = status.memory && status.memory.pct;
+      const rootPct = status.rootfs && status.rootfs.pct;
+      const cpuSub = status.cores != null ? status.cores + ' Kerne' : '';
+      const memSub = status.memory && status.memory.total
+        ? formatBytesJs(status.memory.used) + ' / ' + formatBytesJs(status.memory.total)
+        : '';
+      const rootSub = status.rootfs && status.rootfs.total
+        ? formatBytesJs(status.rootfs.used) + ' / ' + formatBytesJs(status.rootfs.total) +
+          (status.rootfs.avail != null ? ' · frei ' + formatBytesJs(status.rootfs.avail) : '')
+        : '';
+      updateGauge(metrics, 'CPU', cpuPct, cpuPct != null ? cpuPct + '%' : '—', cpuSub);
+      updateGauge(metrics, 'RAM', memPct, memPct != null ? memPct + '%' : '—', memSub);
+      updateGauge(metrics, 'Rootfs', rootPct, rootPct != null ? rootPct + '%' : '—', rootSub);
+
+      if (charts) {
+        paintChart(charts, 'cpu', rrd.cpu || []);
+        paintChart(charts, 'mem', rrd.mem || []);
+        paintChart(charts, 'net', rrd.net || []);
+      }
+      renderNodeStorage(storageEl, (storage && storage.storage) || []);
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      setLiveText(panel, 'pveversion', 'nicht verfügbar');
+      setLiveText(panel, 'kversion', '—');
+      if (charts) {
+        paintChart(charts, 'cpu', []);
+        paintChart(charts, 'mem', []);
+        paintChart(charts, 'net', []);
+      }
+      if (storageEl) {
+        storageEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Live-Daten fehlgeschlagen.</p>';
+      }
+    }
+  }
+
+  function clearSparkTimer() {
     if (sparkTimer) {
       clearInterval(sparkTimer);
       sparkTimer = null;
     }
+  }
+
+  function scheduleGuestSparks(guestId) {
+    clearSparkTimer();
     selectedGuestId = guestId || '';
+    selectedNodeName = '';
     if (!guestId || guestId.startsWith('__')) return;
     loadGuestSparks(guestId);
     sparkTimer = setInterval(() => {
@@ -913,26 +1369,83 @@
     }, 60000);
   }
 
+  function scheduleNodeLive(nodeName) {
+    clearSparkTimer();
+    selectedNodeName = nodeName || '';
+    selectedGuestId = '';
+    if (!nodeName || nodeName.startsWith('__')) return;
+    loadNodeLive(nodeName);
+    sparkTimer = setInterval(() => {
+      if (selectedNodeName === nodeName) loadNodeLive(nodeName);
+    }, 60000);
+  }
+
+  function clearGuestSelection() {
+    document.querySelectorAll('[data-select-guest]').forEach((btn) => {
+      btn.classList.toggle('is-selected', false);
+      btn.setAttribute('aria-selected', 'false');
+    });
+    document.querySelectorAll('[data-guest-panel]').forEach((panel) => {
+      panel.hidden = true;
+    });
+  }
+
+  function clearNodeSelection() {
+    document.querySelectorAll('[data-select-node]').forEach((btn) => {
+      btn.classList.toggle('is-selected', false);
+      btn.setAttribute('aria-selected', 'false');
+    });
+    document.querySelectorAll('[data-node-panel]').forEach((panel) => {
+      panel.hidden = true;
+    });
+  }
+
   function selectTopoGuest(guestId) {
-    const items = document.querySelectorAll('[data-select-guest]');
-    const panels = document.querySelectorAll('[data-guest-panel]');
     const empty = document.getElementById('topo-detail-empty');
     let found = false;
-    items.forEach((btn) => {
+    clearNodeSelection();
+    document.querySelectorAll('[data-select-guest]').forEach((btn) => {
       const on = btn.getAttribute('data-select-guest') === guestId;
       btn.classList.toggle('is-selected', on);
       btn.setAttribute('aria-selected', on ? 'true' : 'false');
     });
-    panels.forEach((panel) => {
+    document.querySelectorAll('[data-guest-panel]').forEach((panel) => {
       const on = panel.getAttribute('data-guest-panel') === guestId;
       panel.hidden = !on;
       if (on) found = true;
     });
     if (empty) empty.hidden = found;
     try {
-      if (guestId) sessionStorage.setItem('topoSelectedGuest', guestId);
+      if (guestId) {
+        sessionStorage.setItem('topoSelectedGuest', guestId);
+        sessionStorage.removeItem('topoSelectedNode');
+      }
     } catch (_) {}
     scheduleGuestSparks(guestId);
+  }
+
+  function selectTopoNode(nodeName) {
+    const empty = document.getElementById('topo-detail-empty');
+    let found = false;
+    clearGuestSelection();
+    document.querySelectorAll('[data-select-node]').forEach((btn) => {
+      const on = btn.getAttribute('data-select-node') === nodeName;
+      btn.classList.toggle('is-selected', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-node-panel]').forEach((panel) => {
+      const on = panel.getAttribute('data-node-panel') === nodeName;
+      panel.hidden = !on;
+      if (on) found = true;
+    });
+    if (empty) empty.hidden = found;
+    try {
+      if (nodeName) {
+        sessionStorage.setItem('topoSelectedNode', nodeName);
+        sessionStorage.removeItem('topoSelectedGuest');
+      }
+    } catch (_) {}
+    scheduleNodeLive(nodeName);
   }
 
   function railOpenState() {
@@ -1019,6 +1532,37 @@
     });
   }
 
+  function nodeDetailOpenState() {
+    try {
+      return JSON.parse(localStorage.getItem('topoNodeDetailOpen') || '{}') || {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function setNodeDetailOpen(panel, open, persist) {
+    panel.classList.toggle('is-collapsed', !open);
+    const toggle = panel.querySelector('[data-node-detail-toggle]');
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (persist === false) return;
+    const key = panel.getAttribute('data-node-detail-key');
+    if (!key) return;
+    try {
+      const state = nodeDetailOpenState();
+      state[key] = open;
+      localStorage.setItem('topoNodeDetailOpen', JSON.stringify(state));
+    } catch (_) {}
+  }
+
+  function initNodeDetailCollapse() {
+    const savedOpen = nodeDetailOpenState();
+    document.querySelectorAll('[data-node-detail][data-node-detail-key]').forEach((panel) => {
+      const key = panel.getAttribute('data-node-detail-key');
+      const open = savedOpen[key] !== false;
+      setNodeDetailOpen(panel, open, false);
+    });
+  }
+
   function initTopoMasterDetail() {
     const shell = document.getElementById('topo-shell');
     if (!shell) return;
@@ -1030,6 +1574,7 @@
     });
     initStackCardCollapse();
     initGuestDetailCollapse();
+    initNodeDetailCollapse();
     const filter = document.getElementById('topo-guest-filter');
     filter?.addEventListener('input', () => {
       const q = (filter.value || '').trim().toLowerCase();
@@ -1051,6 +1596,15 @@
       }
     });
     shell.addEventListener('click', (e) => {
+      const nodeDetailToggle = e.target.closest('[data-node-detail-toggle]');
+      if (nodeDetailToggle && shell.contains(nodeDetailToggle)) {
+        e.preventDefault();
+        const panel = nodeDetailToggle.closest('[data-node-detail]');
+        if (!panel) return;
+        const open = nodeDetailToggle.getAttribute('aria-expanded') !== 'true';
+        setNodeDetailOpen(panel, open);
+        return;
+      }
       const guestDetailToggle = e.target.closest('[data-guest-detail-toggle]');
       if (guestDetailToggle && shell.contains(guestDetailToggle)) {
         e.preventDefault();
@@ -1078,20 +1632,37 @@
         setRailGroupOpen(group, open);
         return;
       }
+      const nodeBtn = e.target.closest('[data-select-node]');
+      if (nodeBtn && shell.contains(nodeBtn)) {
+        e.preventDefault();
+        selectTopoNode(nodeBtn.getAttribute('data-select-node'));
+        return;
+      }
       const btn = e.target.closest('[data-select-guest]');
       if (!btn || !shell.contains(btn)) return;
       e.preventDefault();
       selectTopoGuest(btn.getAttribute('data-select-guest'));
     });
-    let initial = null;
-    try { initial = sessionStorage.getItem('topoSelectedGuest'); } catch (_) {}
-    const exists = initial && Array.from(document.querySelectorAll('[data-guest-panel]'))
-      .some((p) => p.getAttribute('data-guest-panel') === initial);
-    if (exists) selectTopoGuest(initial);
+    let initialGuest = null;
+    let initialNode = null;
+    try {
+      initialNode = sessionStorage.getItem('topoSelectedNode');
+      initialGuest = sessionStorage.getItem('topoSelectedGuest');
+    } catch (_) {}
+    const nodeExists = initialNode && Array.from(document.querySelectorAll('[data-node-panel]'))
+      .some((p) => p.getAttribute('data-node-panel') === initialNode);
+    const guestExists = initialGuest && Array.from(document.querySelectorAll('[data-guest-panel]'))
+      .some((p) => p.getAttribute('data-guest-panel') === initialGuest);
+    if (nodeExists) selectTopoNode(initialNode);
+    else if (guestExists) selectTopoGuest(initialGuest);
     else {
       const first = document.querySelector('[data-select-guest]');
       if (first) selectTopoGuest(first.getAttribute('data-select-guest'));
-      else selectTopoGuest('');
+      else {
+        const firstNode = document.querySelector('[data-select-node]');
+        if (firstNode) selectTopoNode(firstNode.getAttribute('data-select-node'));
+        else selectTopoGuest('');
+      }
     }
   }
   initTopoMasterDetail();

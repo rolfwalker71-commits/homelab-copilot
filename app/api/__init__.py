@@ -176,6 +176,48 @@ async def guest_rrd(
         ) from exc
 
 
+def _proxmox_node_http_error(exc: Exception, *, label: str) -> HTTPException:
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, RuntimeError):
+        return HTTPException(status_code=503, detail=str(exc))
+    return HTTPException(status_code=502, detail=f"{label}: {exc}")
+
+
+@router.get("/nodes/{node}/status")
+async def node_status(node: str, request: Request) -> dict[str, Any]:
+    """Live Proxmox node status (loadavg, rootfs, versions, memory, CPU)."""
+    engine = request.app.state.discovery_engine
+    try:
+        return await engine.fetch_node_status(node)
+    except Exception as exc:
+        raise _proxmox_node_http_error(exc, label="Proxmox-Node-Status fehlgeschlagen") from exc
+
+
+@router.get("/nodes/{node}/rrd")
+async def node_rrd(
+    node: str,
+    request: Request,
+    timeframe: str = Query("hour", pattern="^(hour|day|week|month|year)$"),
+) -> dict[str, Any]:
+    """Proxmox RRD samples for node charts (CPU, RAM, Netz)."""
+    engine = request.app.state.discovery_engine
+    try:
+        return await engine.fetch_node_rrd(node, timeframe=timeframe)
+    except Exception as exc:
+        raise _proxmox_node_http_error(exc, label="Proxmox-Node-RRD fehlgeschlagen") from exc
+
+
+@router.get("/nodes/{node}/storage")
+async def node_storage(node: str, request: Request) -> dict[str, Any]:
+    """Storage pools on a Proxmox node (used / total / avail)."""
+    engine = request.app.state.discovery_engine
+    try:
+        return await engine.fetch_node_storage(node)
+    except Exception as exc:
+        raise _proxmox_node_http_error(exc, label="Proxmox-Storage fehlgeschlagen") from exc
+
+
 @router.post("/docker/compose/restart")
 async def docker_compose_restart(
     payload: DockerComposeRestartPayload,

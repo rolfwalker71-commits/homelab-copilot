@@ -270,13 +270,7 @@ class DiscoveryEngine:
                     status=_status_from_str(n.get("status")),
                     node=node_name,
                     hostname=node_name,
-                    meta={
-                        "cpu": n.get("cpu"),
-                        "maxcpu": n.get("maxcpu"),
-                        "mem": n.get("mem"),
-                        "maxmem": n.get("maxmem"),
-                        "uptime": n.get("uptime"),
-                    },
+                    meta=self._node_resource_meta(n if isinstance(n, dict) else {}),
                     discovered_at=stamp,
                     discovered_at_iso=stamp_iso,
                 )
@@ -416,6 +410,41 @@ class DiscoveryEngine:
         return entity
 
     @staticmethod
+    def _node_resource_meta(raw: dict[str, Any]) -> dict[str, Any]:
+        """Normalize Proxmox node list fields for the topology cache."""
+        cpu = raw.get("cpu")
+        mem = raw.get("mem")
+        maxmem = raw.get("maxmem")
+        maxcpu = raw.get("maxcpu")
+        meta: dict[str, Any] = {
+            "cpu": cpu,
+            "maxcpu": maxcpu,
+            "mem": mem,
+            "maxmem": maxmem,
+            "uptime": raw.get("uptime"),
+            "disk": raw.get("disk"),
+            "maxdisk": raw.get("maxdisk"),
+        }
+        try:
+            if cpu is not None:
+                meta["cpu_pct"] = round(max(0.0, float(cpu) * 100.0), 1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if mem is not None and maxmem and float(maxmem) > 0:
+                meta["mem_pct"] = round(100.0 * float(mem) / float(maxmem), 1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            disk = raw.get("disk")
+            maxdisk = raw.get("maxdisk")
+            if disk is not None and maxdisk and float(maxdisk) > 0:
+                meta["disk_pct"] = round(100.0 * float(disk) / float(maxdisk), 1)
+        except (TypeError, ValueError):
+            pass
+        return meta
+
+    @staticmethod
     def _guest_resource_meta(raw: dict[str, Any]) -> dict[str, Any]:
         """Normalize Proxmox guest resource fields for the detail header."""
         cpu = raw.get("cpu")
@@ -536,6 +565,261 @@ class DiscoveryEngine:
             "cpu": cpu,
             "net": net,
         }
+
+    async def _proxmox_authed_client(self) -> tuple[httpx.AsyncClient, dict[str, str]]:
+        """Open an authenticated Proxmox HTTP client (caller must close)."""
+        if not self.settings.proxmox_configured:
+            raise RuntimeError("Proxmox ist nicht konfiguriert.")
+        client = httpx.AsyncClient(
+            verify=self.settings.proxmox_verify_ssl,
+            timeout=httpx.Timeout(20.0, connect=8.0),
+        )
+        try:
+            headers = self._proxmox_headers()
+            if not headers and self.settings.proxmox_password:
+                headers = await self._proxmox_ticket(client)
+            if not headers:
+                await client.aclose()
+                raise RuntimeError("Keine Proxmox-Credentials verfügbar.")
+            return client, headers
+        except Exception:
+            await client.aclose()
+            raise
+
+    async def fetch_node_status(self, node: str) -> dict[str, Any]:
+        """Live ``/nodes/{node}/status/current`` normalized for the detail panel."""
+        node = (node or "").strip()
+        if not node or node.startswith("__"):
+            raise ValueError(f"Ungültiger Node-Name: {node}")
+
+        client, headers = await self._proxmox_authed_client()
+        try:
+            raw = await self._proxmox_get(
+                client, f"/nodes/{quote(node)}/status/current", headers
+            )
+        finally:
+            await client.aclose()
+
+        if not isinstance(raw, dict):
+            raise RuntimeError("Ungültige Antwort von Proxmox status/current.")
+
+        memory = raw.get("memory") if isinstance(raw.get("memory"), dict) else {}
+        rootfs = raw.get("rootfs") if isinstance(raw.get("rootfs"), dict) else {}
+        swap = raw.get("swap") if isinstance(raw.get("swap"), dict) else {}
+        cpuinfo = raw.get("cpuinfo") if isinstance(raw.get("cpuinfo"), dict) else {}
+
+        cpu = raw.get("cpu")
+        mem_used = memory.get("used")
+        mem_total = memory.get("total")
+        root_used = rootfs.get("used")
+        root_total = rootfs.get("total")
+        root_avail = rootfs.get("avail") if rootfs.get("avail") is not None else rootfs.get("free")
+
+        cpu_pct: float | None = None
+        mem_pct: float | None = None
+        rootfs_pct: float | None = None
+        try:
+            if cpu is not None:
+                cpu_pct = round(max(0.0, float(cpu) * 100.0), 1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if mem_used is not None and mem_total and float(mem_total) > 0:
+                mem_pct = round(100.0 * float(mem_used) / float(mem_total), 1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if root_used is not None and root_total and float(root_total) > 0:
+                rootfs_pct = round(100.0 * float(root_used) / float(root_total), 1)
+        except (TypeError, ValueError):
+            pass
+
+        loadavg = raw.get("loadavg")
+        load_list: list[float] = []
+        if isinstance(loadavg, (list, tuple)):
+            for item in loadavg:
+                try:
+                    load_list.append(round(float(item), 2))
+                except (TypeError, ValueError):
+                    pass
+        elif isinstance(loadavg, str):
+            for part in loadavg.replace(",", " ").split():
+                try:
+                    load_list.append(round(float(part), 2))
+                except (TypeError, ValueError):
+                    pass
+
+        wait_pct: float | None = None
+        idle_pct: float | None = None
+        try:
+            if raw.get("wait") is not None:
+                wait_pct = round(max(0.0, float(raw["wait"]) * 100.0), 1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if raw.get("idle") is not None:
+                idle_pct = round(max(0.0, float(raw["idle"]) * 100.0), 1)
+        except (TypeError, ValueError):
+            pass
+
+        cores = cpuinfo.get("cpus") or raw.get("maxcpu")
+        try:
+            cores = int(cores) if cores is not None else None
+        except (TypeError, ValueError):
+            cores = None
+
+        return {
+            "node": node,
+            "uptime": raw.get("uptime"),
+            "cpu": cpu,
+            "cpu_pct": cpu_pct,
+            "wait_pct": wait_pct,
+            "idle_pct": idle_pct,
+            "loadavg": load_list,
+            "cores": cores,
+            "cpu_model": cpuinfo.get("model") or "",
+            "memory": {
+                "used": mem_used,
+                "total": mem_total,
+                "free": memory.get("free"),
+                "available": memory.get("available"),
+                "pct": mem_pct,
+            },
+            "rootfs": {
+                "used": root_used,
+                "total": root_total,
+                "avail": root_avail,
+                "pct": rootfs_pct,
+            },
+            "swap": {
+                "used": swap.get("used"),
+                "total": swap.get("total"),
+                "free": swap.get("free"),
+            },
+            "pveversion": raw.get("pveversion") or "",
+            "kversion": raw.get("kversion") or "",
+        }
+
+    async def fetch_node_rrd(
+        self,
+        node: str,
+        *,
+        timeframe: str = "hour",
+    ) -> dict[str, Any]:
+        """Fetch Proxmox node RRD samples for CPU / memory / network charts."""
+        node = (node or "").strip()
+        if not node or node.startswith("__"):
+            raise ValueError(f"Ungültiger Node-Name: {node}")
+        if timeframe not in {"hour", "day", "week", "month", "year"}:
+            timeframe = "hour"
+
+        client, headers = await self._proxmox_authed_client()
+        try:
+            path = (
+                f"/nodes/{quote(node)}/rrddata"
+                f"?timeframe={quote(timeframe)}&cf=AVERAGE"
+            )
+            rows = await self._proxmox_get(client, path, headers) or []
+        finally:
+            await client.aclose()
+
+        cpu: list[float | None] = []
+        mem: list[float | None] = []
+        net: list[float | None] = []
+        times: list[int] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            t = row.get("time")
+            if t is None:
+                continue
+            try:
+                times.append(int(t))
+            except (TypeError, ValueError):
+                continue
+            c = row.get("cpu")
+            try:
+                cpu.append(round(float(c) * 100.0, 2) if c is not None else None)
+            except (TypeError, ValueError):
+                cpu.append(None)
+            m = row.get("mem")
+            try:
+                # Node RRD mem is typically a 0–1 fraction
+                if m is None:
+                    mem.append(None)
+                else:
+                    mv = float(m)
+                    mem.append(round(mv * 100.0 if mv <= 1.5 else mv, 2))
+            except (TypeError, ValueError):
+                mem.append(None)
+            ni, no = row.get("netin"), row.get("netout")
+            try:
+                n_val = 0.0
+                if ni is not None:
+                    n_val += float(ni)
+                if no is not None:
+                    n_val += float(no)
+                net.append(n_val if (ni is not None or no is not None) else None)
+            except (TypeError, ValueError):
+                net.append(None)
+
+        return {
+            "node": node,
+            "timeframe": timeframe,
+            "time": times,
+            "cpu": cpu,
+            "mem": mem,
+            "net": net,
+        }
+
+    async def fetch_node_storage(self, node: str) -> dict[str, Any]:
+        """List storage pools on a node with used/total/avail."""
+        node = (node or "").strip()
+        if not node or node.startswith("__"):
+            raise ValueError(f"Ungültiger Node-Name: {node}")
+
+        client, headers = await self._proxmox_authed_client()
+        try:
+            rows = await self._proxmox_get(
+                client, f"/nodes/{quote(node)}/storage", headers
+            ) or []
+        finally:
+            await client.aclose()
+
+        stores: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("storage") or row.get("name") or ""
+            if not name:
+                continue
+            total = row.get("total")
+            used = row.get("used")
+            avail = row.get("avail")
+            pct: float | None = None
+            try:
+                if used is not None and total and float(total) > 0:
+                    pct = round(100.0 * float(used) / float(total), 1)
+            except (TypeError, ValueError):
+                pass
+            active = row.get("active")
+            enabled = row.get("enabled")
+            stores.append(
+                {
+                    "storage": name,
+                    "type": row.get("type") or "",
+                    "content": row.get("content") or "",
+                    "total": total,
+                    "used": used,
+                    "avail": avail,
+                    "pct": pct,
+                    "active": bool(active) if active is not None else True,
+                    "enabled": bool(enabled) if enabled is not None else True,
+                    "shared": bool(row.get("shared")) if row.get("shared") is not None else False,
+                }
+            )
+        stores.sort(key=lambda s: str(s["storage"]).lower())
+        return {"node": node, "storage": stores}
 
     @staticmethod
     def _ips_from_lxc_config(cfg: dict[str, Any]) -> list[str]:
