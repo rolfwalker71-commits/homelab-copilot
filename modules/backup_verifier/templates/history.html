@@ -94,16 +94,18 @@
     }
     body.innerHTML = runs.map((r) => {
       const size = r.size_bytes != null ? (r.size_bytes / (1024 * 1024)).toFixed(1) + ' MiB' : '—';
-      return `<tr class="border-b border-[var(--border)] align-top">
+      return `<tr class="border-b border-[var(--border)] align-middle">
         <td class="py-2 pr-2 whitespace-nowrap">${r.created_at || ''}</td>
         <td class="py-2 pr-2"><div class="font-medium break-words">${r.stack}</div><div class="text-[var(--muted)] text-xs">${r.guest_name || ''}</div></td>
         <td class="py-2 pr-2"><span class="chip chip-${r.status === 'success' ? 'running' : r.status === 'failed' ? 'stopped' : 'unknown'}">${r.status}</span></td>
-        <td class="py-2 pr-2 flex flex-wrap gap-1">${destChip('LXC', r.lxc_status)}${destChip('Copilot', r.copilot_status)}${destChip('Syno', r.synology_status)}</td>
+        <td class="py-2 pr-2"><div class="flex flex-wrap items-center gap-1">${destChip('LXC', r.lxc_status)}${destChip('Copilot', r.copilot_status)}${destChip('Syno', r.synology_status)}</div></td>
         <td class="py-2 pr-2 whitespace-nowrap">${size}</td>
         <td class="py-2 pr-2">${r.verify_status || '—'}</td>
         <td class="py-2 whitespace-nowrap">
-          <button type="button" class="btn btn-ghost btn-xs" data-detail="${r.id}">Log</button>
-          ${['success','partial'].includes(r.status) ? `<button type="button" class="btn btn-ghost btn-xs" data-restore="${r.id}" data-stack="${r.stack}">Restore</button>` : ''}
+          <div class="flex flex-wrap items-center gap-1">
+            <button type="button" class="btn btn-ghost btn-xs" data-detail="${r.id}">Log</button>
+            ${['success','partial'].includes(r.status) ? `<button type="button" class="btn btn-ghost btn-xs" data-restore="${r.id}" data-stack="${r.stack}">Restore</button>` : ''}
+          </div>
         </td>
       </tr>`;
     }).join('');

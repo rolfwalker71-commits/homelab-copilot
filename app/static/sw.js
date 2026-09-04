@@ -1,7 +1,7 @@
 /* Homelab Operations Copilot — Service Worker (PWA)
  * Cache-first for static assets; network-first for HTML/API with offline fallback.
  */
-const CACHE_VERSION = "hlops-v12";
+const CACHE_VERSION = "hlops-v13";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const OFFLINE_URL = "/offline";
 

@@ -2063,3 +2063,14 @@ html[data-chrome="android"] .ssh-dialog {
 html[data-chrome="android"] .topo-docker-summary:active {
   opacity: 0.85;
 }
+
+/* Backup-Verifier Verlauf: center cells against multi-line Stack column */
+#history-table th,
+#history-table td {
+  vertical-align: middle;
+}
+
+#history-table td > .flex {
+  align-items: center;
+  min-height: 1.75rem;
+}
