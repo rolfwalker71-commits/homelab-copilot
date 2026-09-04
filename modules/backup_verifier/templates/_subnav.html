@@ -1,0 +1,20 @@
+{# Backup Verifier — secondary nav (Backup | Zeitplan | Verlauf) #}
+<nav class="module-subnav mb-4 flex flex-wrap items-center gap-2 animate-in" aria-label="Backup-Bereiche">
+  <a href="/modules/backup_verifier"
+     class="btn btn-sm {% if active_view == 'backup' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'backup' %}aria-current="page"{% endif %}>
+    Backup
+  </a>
+  <a href="/modules/backup_verifier/schedule"
+     class="btn btn-sm {% if active_view == 'schedule' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'schedule' %}aria-current="page"{% endif %}>
+    Zeitplan
+  </a>
+  <a href="/modules/backup_verifier/history"
+     class="btn btn-sm {% if active_view == 'history' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'history' %}aria-current="page"{% endif %}>
+    Verlauf
+  </a>
+  <a href="/" class="btn btn-ghost btn-sm">← Topologie</a>
+  <button type="button" id="btn-refresh-all" class="btn btn-ghost btn-sm">Aktualisieren</button>
+</nav>

@@ -1,0 +1,608 @@
+{% extends "base.html" %}
+{% block title %}Backup Verifier — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Modul · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Backup Verifier</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)]">
+    Compose-Stack-Backups in drei Kopien (LXC → Copilot → Synology) mit Checksum-Verify.
+  </p>
+  <aside class="mt-4 max-w-3xl rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 text-sm text-[var(--muted)]" role="note">
+    <strong class="text-[var(--text)]">Hinweis:</strong>
+    Sicherungseinheit ist der gesamte Compose-Stack — nicht einzelne Container.
+    Bind-Mounts nur, wenn der Host-Pfad auf dem LXC lesbar ist.
+    Kein Ersatz für Proxmox <code class="text-[var(--text)]">vzdump</code> (volle LXC-DR).
+  </aside>
+</section>
+
+{% include "_subnav.html" %}
+
+<div id="setup-banner" class="mb-6 hidden animate-in surface p-4 text-sm" role="status"></div>
+
+<article class="surface p-4 sm:p-5 animate-in">
+  <h2 class="font-display text-lg font-bold">Backup starten</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">
+    Preflight zeigt genau, was gesichert wird — danach bestätigen und starten.
+  </p>
+  <form id="run-form" class="mt-4 space-y-3" novalidate>
+    <div>
+      <label class="label" for="stack-select">Compose-Stack</label>
+      <select id="stack-select" class="field" required>
+        <option value="">Laden…</option>
+      </select>
+    </div>
+    <div class="flex items-center gap-3">
+      <input id="quiesce" type="checkbox" class="h-5 w-5 rounded border-[var(--border)]" checked />
+      <label for="quiesce" class="text-sm">Quiesce (Stack stoppen vor Volume-Tar)</label>
+    </div>
+    <div class="flex flex-wrap gap-2">
+      <button type="button" id="btn-preflight" class="btn btn-ghost">Preflight / Inventar</button>
+      <button type="submit" id="btn-backup" class="btn btn-primary" disabled title="Zuerst Preflight ausführen und Inventar bestätigen">Backup jetzt</button>
+    </div>
+  </form>
+  <div id="backup-progress" class="mt-4 hidden" aria-live="polite" aria-busy="false">
+    <div class="rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 sm:p-4 space-y-3">
+      <div class="flex items-start gap-3">
+        <span id="bp-spinner" class="mt-0.5 inline-block h-5 w-5 shrink-0 rounded-full border-2 border-[var(--border)] border-t-[var(--primary)] animate-spin" aria-hidden="true"></span>
+        <div class="min-w-0 flex-1">
+          <p id="bp-title" class="font-medium text-[var(--text)]">Backup läuft…</p>
+          <p id="bp-phase" class="mt-0.5 text-sm text-[var(--muted)]">Preflight</p>
+        </div>
+        <span id="bp-percent" class="shrink-0 text-sm font-medium tabular-nums text-[var(--text)]">0&nbsp;%</span>
+      </div>
+      <div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" id="bp-bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="bp-bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>
+      </div>
+      <p id="bp-message" class="text-sm text-[var(--muted)]">Status wird geladen…</p>
+      <div id="bp-dest" class="hidden flex flex-wrap gap-1.5 text-xs"></div>
+      <pre id="bp-log" class="max-h-40 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words"></pre>
+      <p id="bp-footer" class="text-sm hidden"></p>
+    </div>
+  </div>
+  <div id="preflight-box" class="mt-4 hidden text-sm" aria-live="polite"></div>
+  <p id="run-msg" class="mt-3 text-sm text-[var(--muted)]" role="status"></p>
+</article>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/backup_verifier';
+  let stacks = [];
+  let preflightOk = false;
+  let preflightKey = '';
+  let pollTimer = null;
+  let backupBusy = false;
+
+  function toast(el, msg, ok) {
+    if (!el) return;
+    el.textContent = msg;
+    el.style.color = ok === false ? 'var(--danger, #c44)' : '';
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function setBackupEnabled(on) {
+    const btn = document.getElementById('btn-backup');
+    if (!btn) return;
+    if (backupBusy) {
+      btn.disabled = true;
+      btn.title = 'Backup läuft…';
+      return;
+    }
+    btn.disabled = !on;
+    btn.title = on
+      ? 'Backup starten'
+      : 'Zuerst Preflight ausführen und Inventar bestätigen';
+  }
+
+  function stopPoll() {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function destLabel(key, val) {
+    const names = { lxc: 'LXC', copilot: 'Copilot', synology: 'Synology' };
+    const v = String(val || '—');
+    let cls = 'unknown';
+    if (v === 'ok') cls = 'running';
+    else if (v === 'failed') cls = 'stopped';
+    else if (v === 'skipped' || v === 'pending') cls = 'unknown';
+    return `<span class="chip chip-${cls}">${esc(names[key] || key)}: ${esc(v)}</span>`;
+  }
+
+  function showProgressPanel() {
+    const panel = document.getElementById('backup-progress');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    panel.setAttribute('aria-busy', 'true');
+    const spin = document.getElementById('bp-spinner');
+    if (spin) spin.classList.remove('hidden');
+    const bar = document.getElementById('bp-bar');
+    if (bar) {
+      bar.style.width = '2%';
+      bar.style.background = 'var(--primary)';
+    }
+    const wrap = document.getElementById('bp-bar-wrap');
+    if (wrap) wrap.setAttribute('aria-valuenow', '2');
+    const pct = document.getElementById('bp-percent');
+    if (pct) pct.textContent = '0 %';
+    const title = document.getElementById('bp-title');
+    if (title) {
+      title.textContent = 'Backup läuft…';
+      title.style.color = '';
+    }
+    const phase = document.getElementById('bp-phase');
+    if (phase) phase.textContent = 'Start';
+    const msg = document.getElementById('bp-message');
+    if (msg) {
+      msg.textContent = 'Job wird gestartet…';
+      msg.style.color = '';
+    }
+    const dest = document.getElementById('bp-dest');
+    if (dest) {
+      dest.classList.add('hidden');
+      dest.innerHTML = '';
+    }
+    const log = document.getElementById('bp-log');
+    if (log) log.textContent = '';
+    const foot = document.getElementById('bp-footer');
+    if (foot) {
+      foot.classList.add('hidden');
+      foot.innerHTML = '';
+    }
+  }
+
+  function renderJob(job) {
+    const pct = Math.max(0, Math.min(100, Number(job.percent) || 0));
+    const bar = document.getElementById('bp-bar');
+    if (bar) bar.style.width = pct + '%';
+    const wrap = document.getElementById('bp-bar-wrap');
+    if (wrap) wrap.setAttribute('aria-valuenow', String(pct));
+    const pctEl = document.getElementById('bp-percent');
+    if (pctEl) pctEl.textContent = pct + ' %';
+    const phase = document.getElementById('bp-phase');
+    if (phase) phase.textContent = job.phase || '—';
+    const msg = document.getElementById('bp-message');
+    if (msg) msg.textContent = job.message || '';
+    const log = document.getElementById('bp-log');
+    if (log) {
+      const lines = job.log_lines || [];
+      log.textContent = lines.slice(-12).join('\n');
+      log.scrollTop = log.scrollHeight;
+    }
+
+    const done = !!job.done;
+    const ok = !!job.ok;
+    const failed = job.status === 'failed';
+    const title = document.getElementById('bp-title');
+    const spin = document.getElementById('bp-spinner');
+    const panel = document.getElementById('backup-progress');
+
+    if (done) {
+      if (panel) panel.setAttribute('aria-busy', 'false');
+      if (spin) spin.classList.add('hidden');
+      if (title) {
+        if (failed) {
+          title.textContent = 'Backup fehlgeschlagen';
+          title.style.color = 'var(--danger, #c44)';
+        } else if (job.status === 'partial') {
+          title.textContent = 'Backup teilweise erfolgreich';
+          title.style.color = '';
+        } else {
+          title.textContent = 'Backup erfolgreich';
+          title.style.color = 'var(--chip-running, #2e7d32)';
+        }
+      }
+      if (bar) {
+        bar.style.background = failed
+          ? 'var(--danger)'
+          : 'color-mix(in srgb, var(--primary) 55%, #2e7d32)';
+      }
+      if (msg && failed && job.error) {
+        msg.textContent = job.error;
+        msg.style.color = 'var(--danger, #c44)';
+      }
+      const dest = document.getElementById('bp-dest');
+      if (dest && job.destinations) {
+        dest.classList.remove('hidden');
+        dest.innerHTML = ['lxc', 'copilot', 'synology']
+          .map((k) => destLabel(k, job.destinations[k]))
+          .join('');
+      }
+      const foot = document.getElementById('bp-footer');
+      const hist = job.history_run_url || job.history_url || '/modules/backup_verifier/history';
+      if (foot) {
+        foot.classList.remove('hidden');
+        foot.innerHTML = '<a class="underline font-medium text-[var(--primary)]" href="'
+          + esc(hist) + '">Verlauf öffnen'
+          + (job.run_id ? ' (#' + esc(job.run_id) + ')' : '')
+          + '</a>';
+      }
+    } else {
+      if (title) {
+        title.textContent = 'Backup läuft…';
+        title.style.color = '';
+      }
+      if (spin) spin.classList.remove('hidden');
+    }
+    return done;
+  }
+
+  async function pollJob(jobId) {
+    stopPoll();
+    try {
+      const res = await fetch(API + '/jobs/' + encodeURIComponent(jobId));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || 'Job-Status nicht lesbar');
+      }
+      const job = data.job || {};
+      const done = renderJob(job);
+      if (done) {
+        backupBusy = false;
+        const confirm = document.getElementById('preflight-confirm');
+        setBackupEnabled(!!(preflightOk && confirm && confirm.checked));
+        return;
+      }
+    } catch (err) {
+      const msg = document.getElementById('bp-message');
+      if (msg) {
+        msg.textContent = String(err.message || err);
+        msg.style.color = 'var(--danger, #c44)';
+      }
+      backupBusy = false;
+      setBackupEnabled(preflightOk);
+      const spin = document.getElementById('bp-spinner');
+      if (spin) spin.classList.add('hidden');
+      return;
+    }
+    pollTimer = setTimeout(() => pollJob(jobId), 900);
+  }
+
+  function resetPreflightGate() {
+    preflightOk = false;
+    preflightKey = '';
+    setBackupEnabled(false);
+    const box = document.getElementById('preflight-box');
+    if (box) {
+      box.classList.add('hidden');
+      box.innerHTML = '';
+    }
+  }
+
+  function stackKey(parsed) {
+    return parsed ? parsed.parent_id + '|' + parsed.project : '';
+  }
+
+  function yesNo(v) {
+    return v ? 'ja' : 'nein';
+  }
+
+  function renderTable(headers, rows) {
+    if (!rows.length) {
+      return '<p class="text-[var(--muted)] mt-1">Keine Einträge.</p>';
+    }
+    const th = headers.map((h) =>
+      `<th class="py-1.5 pr-2 font-medium text-[var(--muted)] whitespace-nowrap">${esc(h)}</th>`
+    ).join('');
+    const tr = rows.map((cells) =>
+      `<tr class="border-b border-[var(--border)] align-top">${
+        cells.map((c) => `<td class="py-1.5 pr-2 break-words">${c}</td>`).join('')
+      }</tr>`
+    ).join('');
+    return `<div class="mt-1 overflow-x-auto"><table class="w-full text-left text-xs sm:text-sm"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div>`;
+  }
+
+  function badge(ok, yesLabel, noLabel) {
+    const label = ok ? yesLabel : noLabel;
+    const cls = ok ? 'running' : 'stopped';
+    return `<span class="chip chip-${cls}">${esc(label)}</span>`;
+  }
+
+  function section(title, body) {
+    return `<div class="mt-3 border-t border-[var(--border)] pt-3">
+      <h3 class="font-medium text-[var(--text)]">${esc(title)}</h3>
+      ${body}
+    </div>`;
+  }
+
+  function renderInventory(inv) {
+    const s = inv.include_summary || {};
+    const host = inv.local
+      ? 'lokal (Docker-Socket)'
+      : (inv.host_ip || '—');
+
+    const head = `
+      <div class="rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 space-y-1">
+        <p class="font-medium text-[var(--text)]">Backup-Inventar</p>
+        <p><span class="text-[var(--muted)]">Stack / Projekt:</span> <strong>${esc(inv.stack || inv.project)}</strong></p>
+        <p><span class="text-[var(--muted)]">Gast / Host:</span> ${esc(inv.guest_name || '—')} · ${esc(host)}</p>
+        <p><span class="text-[var(--muted)]">Working-Dir:</span> <code class="text-xs">${esc(inv.working_dir || '—')}</code></p>
+        <p class="text-[var(--muted)] text-xs pt-1">
+          Kurz: ${s.services || 0} Service(s) · ${s.compose_files || 0} Compose ·
+          Env ${yesNo(s.env)} · ${s.named_volumes || 0} Volume(s) ·
+          ${s.bind_mounts_readable || 0} Bind(s) ·
+          ${s.databases || 0} DB-Hinweis(e)
+        </p>
+      </div>`;
+
+    const services = inv.services || [];
+    const svcRows = services.map((svc) => [
+      esc(svc.service || svc.name),
+      `<code class="text-xs">${esc(svc.image || '—')}</code>`,
+      esc(svc.status || '—'),
+      svc.db_engine
+        ? `<span class="chip chip-unknown">${esc(svc.db_engine)}</span>`
+        : '<span class="text-[var(--muted)]">—</span>',
+    ]);
+    const svcBody = renderTable(
+      ['Service / Container', 'Image', 'Status', 'DB'],
+      svcRows
+    );
+
+    const configs = inv.config_files || [];
+    const cfgRows = configs.map((c) => [
+      esc(c.kind === 'env' ? '.env' : 'Compose'),
+      `<code class="text-xs">${esc(c.path)}</code>`,
+      badge(c.exists, 'gefunden', 'fehlt'),
+      badge(c.will_backup, 'Backup ja', 'kein Backup'),
+    ]);
+    let cfgBody = renderTable(['Typ', 'Pfad', 'Status', 'Sicherung'], cfgRows);
+    if (!configs.length) {
+      cfgBody = '<p class="text-[var(--muted)] mt-1">Keine Config-Pfade ermittelt.</p>';
+    }
+
+    const vols = inv.named_volumes || [];
+    const volRows = vols.map((v) => [
+      `<code class="text-xs">${esc(v.name)}</code>`,
+      `<code class="text-xs">${esc(v.destination || '—')}</code>`,
+      badge(v.will_backup !== false, 'ja', 'nein'),
+      esc(v.note || ''),
+    ]);
+    const volBody = vols.length
+      ? renderTable(['Volume', 'Mount im Container', 'Backup', 'Hinweis'], volRows)
+      : '<p class="text-[var(--muted)] mt-1">Keine Named Volumes.</p>';
+
+    const binds = inv.bind_mounts_all || [
+      ...(inv.bind_mounts || []),
+      ...(inv.bind_mounts_skipped || []),
+    ];
+    const seenBind = new Set();
+    const bindRows = [];
+    for (const b of binds) {
+      const src = b.source || '';
+      if (seenBind.has(src)) continue;
+      seenBind.add(src);
+      const ok = !!b.will_backup;
+      bindRows.push([
+        `<code class="text-xs">${esc(src)}</code>`,
+        `<code class="text-xs">${esc(b.destination || '—')}</code>`,
+        badge(ok, 'enthalten', 'übersprungen'),
+        esc(b.reason || (ok ? 'lesbar' : 'übersprungen')),
+      ]);
+    }
+    const bindBody = bindRows.length
+      ? renderTable(['Host-Pfad', 'Container-Pfad', 'Status', 'Grund'], bindRows)
+      : '<p class="text-[var(--muted)] mt-1">Keine Bind-Mounts.</p>';
+
+    const dbs = inv.databases || [];
+    const dbRows = dbs.map((d) => [
+      esc(d.service || d.container),
+      esc(d.engine),
+      `<code class="text-xs">${esc(d.image)}</code>`,
+      badge(true, 'Quiesce empfohlen', ''),
+    ]);
+    const dbBody = dbs.length
+      ? renderTable(['Service', 'Engine', 'Image', 'Hinweis'], dbRows)
+        + '<p class="mt-1 text-xs text-[var(--muted)]">Heuristik anhand des Images (postgres/mysql/mariadb/mongo/redis). Quiesce stoppt den gesamten Stack vor dem Volume-Tar.</p>'
+      : '<p class="text-[var(--muted)] mt-1">Keine typischen DB-Images erkannt.</p>';
+
+    const notes = [...(inv.scope_notes || []), ...(inv.gaps || [])];
+    const uniqNotes = [];
+    const seenN = new Set();
+    for (const n of notes) {
+      if (seenN.has(n)) continue;
+      seenN.add(n);
+      uniqNotes.push(n);
+    }
+    const warnList = (inv.warnings || []).map((w) => `<li>${esc(w)}</li>`).join('');
+    const noteList = uniqNotes.slice(0, 12).map((n) => `<li>${esc(n)}</li>`).join('');
+    const notesBody = `
+      ${warnList ? `<ul class="mt-1 list-disc pl-5 text-[var(--muted)] space-y-0.5">${warnList}</ul>` : ''}
+      ${noteList ? `<ul class="mt-2 list-disc pl-5 text-[var(--muted)] space-y-0.5">${noteList}</ul>` : '<p class="text-[var(--muted)] mt-1">Keine weiteren Hinweise.</p>'}
+      ${(inv.anonymous_volume_count || 0) > 0
+        ? `<p class="mt-2 text-xs text-[var(--danger,#c44)]">${esc(inv.anonymous_volume_count)} anonyme Volume(s) — nicht separat im Archiv.</p>`
+        : ''}`;
+
+    const confirm = `
+      <div class="mt-4 rounded-lg border border-[var(--border)] p-3 space-y-2">
+        <label class="flex items-start gap-3 cursor-pointer">
+          <input id="preflight-confirm" type="checkbox" class="mt-0.5 h-5 w-5 rounded border-[var(--border)]" />
+          <span>Inventar geprüft — ich starte das Backup für <strong>${esc(inv.stack || inv.project)}</strong> mit dem oben gezeigten Umfang.</span>
+        </label>
+        <p class="text-xs text-[var(--muted)]">„Backup jetzt“ wird erst nach dieser Bestätigung freigeschaltet.</p>
+      </div>`;
+
+    return head
+      + section('Services / Container', svcBody)
+      + section('Konfigurationsdateien', cfgBody)
+      + section('Named Volumes', volBody)
+      + section('Bind-Mounts', bindBody)
+      + section('Datenbanken (Heuristik)', dbBody)
+      + section('Hinweise & Lücken', notesBody)
+      + confirm;
+  }
+
+  async function loadStatus() {
+    const res = await fetch(API + '/status');
+    const data = await res.json();
+    const banner = document.getElementById('setup-banner');
+    const parts = [];
+    if (!data.ssh_key_present) parts.push('SSH-Schlüssel fehlt — Remote-Backups nicht möglich.');
+    if (!data.synology.configured) parts.push('Synology nicht konfiguriert — dritter Hop wird übersprungen.');
+    else if (!data.synology.key_present) parts.push('Synology-Key fehlt.');
+    if (!data.crontab_available) parts.push('Kein crontab hier (Container?) — Zeitplan-Block manuell auf dem Host setzen.');
+    if (parts.length) {
+      banner.classList.remove('hidden');
+      banner.innerHTML = '<strong>Setup:</strong> ' + parts.join(' ');
+    } else {
+      banner.classList.add('hidden');
+    }
+  }
+
+  async function loadStacks() {
+    const res = await fetch(API + '/stacks');
+    const data = await res.json();
+    stacks = data.stacks || [];
+    const opts = stacks.map((s) => {
+      const val = encodeURIComponent(s.parent_id) + '|' + encodeURIComponent(s.stack);
+      return `<option value="${val}">${s.guest_name} · ${s.stack} (${s.containers})</option>`;
+    }).join('');
+    const empty = '<option value="">Kein Compose-Stack gefunden</option>';
+    document.getElementById('stack-select').innerHTML = opts || empty;
+  }
+
+  function parseStackVal(val) {
+    const i = val.indexOf('|');
+    if (i < 0) return null;
+    return {
+      parent_id: decodeURIComponent(val.slice(0, i)),
+      project: decodeURIComponent(val.slice(i + 1)),
+    };
+  }
+
+  document.getElementById('stack-select')?.addEventListener('change', resetPreflightGate);
+
+  document.getElementById('btn-preflight')?.addEventListener('click', async () => {
+    const parsed = parseStackVal(document.getElementById('stack-select').value);
+    const box = document.getElementById('preflight-box');
+    if (!parsed) return;
+    preflightOk = false;
+    setBackupEnabled(false);
+    box.classList.remove('hidden');
+    box.innerHTML = '<p class="text-[var(--muted)]">Inventar wird ermittelt…</p>';
+    const url = API + '/preflight?parent_id=' + encodeURIComponent(parsed.parent_id)
+      + '&project=' + encodeURIComponent(parsed.project);
+    const res = await fetch(url);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      box.innerHTML = '<p class="text-[var(--danger,#c44)]">' + esc(data.detail || 'Preflight fehlgeschlagen') + '</p>';
+      return;
+    }
+    const inv = data.inventory;
+    preflightKey = stackKey(parsed);
+    box.innerHTML = renderInventory(inv);
+    const confirm = document.getElementById('preflight-confirm');
+    confirm?.addEventListener('change', () => {
+      const same = stackKey(parseStackVal(document.getElementById('stack-select').value)) === preflightKey;
+      preflightOk = !!(confirm.checked && same);
+      setBackupEnabled(preflightOk);
+    });
+    if (inv.quiesce_recommended && document.getElementById('quiesce')) {
+      document.getElementById('quiesce').checked = true;
+    }
+  });
+
+  document.getElementById('run-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const parsed = parseStackVal(document.getElementById('stack-select').value);
+    const msg = document.getElementById('run-msg');
+    if (!parsed) return toast(msg, 'Bitte Stack wählen', false);
+    if (!preflightOk || stackKey(parsed) !== preflightKey) {
+      return toast(msg, 'Bitte zuerst Preflight ausführen und Inventar bestätigen', false);
+    }
+    const confirm = document.getElementById('preflight-confirm');
+    if (!confirm || !confirm.checked) {
+      return toast(msg, 'Bitte Inventar bestätigen', false);
+    }
+    if (backupBusy) return;
+
+    backupBusy = true;
+    setBackupEnabled(false);
+    showProgressPanel();
+    toast(msg, '');
+    msg.textContent = '';
+
+    try {
+      const res = await fetch(API + '/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parent_id: parsed.parent_id,
+          project: parsed.project,
+          quiesce: document.getElementById('quiesce').checked,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        backupBusy = false;
+        setBackupEnabled(true);
+        const err = typeof data.detail === 'string'
+          ? data.detail
+          : (data.detail && JSON.stringify(data.detail)) || 'Fehler beim Start';
+        renderJob({
+          done: true,
+          ok: false,
+          status: 'failed',
+          percent: 100,
+          phase: 'Fehler',
+          message: err,
+          error: err,
+          log_lines: [],
+          destinations: {},
+          history_url: '/modules/backup_verifier/history',
+        });
+        toast(msg, err, false);
+        return;
+      }
+      const jobId = data.job_id;
+      if (!jobId) {
+        backupBusy = false;
+        setBackupEnabled(true);
+        const hist = data.history_url || '/modules/backup_verifier/history';
+        msg.innerHTML = esc(data.message || 'Gestartet')
+          + ' <a class="underline font-medium text-[var(--primary)]" href="' + esc(hist) + '">Verlauf öffnen</a>';
+        document.getElementById('backup-progress')?.classList.add('hidden');
+        return;
+      }
+      const bpMsg = document.getElementById('bp-message');
+      if (bpMsg) bpMsg.textContent = data.message || 'Backup läuft…';
+      pollJob(jobId);
+    } catch (err) {
+      backupBusy = false;
+      setBackupEnabled(true);
+      const errText = String(err.message || err);
+      renderJob({
+        done: true,
+        ok: false,
+        status: 'failed',
+        percent: 100,
+        phase: 'Fehler',
+        message: errText,
+        error: errText,
+        log_lines: [],
+        destinations: {},
+        history_url: '/modules/backup_verifier/history',
+      });
+      toast(msg, errText, false);
+    }
+  });
+
+  async function refreshAll() {
+    await Promise.all([loadStatus(), loadStacks()]);
+  }
+  document.getElementById('btn-refresh-all')?.addEventListener('click', refreshAll);
+  refreshAll();
+})();
+</script>
+{% endblock %}

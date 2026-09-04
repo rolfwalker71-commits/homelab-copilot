@@ -1,6 +1,215 @@
 {% extends "base.html" %}
 {% block title %}Topologie — {{ app_name }}{% endblock %}
 
+{% macro docker_controls(parent_id, name, status) -%}
+<nav class="topo-docker-actions" aria-label="Steuerung {{ name }}">
+  {% if status != 'running' %}
+  <button type="button" class="btn-icon" data-docker-action="start" data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Start" aria-label="{{ name }} starten">▶</button>
+  {% else %}
+  <button type="button" class="btn-icon" data-docker-action="stop" data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Stop" aria-label="{{ name }} stoppen">■</button>
+  {% endif %}
+  <button type="button" class="btn-icon" data-docker-action="restart" data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Neustart" aria-label="{{ name }} neu starten">↻</button>
+  <button type="button" class="btn-icon" data-docker-logs data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Logs" aria-label="Logs von {{ name }}">☰</button>
+</nav>
+{%- endmacro %}
+
+{% macro docker_chip(c) -%}
+<div class="topo-docker-chip row-status-{{ c.status }}"
+  title="{{ c.name }} · {{ c.status }}{% if c.image_short %} · {{ c.image_short }}{% endif %}"
+  aria-label="{{ c.name }}, Status {{ c.status }}">
+  <span class="topo-docker-chip-name break-words">{{ c.name }}</span>
+  {% if c.image_short %}
+  <span class="topo-docker-chip-img">{{ c.image_short }}</span>
+  {% endif %}
+  {% if c.parent_id %}
+  {{ docker_controls(c.parent_id, c.name, c.status) }}
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{% macro docker_stack_card(item, guest_id) -%}
+{% set stack_key = guest_id ~ '::' ~ item.name %}
+<article class="topo-stack-card" data-stack-card data-stack-key="{{ stack_key }}">
+  <header class="topo-stack-card-head">
+    <button type="button"
+      class="topo-stack-card-toggle"
+      data-stack-toggle
+      aria-expanded="true"
+      title="{{ item.name }} ein- oder ausklappen"
+      aria-label="Stack {{ item.name }} ein- oder ausklappen">
+      <svg class="topo-stack-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+        <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="topo-stack-card-title">
+        <span class="topo-stack-name break-words">{{ item.name }}</span>
+        <span class="topo-stack-meta">· {{ item.count }} Container</span>
+        {% if item.source == 'compose' %}
+        <span class="topo-stack-badge" title="Docker Compose Projekt">Compose</span>
+        {% endif %}
+        <span class="topo-stack-dots" aria-hidden="true" title="Service-Status">
+          {% for c in item.containers %}
+          <span class="topo-stack-dot topo-stack-dot-{{ c.status }}"></span>
+          {% endfor %}
+        </span>
+      </span>
+    </button>
+    <div class="topo-stack-actions">
+    {% if item.compose_project and item.containers and item.containers[0].parent_id %}
+    <button type="button" class="btn btn-ghost btn-xs topo-stack-restart"
+      data-compose-restart
+      data-parent-id="{{ item.containers[0].parent_id }}"
+      data-project="{{ item.compose_project }}"
+      title="Alle Services des Stacks neu starten">
+      Neu starten
+    </button>
+    <button type="button" class="btn btn-ghost btn-xs"
+      data-stack-backup
+      data-parent-id="{{ item.containers[0].parent_id }}"
+      data-project="{{ item.compose_project }}"
+      title="Compose-Stack sichern (Backup Verifier)">
+      Backup
+    </button>
+    <a class="btn btn-ghost btn-xs"
+      href="/modules/backup_verifier/history"
+      title="Backup-Verlauf">
+      Verlauf
+    </a>
+    {% endif %}
+    </div>
+  </header>
+  <div class="topo-docker-chips">
+    {% for c in item.containers %}
+    {{ docker_chip(c) }}
+    {% endfor %}
+  </div>
+</article>
+{%- endmacro %}
+
+{% macro docker_panel(stacks, singles, guest_id) -%}
+<div class="topo-docker-panel">
+  {% for item in stacks %}
+  {{ docker_stack_card(item, guest_id) }}
+  {% endfor %}
+  {% if singles %}
+  <div class="topo-singles">
+    {% if stacks %}
+    <p class="topo-singles-label">Einzelcontainer</p>
+    {% endif %}
+    <div class="topo-docker-chips">
+      {% for item in singles %}
+      {{ docker_chip(item) }}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{% macro metric_gauge(label, pct, value_text, sub_text, icon) -%}
+{% set level = metric_level(pct) if pct is not none else 'unknown' %}
+{% set p = pct if pct is not none else 0 %}
+{% set clamped = 100 if p > 100 else (0 if p < 0 else p) %}
+<div class="topo-metric level-{{ level }}" title="{{ label }}: {% if pct is not none %}{{ pct }}%{% else %}unbekannt{% endif %}{% if sub_text %} · {{ sub_text }}{% endif %}">
+  <div class="topo-metric-top">
+    <span class="topo-metric-icon" aria-hidden="true">{{ icon|safe }}</span>
+    <span class="topo-metric-label">{{ label }}</span>
+    <span class="topo-metric-value">{% if pct is not none %}{{ value_text }}{% else %}—{% endif %}</span>
+  </div>
+  <div class="topo-metric-bar" role="meter"
+    aria-label="{{ label }}"
+    aria-valuemin="0" aria-valuemax="100"
+    {% if pct is not none %}aria-valuenow="{{ '%.0f'|format(clamped) }}"{% else %}aria-valuetext="unbekannt"{% endif %}>
+    <span class="topo-metric-bar-fill" style="width: {% if pct is not none %}{{ '%.1f'|format(clamped) }}%{% else %}0%{% endif %}"></span>
+  </div>
+  {% if sub_text %}
+  <span class="topo-metric-sub">{{ sub_text }}</span>
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{% macro guest_metrics(g) -%}
+{% set m = g.meta or {} %}
+{% set cpu_pct = m.get('cpu_pct') %}
+{% set mem_pct = m.get('mem_pct') %}
+{% set disk_pct = m.get('disk_pct') %}
+{% set cpus = m.get('cpus') %}
+{% set cpu_sub = (cpus|string ~ ' vCPU') if cpus else '' %}
+{% set mem_sub = (format_bytes(m.get('mem')) ~ ' / ' ~ format_bytes(m.get('maxmem'))) if m.get('maxmem') else '' %}
+{% set disk_sub = (format_bytes(m.get('disk')) ~ ' / ' ~ format_bytes(m.get('maxdisk'))) if m.get('maxdisk') else '' %}
+{% set kind_label = 'LXC' if g.kind.value == 'lxc' else ('VM' if g.kind.value == 'qemu' else g.kind.value|upper) %}
+{% set icon_node %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="2.5" width="12" height="8.5" rx="1.25" stroke="currentColor" stroke-width="1.25"/><path d="M5.5 13.5h5M8 11v2.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
+{% endset %}
+{% set icon_clock %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.25"/><path d="M8 5v3.25L10.25 10" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>
+{% endset %}
+{% set icon_shield %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2.5l4.5 1.75v3.4c0 2.55-1.9 4.85-4.5 5.6-2.6-.75-4.5-3.05-4.5-5.6V4.25L8 2.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="M6.25 8.1l1.2 1.2 2.3-2.4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>
+{% endset %}
+{% set icon_lock %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="3.5" y="7" width="9" height="6.5" rx="1.25" stroke="currentColor" stroke-width="1.25"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
+{% endset %}
+{% set icon_cpu %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="4.5" y="4.5" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.25"/><path d="M7 2.5v2M9 2.5v2M7 11.5v2M9 11.5v2M2.5 7h2M2.5 9h2M11.5 7h2M11.5 9h2" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
+{% endset %}
+{% set icon_ram %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="4.5" width="13" height="7" rx="1.25" stroke="currentColor" stroke-width="1.25"/><path d="M4 4.5v-1M7 4.5v-1M10 4.5v-1M13 4.5v-1M4 11.5v1M7 11.5v1M10 11.5v1M4.75 7h2M9.25 7h2" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
+{% endset %}
+{% set icon_disk %}
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><ellipse cx="8" cy="4.25" rx="5" ry="1.75" stroke="currentColor" stroke-width="1.25"/><path d="M3 4.25v3.5c0 .97 2.24 1.75 5 1.75s5-.78 5-1.75V4.25M3 7.75v3.5c0 .97 2.24 1.75 5 1.75s5-.78 5-1.75V7.75" stroke="currentColor" stroke-width="1.25"/></svg>
+{% endset %}
+<ul class="topo-detail-facts" aria-label="Host-Kontext">
+  {% if g.node %}
+  <li class="topo-fact" title="Proxmox-Node">
+    <span class="topo-fact-icon" aria-hidden="true">{{ icon_node|safe }}</span>
+    <span class="topo-fact-label">Node</span>
+    <span class="topo-fact-value">{{ g.node }}</span>
+  </li>
+  {% endif %}
+  {% if m.get('uptime') is not none %}
+  <li class="topo-fact" title="Laufzeit dieses {{ kind_label }}-Containers">
+    <span class="topo-fact-icon" aria-hidden="true">{{ icon_clock|safe }}</span>
+    <span class="topo-fact-label">{{ kind_label }}-Uptime</span>
+    <span class="topo-fact-value">{{ format_uptime(m.get('uptime')) }}</span>
+  </li>
+  {% endif %}
+  {% if m.get('unprivileged') %}
+  <li class="topo-fact" title="Unprivileged LXC">
+    <span class="topo-fact-icon" aria-hidden="true">{{ icon_shield|safe }}</span>
+    <span class="topo-fact-value">unprivileged</span>
+  </li>
+  {% endif %}
+  {% if m.get('lock') %}
+  <li class="topo-fact topo-fact-warn" title="Gesperrt: {{ m.get('lock') }}">
+    <span class="topo-fact-icon" aria-hidden="true">{{ icon_lock|safe }}</span>
+    <span class="topo-fact-label">Lock</span>
+    <span class="topo-fact-value">{{ m.get('lock') }}</span>
+  </li>
+  {% endif %}
+</ul>
+<div class="topo-detail-metrics" data-guest-metrics="{{ g.id }}" aria-label="Ressourcen {{ g.name }}">
+  <div class="topo-metric-gauges">
+    {{ metric_gauge('CPU', cpu_pct, (cpu_pct|string ~ '%') if cpu_pct is not none else '—', cpu_sub, icon_cpu) }}
+    {{ metric_gauge('RAM', mem_pct, (mem_pct|string ~ '%') if mem_pct is not none else '—', mem_sub, icon_ram) }}
+    {{ metric_gauge('Disk', disk_pct, (disk_pct|string ~ '%') if disk_pct is not none else '—', disk_sub, icon_disk) }}
+  </div>
+  <div class="topo-metric-sparks">
+    <div class="topo-spark" data-spark="cpu" title="CPU-Last · letzte Stunde">
+      <span class="topo-spark-label">CPU 1h</span>
+      <svg class="topo-spark-svg" viewBox="0 0 96 28" preserveAspectRatio="none" role="img" aria-label="CPU-Verlauf letzte Stunde">
+        <polyline class="topo-spark-line" fill="none" points=""></polyline>
+      </svg>
+    </div>
+    <div class="topo-spark" data-spark="net" title="Netzwerk · letzte Stunde">
+      <span class="topo-spark-label">Netz 1h</span>
+      <svg class="topo-spark-svg" viewBox="0 0 96 28" preserveAspectRatio="none" role="img" aria-label="Netz-Verlauf letzte Stunde">
+        <polyline class="topo-spark-line" fill="none" points=""></polyline>
+      </svg>
+    </div>
+  </div>
+</div>
+{%- endmacro %}
+
 {% block content %}
 <section class="animate-in mb-8">
   <p class="eyebrow">Phase 1 · Foundation</p>
@@ -66,79 +275,222 @@
 </div>
 {% endif %}
 
-<section class="mb-10 animate-in animate-in-delay-3" aria-labelledby="nodes-heading">
-  <h2 id="nodes-heading" class="font-display mb-4 text-xl font-bold leading-snug">Proxmox Nodes</h2>
-  {% if snapshot and snapshot.nodes %}
-  <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-    {% for node in snapshot.nodes %}
-    <article class="entity-card">
-      <div class="mb-2 flex items-start justify-between gap-2">
-        <h3 class="font-semibold break-words leading-snug">{{ node.name }}</h3>
-        <span class="chip chip-{{ node.status.value }}">{{ node.status.value }}</span>
-      </div>
-      <p class="text-sm text-[var(--muted)]">ID: {{ node.id }}</p>
-      {% if node.discovered_at %}
-      <p class="mt-2 text-xs text-[var(--muted)]">{{ node.discovered_at }}</p>
-      {% endif %}
-    </article>
-    {% endfor %}
+<section class="mb-10 animate-in animate-in-delay-3" aria-labelledby="topo-heading">
+  <div class="topo-section-head">
+    <h2 id="topo-heading" class="font-display text-xl font-bold leading-snug">Infrastruktur-Topologie</h2>
+    <p class="topo-section-hint">Host wählen — Apps erscheinen rechts als Stack-Karten (kein Aufklappen in der Liste).</p>
   </div>
-  {% else %}
-  <p class="text-[var(--muted)]">Keine Nodes gefunden.</p>
-  {% endif %}
-</section>
 
-<section class="mb-10" aria-labelledby="guests-heading">
-  <h2 id="guests-heading" class="font-display mb-4 text-xl font-bold leading-snug">LXC &amp; VMs</h2>
-  {% if snapshot and snapshot.guests %}
-  <div class="grid gap-3 sm:grid-cols-2">
-    {% for g in snapshot.guests %}
-    <article class="entity-card">
-      <div class="mb-2 flex items-start justify-between gap-2">
-        <div>
-          <p class="text-xs uppercase tracking-wide text-[var(--muted)]">{{ g.kind.value }} · Node {{ g.node }}</p>
-          <h3 class="font-semibold break-words leading-snug">{{ g.name }}</h3>
+  {% if topology and topology.has_anything %}
+  <div class="topo-shell" id="topo-shell">
+    <aside class="topo-rail" aria-label="Host-Liste">
+      <div class="topo-rail-top">
+        <h3 class="topo-rail-title">Hosts</h3>
+        <label class="topo-rail-filter">
+          <span class="sr-only">Hosts filtern</span>
+          <input type="search" id="topo-guest-filter" class="topo-rail-filter-input" placeholder="Suchen…" autocomplete="off" />
+        </label>
+      </div>
+
+      {% for node_block in topology.nodes %}
+      <div class="topo-rail-group" data-rail-node="{{ node_block.name }}">
+        <button type="button"
+          class="topo-rail-group-head"
+          data-rail-toggle
+          aria-expanded="true"
+          title="{{ node_block.name }} · {{ node_block.status }}"
+          aria-label="Node {{ node_block.name }} ein- oder ausklappen">
+          <svg class="topo-rail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+            <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <svg class="topo-rail-node-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+            <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          </svg>
+          <span class="topo-rail-group-name">{{ node_block.name }}</span>
+        </button>
+        {% if node_block.guests %}
+        <ul class="topo-rail-list" role="listbox" aria-label="Guests auf {{ node_block.name }}">
+          {% for row in node_block.guests %}
+          {% set g = row.guest %}
+          <li>
+            <button type="button"
+              class="topo-rail-item"
+              role="option"
+              aria-selected="false"
+              aria-label="{{ g.name }}, Status {{ g.status.value }}"
+              title="{{ g.name }} · {{ g.status.value }}"
+              data-select-guest="{{ g.id }}"
+              data-filter-text="{{ g.name }} {{ g.ip_addresses | join(' ') }} {{ g.vmid or '' }}">
+              <span class="topo-rail-status topo-rail-status-{{ g.status.value }}" aria-hidden="true"></span>
+              <span class="topo-rail-item-body">
+                <span class="topo-rail-item-name break-words">{{ g.name }}</span>
+                <span class="topo-rail-item-sub">
+                  {% if g.ip_addresses %}{{ g.ip_addresses[0] }}{% else %}{{ g.kind.value }}{% if g.vmid %} {{ g.vmid }}{% endif %}{% endif %}
+                </span>
+              </span>
+            </button>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="topo-rail-empty">Keine Guests</p>
+        {% endif %}
+      </div>
+      {% endfor %}
+
+      {% if topology.orphan_count %}
+      <div class="topo-rail-group" data-rail-node="__orphans__">
+        <button type="button"
+          class="topo-rail-group-head"
+          data-rail-toggle
+          aria-expanded="true"
+          aria-label="Lokal / Sonstige ein- oder ausklappen">
+          <svg class="topo-rail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+            <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <svg class="topo-rail-node-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+            <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          </svg>
+          <span class="topo-rail-group-name">Lokal / Sonstige</span>
+        </button>
+        <ul class="topo-rail-list" role="listbox" aria-label="Orphan-Docker">
+          <li>
+            <button type="button" class="topo-rail-item" role="option" aria-selected="false"
+              data-select-guest="__orphans__" data-filter-text="lokal sonstige orphan docker">
+              <span class="topo-rail-status topo-rail-status-unknown" aria-hidden="true"></span>
+              <span class="topo-rail-item-body">
+                <span class="topo-rail-item-name">Orphan-Container</span>
+                <span class="topo-rail-item-sub">{{ topology.orphan_count }} Docker ohne Guest</span>
+              </span>
+            </button>
+          </li>
+        </ul>
+      </div>
+      {% endif %}
+    </aside>
+
+    <div class="topo-detail" id="topo-detail">
+      <div class="topo-detail-empty" id="topo-detail-empty" hidden>
+        <p class="font-semibold">Kein Host gewählt</p>
+        <p class="text-sm text-[var(--muted)] mt-1">Wähle links einen Guest — dann erscheinen Compose-Stacks und Aktionen hier.</p>
+      </div>
+
+      {% for node_block in topology.nodes %}
+      {% for row in node_block.guests %}
+      {% set g = row.guest %}
+      <article class="topo-detail-panel" data-guest-panel="{{ g.id }}" data-guest-detail data-guest-detail-key="{{ g.id }}" hidden>
+        <header class="topo-detail-head row-status-{{ g.status.value }}"
+          title="{{ g.name }} · {{ g.status.value }}"
+          aria-label="{{ g.name }}, Status {{ g.status.value }}">
+          <div class="topo-detail-lead">
+            <button type="button"
+              class="topo-detail-toggle"
+              data-guest-detail-toggle
+              aria-expanded="true"
+              title="{{ g.name }} ein- oder ausklappen"
+              aria-label="Guest {{ g.name }} ein- oder ausklappen">
+              <svg class="topo-detail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+                <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              {% if g.kind.value == 'lxc' %}
+              <svg class="topo-detail-kind-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false" title="LXC">
+                <rect x="2.5" y="3.5" width="11" height="9" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M2.5 6.75h11M6 3.5v9M10 3.5v9" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              </svg>
+              {% elif g.kind.value == 'qemu' %}
+              <svg class="topo-detail-kind-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false" title="QEMU">
+                <rect x="2" y="2.5" width="12" height="8.5" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M5.5 13.5h5M8 11v2.5" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              {% else %}
+              <svg class="topo-detail-kind-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              </svg>
+              {% endif %}
+            </button>
+            <div class="topo-detail-heading">
+              <div class="topo-detail-title-row">
+                <h3 class="topo-detail-name break-words">{{ g.name }}</h3>
+              </div>
+              <p class="topo-detail-meta">
+                {{ g.kind.value }}{% if g.vmid %} · {{ g.vmid }}{% endif %}
+                {% if g.ip_addresses %} · {{ g.ip_addresses | join(', ') }}{% endif %}
+                {% if row.docker_count %}
+                <span class="topo-sep" aria-hidden="true">·</span>
+                <span class="topo-node-docker-n">{{ row.docker_count }} Docker</span>
+                {% if row.docker_stacks %} · {{ row.docker_stacks|length }} Stack{% if row.docker_stacks|length != 1 %}s{% endif %}{% endif %}
+                {% endif %}
+              </p>
+            </div>
+          </div>
+          <div class="topo-detail-actions">
+            {% if g.ip_addresses %}
+            <button type="button" class="btn btn-primary btn-sm"
+              data-ssh-terminal
+              data-guest-id="{{ g.id }}"
+              data-guest-name="{{ g.name }}"
+              data-guest-ip="{{ g.ip_addresses[0] }}"
+              title="SSH-Terminal (gleicher Key wie Docker-Discovery)">
+              Terminal
+            </button>
+            {% endif %}
+          </div>
+          {{ guest_metrics(g) }}
+        </header>
+
+        <div class="topo-detail-body">
+          {% if row.docker_count %}
+          <div class="topo-app-grid">
+            {{ docker_panel(row.docker_stacks, row.docker_singles, g.id) }}
+          </div>
+          {% else %}
+          <p class="topo-detail-none">Keine Docker-Container auf diesem Host entdeckt.</p>
+          {% endif %}
         </div>
-        <span class="chip chip-{{ g.status.value }}">{{ g.status.value }}</span>
-      </div>
-      {% if g.ip_addresses %}
-      <p class="text-sm">IP: {{ g.ip_addresses | join(', ') }}</p>
-      {% else %}
-      <p class="text-sm text-[var(--muted)]">Keine IP ermittelt</p>
-      {% endif %}
-      {% if g.vmid %}<p class="mt-1 text-xs text-[var(--muted)]">VMID {{ g.vmid }}</p>{% endif %}
-    </article>
-    {% endfor %}
-  </div>
-  {% else %}
-  <p class="text-[var(--muted)]">Keine Guests gefunden.</p>
-  {% endif %}
-</section>
+      </article>
+      {% endfor %}
+      {% endfor %}
 
-<section class="mb-10" aria-labelledby="docker-heading">
-  <h2 id="docker-heading" class="font-display mb-4 text-xl font-bold leading-snug">Docker Container</h2>
-  {% if snapshot and snapshot.containers %}
-  <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-    {% for c in snapshot.containers %}
-    <article class="entity-card">
-      <div class="mb-2 flex items-start justify-between gap-2">
-        <h3 class="font-semibold break-words leading-snug">{{ c.name }}</h3>
-        <span class="chip chip-{{ c.status.value }}">{{ c.status.value }}</span>
-      </div>
-      {% if c.image %}
-      <p class="text-sm break-words text-[var(--muted)]">{{ c.image }}</p>
+      {% if topology.orphan_count %}
+      <article class="topo-detail-panel" data-guest-panel="__orphans__" data-guest-detail data-guest-detail-key="__orphans__" hidden>
+        <header class="topo-detail-head">
+          <div class="topo-detail-lead">
+            <button type="button"
+              class="topo-detail-toggle"
+              data-guest-detail-toggle
+              aria-expanded="true"
+              title="Lokal / Sonstige ein- oder ausklappen"
+              aria-label="Lokal / Sonstige ein- oder ausklappen">
+              <svg class="topo-detail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+                <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <svg class="topo-detail-kind-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <div class="topo-detail-heading">
+              <div class="topo-detail-title-row">
+                <h3 class="topo-detail-name">Lokal / Sonstige</h3>
+              </div>
+              <p class="topo-detail-meta">{{ topology.orphan_count }} Docker ohne zugeordneten Guest</p>
+            </div>
+          </div>
+        </header>
+        <div class="topo-detail-body">
+          <div class="topo-app-grid">
+            {{ docker_panel(topology.orphan_stacks, topology.orphan_singles, '__orphans__') }}
+          </div>
+        </div>
+      </article>
       {% endif %}
-      {% if c.version %}
-      <p class="mt-1 text-xs">Version: {{ c.version }}</p>
-      {% endif %}
-      {% if c.parent_id %}
-      <p class="mt-2 text-xs text-[var(--muted)]">Parent: {{ c.parent_id }}</p>
-      {% endif %}
-    </article>
-    {% endfor %}
+    </div>
   </div>
   {% else %}
-  <p class="text-[var(--muted)]">Keine Docker-Container gefunden.</p>
+  <p class="text-[var(--muted)]">Keine Topologie gefunden. Starte eine Discovery oder verbinde Proxmox.</p>
   {% endif %}
 </section>
 
@@ -153,22 +505,51 @@
       <p class="mt-1 text-sm text-[var(--muted)]">Platzhalter <code>modules/patcher/</code> — registriert sich später über ModuleRegistry.</p>
       <span class="chip chip-unknown mt-3">geplant</span>
     </article>
-    <article class="entity-card" style="border-style: dashed; opacity: 0.85">
-      <h3 class="font-semibold break-words leading-snug">Smart Backup Integrity Verifier</h3>
-      <p class="mt-1 text-sm text-[var(--muted)]">Platzhalter <code>modules/backup_verifier/</code> — Topology-Hook bereit.</p>
-      <span class="chip chip-unknown mt-3">geplant</span>
-    </article>
     {% for m in modules %}
     <article class="entity-card">
       <h3 class="font-semibold break-words leading-snug">{{ m.name }} <span class="text-sm font-normal text-[var(--muted)]">v{{ m.version }}</span></h3>
       <p class="mt-1 text-sm text-[var(--muted)]">{{ m.description }}</p>
-      <span class="chip {% if m.enabled %}chip-running{% else %}chip-stopped{% endif %} mt-3">
-        {% if m.enabled %}aktiv{% else %}deaktiviert{% endif %}
-      </span>
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <span class="chip {% if m.enabled %}chip-running{% else %}chip-stopped{% endif %}">
+          {% if m.enabled %}aktiv{% else %}deaktiviert{% endif %}
+        </span>
+        {% if m.name == 'backup_verifier' %}
+        <a href="/modules/backup_verifier" class="btn btn-ghost btn-xs">Öffnen</a>
+        {% endif %}
+      </div>
     </article>
     {% endfor %}
   </div>
 </section>
+
+<div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
+
+<dialog id="logs-dialog" class="logs-dialog">
+  <form method="dialog" class="logs-dialog-form">
+    <header class="logs-dialog-head">
+      <h2 id="logs-dialog-title" class="logs-dialog-title">Container-Logs</h2>
+      <button type="submit" class="btn btn-ghost btn-sm" value="close" aria-label="Schließen">Schließen</button>
+    </header>
+    <pre id="logs-dialog-body" class="logs-dialog-body" tabindex="0">Lade…</pre>
+  </form>
+</dialog>
+
+<dialog id="ssh-dialog" class="ssh-dialog">
+  <div class="ssh-dialog-inner">
+    <header class="ssh-dialog-head">
+      <div class="ssh-dialog-heading">
+        <h2 id="ssh-dialog-title" class="ssh-dialog-title">SSH-Terminal</h2>
+        <p id="ssh-dialog-sub" class="ssh-dialog-sub">Gleicher SSH-Key wie Docker-Discovery</p>
+      </div>
+      <button type="button" id="ssh-dialog-close" class="btn btn-ghost btn-sm" aria-label="Terminal schließen">Schließen</button>
+    </header>
+    <div id="ssh-terminal" class="ssh-terminal" aria-label="SSH-Sitzung"></div>
+  </div>
+</dialog>
+{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
 {% endblock %}
 
 {% block fab %}
@@ -182,6 +563,26 @@
 
 {% block scripts %}
 <script>
+  function showToast(msg, isError) {
+    const el = document.getElementById('toast');
+    if (!el) return;
+    el.hidden = false;
+    el.textContent = msg;
+    el.classList.toggle('toast-error', !!isError);
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => { el.hidden = true; }, 4200);
+  }
+
+  async function parseError(res) {
+    try {
+      const data = await res.json();
+      if (data && data.detail) {
+        return typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+      }
+    } catch (_) {}
+    return 'HTTP ' + res.status;
+  }
+
   async function runRefresh(trigger) {
     const statusEl = document.getElementById('refresh-status');
     const btn = document.getElementById('btn-refresh');
@@ -190,17 +591,577 @@
     if (statusEl) statusEl.textContent = 'Discovery läuft…';
     try {
       const res = await fetch('/api/discovery/refresh', { method: 'POST' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      if (!res.ok) throw new Error(await parseError(res));
       const data = await res.json();
       if (statusEl) statusEl.textContent = 'Zuletzt: ' + (data.refreshed_at || '');
       window.location.reload();
     } catch (e) {
-      if (statusEl) statusEl.textContent = 'Fehler: ' + e.message;
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      const friendly = /failed to fetch|networkerror|load failed/i.test(msg)
+        ? 'Server nicht erreichbar (Failed to fetch) — läuft uvicorn auf :6655?'
+        : msg;
+      if (statusEl) statusEl.textContent = 'Fehler: ' + friendly;
+      showToast(friendly, true);
       if (btn) { btn.disabled = false; btn.textContent = 'Discovery aktualisieren'; }
       if (trigger) trigger.disabled = false;
     }
   }
+
+  async function dockerAction(action, parentId, name, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch('/api/docker/' + encodeURIComponent(action), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent_id: parentId, name: name }),
+      });
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = await res.json();
+      showToast(data.message || (action + ' OK'));
+      setTimeout(() => window.location.reload(), 700);
+    } catch (e) {
+      showToast(String(e.message || e), true);
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function composeRestart(parentId, project, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch('/api/docker/compose/restart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent_id: parentId, project: project }),
+      });
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = await res.json();
+      showToast(data.message || 'Stack neu gestartet');
+      setTimeout(() => window.location.reload(), 700);
+    } catch (e) {
+      showToast(String(e.message || e), true);
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function showLogs(parentId, name) {
+    const dialog = document.getElementById('logs-dialog');
+    const title = document.getElementById('logs-dialog-title');
+    const body = document.getElementById('logs-dialog-body');
+    if (!dialog || !body) return;
+    if (title) title.textContent = 'Logs · ' + name;
+    body.textContent = 'Lade Logs…';
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    try {
+      const q = new URLSearchParams({ parent_id: parentId, name: name, tail: '200' });
+      const res = await fetch('/api/docker/logs?' + q.toString());
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = await res.json();
+      body.textContent = data.logs || '(keine Ausgabe)';
+      body.scrollTop = body.scrollHeight;
+    } catch (e) {
+      body.textContent = 'Fehler: ' + (e.message || e);
+      showToast(String(e.message || e), true);
+    }
+  }
+
+  let sshTerm = null;
+  let sshFit = null;
+  let sshSocket = null;
+  let sshResizeObserver = null;
+  let xtermLoading = null;
+
+  function loadXterm() {
+    if (window.Terminal && getFitAddonClass()) {
+      return Promise.resolve();
+    }
+    if (xtermLoading) return xtermLoading;
+    xtermLoading = new Promise((resolve, reject) => {
+      const s1 = document.createElement('script');
+      s1.src = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js';
+      s1.onload = () => {
+        const s2 = document.createElement('script');
+        s2.src = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js';
+        s2.onload = () => resolve();
+        s2.onerror = () => reject(new Error('xterm FitAddon konnte nicht geladen werden (CDN)'));
+        document.head.appendChild(s2);
+      };
+      s1.onerror = () => reject(new Error('xterm.js konnte nicht geladen werden (CDN)'));
+      document.head.appendChild(s1);
+    });
+    return xtermLoading;
+  }
+
+  function getFitAddonClass() {
+    if (window.FitAddon && typeof window.FitAddon.FitAddon === 'function') {
+      return window.FitAddon.FitAddon;
+    }
+    if (typeof window.FitAddon === 'function') return window.FitAddon;
+    return null;
+  }
+
+  function sshWriteStatus(host, msg, isError) {
+    if (!host) return;
+    host.replaceChildren();
+    const p = document.createElement('p');
+    p.className = isError ? 'ssh-terminal-fallback ssh-terminal-fallback-error' : 'ssh-terminal-fallback';
+    p.textContent = msg;
+    host.appendChild(p);
+  }
+
+  function closeSshTerminal(opts) {
+    const keepDialog = !!(opts && opts.keepDialog);
+    const dialog = document.getElementById('ssh-dialog');
+    window.removeEventListener('resize', sendSshResize);
+    if (sshResizeObserver) {
+      try { sshResizeObserver.disconnect(); } catch (_) {}
+      sshResizeObserver = null;
+    }
+    if (sshSocket) {
+      try { sshSocket.onclose = null; sshSocket.close(); } catch (_) {}
+      sshSocket = null;
+    }
+    if (sshTerm) {
+      try { sshTerm.dispose(); } catch (_) {}
+      sshTerm = null;
+      sshFit = null;
+    }
+    const host = document.getElementById('ssh-terminal');
+    if (host) host.replaceChildren();
+    if (!keepDialog && dialog && dialog.open) dialog.close();
+  }
+
+  function sendSshResize() {
+    if (!sshSocket || sshSocket.readyState !== WebSocket.OPEN || !sshTerm) return;
+    try {
+      if (sshFit) sshFit.fit();
+      sshSocket.send(JSON.stringify({
+        type: 'resize',
+        cols: sshTerm.cols,
+        rows: sshTerm.rows,
+      }));
+    } catch (_) {}
+  }
+
+  function afterLayout(fn) {
+    requestAnimationFrame(() => requestAnimationFrame(fn));
+  }
+
+  async function openSshTerminal(guestId, guestName, guestIp) {
+    const dialog = document.getElementById('ssh-dialog');
+    const title = document.getElementById('ssh-dialog-title');
+    const sub = document.getElementById('ssh-dialog-sub');
+    const host = document.getElementById('ssh-terminal');
+    if (!dialog || !host) return;
+
+    closeSshTerminal({ keepDialog: true });
+    if (title) title.textContent = 'SSH · ' + (guestName || guestId);
+    if (sub) {
+      sub.textContent = (guestIp ? guestIp + ' · ' : '') +
+        'Browser-SSH (xterm.js) · gleicher Key wie Docker-Discovery';
+    }
+    sshWriteStatus(host, 'Terminal wird geladen…');
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+
+    try {
+      await loadXterm();
+    } catch (e) {
+      const msg = String(e.message || e);
+      sshWriteStatus(host, 'Fehler: ' + msg, true);
+      showToast(msg, true);
+      return;
+    }
+
+    const FitCls = getFitAddonClass();
+    if (!window.Terminal || !FitCls) {
+      sshWriteStatus(host, 'Fehler: Terminal-Bibliothek nicht verfügbar.', true);
+      showToast('Terminal-Bibliothek nicht verfügbar', true);
+      return;
+    }
+
+    host.replaceChildren();
+    sshTerm = new window.Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      theme: {
+        background: '#121016',
+        foreground: '#e8e0ec',
+        cursor: '#d0bcff',
+        selectionBackground: '#4a4458',
+      },
+    });
+    sshFit = new FitCls();
+    sshTerm.loadAddon(sshFit);
+    sshTerm.open(host);
+
+    await new Promise((resolve) => afterLayout(resolve));
+    try { sshFit.fit(); } catch (_) {}
+    sshTerm.focus();
+    sshTerm.writeln('\x1b[90mVerbinde WebSocket…\x1b[0m');
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = proto + '//' + location.host + '/ws/ssh/' + encodeURIComponent(guestId);
+    try {
+      sshSocket = new WebSocket(url);
+    } catch (e) {
+      sshTerm.writeln('\r\n\x1b[31mWebSocket konnte nicht geöffnet werden: ' + (e.message || e) + '\x1b[0m');
+      showToast('SSH-WebSocket-Fehler', true);
+      return;
+    }
+    sshSocket.binaryType = 'arraybuffer';
+
+    sshSocket.onopen = () => {
+      sendSshResize();
+      if (sshTerm) sshTerm.writeln('\x1b[90mWebSocket verbunden…\x1b[0m');
+    };
+    sshSocket.onmessage = (ev) => {
+      if (!sshTerm) return;
+      if (typeof ev.data === 'string') sshTerm.write(ev.data);
+      else sshTerm.write(new Uint8Array(ev.data));
+    };
+    sshSocket.onerror = () => {
+      if (sshTerm) sshTerm.writeln('\r\n\x1b[31mWebSocket-Fehler — Verbindung fehlgeschlagen.\x1b[0m');
+      showToast('SSH-WebSocket-Fehler', true);
+    };
+    sshSocket.onclose = (ev) => {
+      if (sshTerm) {
+        const extra = ev && ev.code && ev.code >= 4000 ? ' (Code ' + ev.code + ')' : '';
+        sshTerm.writeln('\r\n\x1b[90mVerbindung geschlossen.' + extra + '\x1b[0m');
+      }
+    };
+
+    sshTerm.onData((data) => {
+      if (sshSocket && sshSocket.readyState === WebSocket.OPEN) sshSocket.send(data);
+    });
+
+    sshResizeObserver = new ResizeObserver(() => sendSshResize());
+    sshResizeObserver.observe(host);
+    window.addEventListener('resize', sendSshResize);
+  }
+
+  document.getElementById('ssh-dialog-close')?.addEventListener('click', () => closeSshTerminal());
+  document.getElementById('ssh-dialog')?.addEventListener('close', () => {
+    window.removeEventListener('resize', sendSshResize);
+    if (sshSocket || sshTerm) closeSshTerminal();
+  });
+
+  /* Master-detail: guest rail → detail panel */
+  let sparkAbort = null;
+  let sparkTimer = null;
+  let selectedGuestId = '';
+
+  function sparkPoints(values, width, height, pad) {
+    const nums = (values || []).map((v) => (v == null || Number.isNaN(Number(v)) ? null : Number(v)));
+    const known = nums.filter((v) => v != null);
+    if (!known.length) return { points: '', empty: true };
+    const min = Math.min(...known);
+    const max = Math.max(...known);
+    const span = max - min || 1;
+    const n = nums.length;
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const v = nums[i];
+      if (v == null) continue;
+      const x = pad + (n === 1 ? (width - 2 * pad) / 2 : (i / (n - 1)) * (width - 2 * pad));
+      const y = height - pad - ((v - min) / span) * (height - 2 * pad);
+      pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+    }
+    return { points: pts.join(' '), empty: pts.length < 2 };
+  }
+
+  function paintSpark(root, key, values) {
+    const el = root.querySelector('[data-spark="' + key + '"]');
+    if (!el) return;
+    const line = el.querySelector('.topo-spark-line');
+    if (!line) return;
+    const drawn = sparkPoints(values, 96, 28, 2);
+    line.setAttribute('points', drawn.points || '0,14 96,14');
+    el.classList.toggle('is-empty', drawn.empty);
+  }
+
+  async function loadGuestSparks(guestId) {
+    if (!guestId || guestId.startsWith('__')) return;
+    const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
+    const metrics = panel && panel.querySelector('[data-guest-metrics]');
+    if (!metrics) return;
+    if (sparkAbort) sparkAbort.abort();
+    sparkAbort = new AbortController();
+    try {
+      const res = await fetch(
+        '/api/guests/' + encodeURIComponent(guestId) + '/rrd?timeframe=hour',
+        { signal: sparkAbort.signal }
+      );
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      paintSpark(metrics, 'cpu', data.cpu || []);
+      paintSpark(metrics, 'net', data.net || []);
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      paintSpark(metrics, 'cpu', []);
+      paintSpark(metrics, 'net', []);
+    }
+  }
+
+  function scheduleGuestSparks(guestId) {
+    if (sparkTimer) {
+      clearInterval(sparkTimer);
+      sparkTimer = null;
+    }
+    selectedGuestId = guestId || '';
+    if (!guestId || guestId.startsWith('__')) return;
+    loadGuestSparks(guestId);
+    sparkTimer = setInterval(() => {
+      if (selectedGuestId === guestId) loadGuestSparks(guestId);
+    }, 60000);
+  }
+
+  function selectTopoGuest(guestId) {
+    const items = document.querySelectorAll('[data-select-guest]');
+    const panels = document.querySelectorAll('[data-guest-panel]');
+    const empty = document.getElementById('topo-detail-empty');
+    let found = false;
+    items.forEach((btn) => {
+      const on = btn.getAttribute('data-select-guest') === guestId;
+      btn.classList.toggle('is-selected', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panels.forEach((panel) => {
+      const on = panel.getAttribute('data-guest-panel') === guestId;
+      panel.hidden = !on;
+      if (on) found = true;
+    });
+    if (empty) empty.hidden = found;
+    try {
+      if (guestId) sessionStorage.setItem('topoSelectedGuest', guestId);
+    } catch (_) {}
+    scheduleGuestSparks(guestId);
+  }
+
+  function railOpenState() {
+    try {
+      return JSON.parse(localStorage.getItem('topoRailOpen') || '{}') || {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function setRailGroupOpen(group, open, persist) {
+    group.classList.toggle('is-collapsed', !open);
+    const toggle = group.querySelector('[data-rail-toggle]');
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (persist === false) return;
+    const key = group.getAttribute('data-rail-node');
+    if (!key) return;
+    try {
+      const state = railOpenState();
+      state[key] = open;
+      localStorage.setItem('topoRailOpen', JSON.stringify(state));
+    } catch (_) {}
+  }
+
+  function stackOpenState() {
+    try {
+      return JSON.parse(localStorage.getItem('topoStackOpen') || '{}') || {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function setStackCardOpen(card, open, persist) {
+    card.classList.toggle('is-collapsed', !open);
+    const toggle = card.querySelector('[data-stack-toggle]');
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (persist === false) return;
+    const key = card.getAttribute('data-stack-key');
+    if (!key) return;
+    try {
+      const state = stackOpenState();
+      state[key] = open;
+      localStorage.setItem('topoStackOpen', JSON.stringify(state));
+    } catch (_) {}
+  }
+
+  function initStackCardCollapse() {
+    const savedOpen = stackOpenState();
+    document.querySelectorAll('[data-stack-card][data-stack-key]').forEach((card) => {
+      const key = card.getAttribute('data-stack-key');
+      const open = savedOpen[key] !== false;
+      setStackCardOpen(card, open, false);
+    });
+  }
+
+  function guestDetailOpenState() {
+    try {
+      return JSON.parse(localStorage.getItem('topoGuestDetailOpen') || '{}') || {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function setGuestDetailOpen(panel, open, persist) {
+    panel.classList.toggle('is-collapsed', !open);
+    const toggle = panel.querySelector('[data-guest-detail-toggle]');
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (persist === false) return;
+    const key = panel.getAttribute('data-guest-detail-key');
+    if (!key) return;
+    try {
+      const state = guestDetailOpenState();
+      state[key] = open;
+      localStorage.setItem('topoGuestDetailOpen', JSON.stringify(state));
+    } catch (_) {}
+  }
+
+  function initGuestDetailCollapse() {
+    const savedOpen = guestDetailOpenState();
+    document.querySelectorAll('[data-guest-detail][data-guest-detail-key]').forEach((panel) => {
+      const key = panel.getAttribute('data-guest-detail-key');
+      const open = savedOpen[key] !== false;
+      setGuestDetailOpen(panel, open, false);
+    });
+  }
+
+  function initTopoMasterDetail() {
+    const shell = document.getElementById('topo-shell');
+    if (!shell) return;
+    const savedOpen = railOpenState();
+    shell.querySelectorAll('.topo-rail-group[data-rail-node]').forEach((group) => {
+      const key = group.getAttribute('data-rail-node');
+      const open = savedOpen[key] !== false;
+      setRailGroupOpen(group, open, false);
+    });
+    initStackCardCollapse();
+    initGuestDetailCollapse();
+    const filter = document.getElementById('topo-guest-filter');
+    filter?.addEventListener('input', () => {
+      const q = (filter.value || '').trim().toLowerCase();
+      document.querySelectorAll('.topo-rail-item').forEach((btn) => {
+        const hay = (btn.getAttribute('data-filter-text') || btn.textContent || '').toLowerCase();
+        const li = btn.closest('li');
+        const show = !q || hay.includes(q);
+        if (li) li.hidden = !show;
+        else btn.hidden = !show;
+      });
+      if (q) {
+        shell.querySelectorAll('.topo-rail-group[data-rail-node]').forEach((group) => {
+          const hasVisible = Array.from(group.querySelectorAll('.topo-rail-item')).some((btn) => {
+            const li = btn.closest('li');
+            return li ? !li.hidden : !btn.hidden;
+          });
+          if (hasVisible) setRailGroupOpen(group, true, false);
+        });
+      }
+    });
+    shell.addEventListener('click', (e) => {
+      const guestDetailToggle = e.target.closest('[data-guest-detail-toggle]');
+      if (guestDetailToggle && shell.contains(guestDetailToggle)) {
+        e.preventDefault();
+        const panel = guestDetailToggle.closest('[data-guest-detail]');
+        if (!panel) return;
+        const open = guestDetailToggle.getAttribute('aria-expanded') !== 'true';
+        setGuestDetailOpen(panel, open);
+        return;
+      }
+      const stackToggle = e.target.closest('[data-stack-toggle]');
+      if (stackToggle && shell.contains(stackToggle)) {
+        e.preventDefault();
+        const card = stackToggle.closest('[data-stack-card]');
+        if (!card) return;
+        const open = stackToggle.getAttribute('aria-expanded') !== 'true';
+        setStackCardOpen(card, open);
+        return;
+      }
+      const toggle = e.target.closest('[data-rail-toggle]');
+      if (toggle && shell.contains(toggle)) {
+        e.preventDefault();
+        const group = toggle.closest('.topo-rail-group');
+        if (!group) return;
+        const open = toggle.getAttribute('aria-expanded') !== 'true';
+        setRailGroupOpen(group, open);
+        return;
+      }
+      const btn = e.target.closest('[data-select-guest]');
+      if (!btn || !shell.contains(btn)) return;
+      e.preventDefault();
+      selectTopoGuest(btn.getAttribute('data-select-guest'));
+    });
+    let initial = null;
+    try { initial = sessionStorage.getItem('topoSelectedGuest'); } catch (_) {}
+    const exists = initial && Array.from(document.querySelectorAll('[data-guest-panel]'))
+      .some((p) => p.getAttribute('data-guest-panel') === initial);
+    if (exists) selectTopoGuest(initial);
+    else {
+      const first = document.querySelector('[data-select-guest]');
+      if (first) selectTopoGuest(first.getAttribute('data-select-guest'));
+      else selectTopoGuest('');
+    }
+  }
+  initTopoMasterDetail();
+
   document.getElementById('btn-refresh')?.addEventListener('click', (e) => runRefresh(e.currentTarget));
   document.getElementById('fab-refresh')?.addEventListener('click', (e) => runRefresh(e.currentTarget));
+
+  document.addEventListener('click', async (e) => {
+    const actionBtn = e.target.closest('[data-docker-action]');
+    if (actionBtn) {
+      e.preventDefault();
+      dockerAction(
+        actionBtn.getAttribute('data-docker-action'),
+        actionBtn.getAttribute('data-parent-id'),
+        actionBtn.getAttribute('data-name'),
+        actionBtn
+      );
+      return;
+    }
+    const logsBtn = e.target.closest('[data-docker-logs]');
+    if (logsBtn) {
+      e.preventDefault();
+      showLogs(logsBtn.getAttribute('data-parent-id'), logsBtn.getAttribute('data-name'));
+      return;
+    }
+    const stackBtn = e.target.closest('[data-compose-restart]');
+    if (stackBtn) {
+      e.preventDefault();
+      composeRestart(
+        stackBtn.getAttribute('data-parent-id'),
+        stackBtn.getAttribute('data-project'),
+        stackBtn
+      );
+      return;
+    }
+    const backupBtn = e.target.closest('[data-stack-backup]');
+    if (backupBtn) {
+      e.preventDefault();
+      const parentId = backupBtn.getAttribute('data-parent-id');
+      const project = backupBtn.getAttribute('data-project');
+      if (!parentId || !project) return;
+      if (!confirm('Backup für Stack „' + project + '“ jetzt starten?')) return;
+      backupBtn.disabled = true;
+      try {
+        const res = await fetch('/api/modules/backup_verifier/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ parent_id: parentId, project: project }),
+        });
+        if (!res.ok) throw new Error(await parseError(res));
+        const data = await res.json();
+        showToast(data.message || 'Backup gestartet');
+      } catch (err) {
+        showToast(String(err.message || err), true);
+      } finally {
+        backupBtn.disabled = false;
+      }
+      return;
+    }
+    const sshBtn = e.target.closest('[data-ssh-terminal]');
+    if (sshBtn) {
+      e.preventDefault();
+      openSshTerminal(
+        sshBtn.getAttribute('data-guest-id'),
+        sshBtn.getAttribute('data-guest-name'),
+        sshBtn.getAttribute('data-guest-ip')
+      );
+    }
+  });
 </script>
 {% endblock %}

@@ -1,7 +1,7 @@
 /* Homelab Operations Copilot — Service Worker (PWA)
  * Cache-first for static assets; network-first for HTML/API with offline fallback.
  */
-const CACHE_VERSION = "hlops-v2";
+const CACHE_VERSION = "hlops-v12";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const OFFLINE_URL = "/offline";
 
@@ -28,6 +28,26 @@ self.addEventListener("activate", (event) => {
     ).then(() => self.clients.claim())
   );
 });
+
+async function networkFirstNavigation(req) {
+  // Brief retry: short backend restarts often fail the first navigation fetch.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(req);
+      if (res && res.ok) {
+        const clone = res.clone();
+        caches.open(STATIC_CACHE).then((c) => c.put(req, clone));
+      }
+      return res;
+    } catch (_) {
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 350));
+        continue;
+      }
+    }
+  }
+  return (await caches.match(req)) || (await caches.match(OFFLINE_URL));
+}
 
 self.addEventListener("fetch", (event) => {
   const req = event.request;
@@ -58,16 +78,8 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // HTML navigations: network-first, offline fallback
+  // HTML navigations: network-first (+ brief retry), offline fallback
   if (req.mode === "navigate" || (req.headers.get("accept") || "").includes("text/html")) {
-    event.respondWith(
-      fetch(req)
-        .then((res) => {
-          const clone = res.clone();
-          caches.open(STATIC_CACHE).then((c) => c.put(req, clone));
-          return res;
-        })
-        .catch(() => caches.match(req).then((c) => c || caches.match(OFFLINE_URL)))
-    );
+    event.respondWith(networkFirstNavigation(req));
   }
 });

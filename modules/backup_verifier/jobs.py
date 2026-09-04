@@ -1,0 +1,190 @@
+"""In-memory backup job registry for UI progress polling."""
+
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class BackupJob:
+    id: str
+    parent_id: str
+    project: str
+    status: str = "queued"  # queued | running | success | partial | failed
+    phase: str = "Warteschlange"
+    percent: int = 0
+    message: str = "Backup wird vorbereitet…"
+    log_lines: list[str] = field(default_factory=list)
+    run_id: int | None = None
+    error: str | None = None
+    result: dict[str, Any] | None = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        dest: dict[str, str] = {}
+        run = self.result or {}
+        if run:
+            dest = {
+                "lxc": str(run.get("lxc_status") or "—"),
+                "copilot": str(run.get("copilot_status") or "—"),
+                "synology": str(run.get("synology_status") or "—"),
+            }
+        hist = "/modules/backup_verifier/history"
+        return {
+            "job_id": self.id,
+            "id": self.id,
+            "parent_id": self.parent_id,
+            "project": self.project,
+            "status": self.status,
+            "phase": self.phase,
+            "percent": max(0, min(100, int(self.percent))),
+            "message": self.message,
+            "log_lines": self.log_lines[-40:],
+            "run_id": self.run_id,
+            "error": self.error,
+            "destinations": dest,
+            "history_url": hist,
+            "history_run_url": f"{hist}?run={self.run_id}" if self.run_id else hist,
+            "done": self.status in ("success", "partial", "failed"),
+            "ok": self.status in ("success", "partial"),
+        }
+
+
+class JobRegistry:
+    """Thread-safe in-process job store (cleared on process restart)."""
+
+    def __init__(self, *, max_jobs: int = 200) -> None:
+        self._jobs: dict[str, BackupJob] = {}
+        self._lock = threading.Lock()
+        self._max_jobs = max_jobs
+
+    def create(self, *, parent_id: str, project: str) -> BackupJob:
+        job = BackupJob(
+            id=str(uuid.uuid4()),
+            parent_id=parent_id,
+            project=project,
+            status="queued",
+            phase="Warteschlange",
+            percent=0,
+            message="Backup läuft…",
+        )
+        with self._lock:
+            self._jobs[job.id] = job
+            self._prune_locked()
+        return job
+
+    def get(self, job_id: str) -> BackupJob | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def set_running(self, job_id: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            job.status = "running"
+            job.phase = "Preflight"
+            job.percent = 2
+            job.message = "Backup läuft…"
+            job.updated_at = time.time()
+
+    def set_progress(
+        self,
+        job_id: str,
+        *,
+        phase: str | None = None,
+        percent: int | None = None,
+        message: str | None = None,
+        run_id: int | None = None,
+    ) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            if phase is not None:
+                job.phase = phase
+            if percent is not None:
+                job.percent = max(0, min(100, int(percent)))
+            if message is not None:
+                job.message = message
+            if run_id is not None:
+                job.run_id = run_id
+            if job.status == "queued":
+                job.status = "running"
+            job.updated_at = time.time()
+
+    def append_log(self, job_id: str, line: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            text = line.strip()
+            if text:
+                job.log_lines.append(text)
+                if len(job.log_lines) > 200:
+                    job.log_lines = job.log_lines[-200:]
+            job.updated_at = time.time()
+
+    def finish(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+        message: str | None = None,
+        phase: str | None = None,
+    ) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            job.status = status
+            job.percent = 100
+            job.result = result
+            if result and result.get("id") is not None:
+                try:
+                    job.run_id = int(result["id"])
+                except (TypeError, ValueError):
+                    pass
+            job.error = error
+            job.phase = phase or (
+                "Fertig"
+                if status in ("success", "partial")
+                else "Fehler"
+            )
+            if message:
+                job.message = message
+            elif status == "success":
+                job.message = "Backup erfolgreich abgeschlossen."
+            elif status == "partial":
+                job.message = "Backup teilweise erfolgreich (Ziele prüfen)."
+            elif error:
+                job.message = error
+            else:
+                job.message = "Backup fehlgeschlagen."
+            job.updated_at = time.time()
+
+    def _prune_locked(self) -> None:
+        if len(self._jobs) <= self._max_jobs:
+            return
+        # Drop oldest finished jobs first
+        finished = sorted(
+            (
+                j
+                for j in self._jobs.values()
+                if j.status in ("success", "partial", "failed")
+            ),
+            key=lambda j: j.updated_at,
+        )
+        overflow = len(self._jobs) - self._max_jobs
+        for job in finished[:overflow]:
+            self._jobs.pop(job.id, None)
+
+
+JOBS = JobRegistry()

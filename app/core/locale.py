@@ -7,6 +7,7 @@ All user-facing and persisted timestamps use:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 from zoneinfo import ZoneInfo
 
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -35,3 +36,52 @@ def iso_utc(dt: datetime | None = None) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def format_bytes(value: Any, *, digits: int = 1) -> str:
+    """Human-readable binary size (KiB/MiB/GiB), Proxmox-style."""
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if n < 0:
+        n = 0.0
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    i = 0
+    while n >= 1024 and i < len(units) - 1:
+        n /= 1024
+        i += 1
+    if i == 0:
+        return f"{int(n)} {units[i]}"
+    return f"{n:.{digits}f} {units[i]}"
+
+
+def format_uptime(seconds: Any) -> str:
+    """Compact uptime: ``12d 4h``, ``3h 12m``, or ``45m``."""
+    try:
+        total = int(float(seconds))
+    except (TypeError, ValueError):
+        return "—"
+    if total < 0:
+        total = 0
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def metric_level(pct: Any) -> str:
+    """Traffic-light level for resource percentages."""
+    try:
+        p = float(pct)
+    except (TypeError, ValueError):
+        return "unknown"
+    if p >= 90:
+        return "danger"
+    if p >= 70:
+        return "warn"
+    return "ok"

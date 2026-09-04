@@ -1,15 +1,21 @@
-"""API routes: health, topology, discovery control, setup."""
+"""API routes: health, topology, discovery control, setup, Docker control."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.config import Settings, get_settings
+from app.core import docker_control as docker_ctl
 from app.core.locale import format_de, now_berlin
 from app.core.registry import registry
+
+
+def _ssh_key_present(s: Settings) -> bool:
+    return docker_ctl.ssh_key_present(s)
+
 
 router = APIRouter(prefix="/api")
 
@@ -26,6 +32,16 @@ class SetupPayload(BaseModel):
     proxmox_verify_ssl: bool = False
     docker_use_local_socket: bool = True
     docker_ssh_user: str = "root"
+
+
+class DockerActionPayload(BaseModel):
+    parent_id: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+
+
+class DockerComposeRestartPayload(BaseModel):
+    parent_id: str = Field(..., min_length=1)
+    project: str = Field(..., min_length=1)
 
 
 @router.get("/health")
@@ -102,9 +118,7 @@ async def setup_status() -> dict[str, Any]:
         "proxmox_verify_ssl": s.proxmox_verify_ssl,
         "docker_use_local_socket": s.docker_use_local_socket,
         "docker_ssh_user": s.docker_ssh_user,
-        "docker_ssh_key_present": bool(
-            s.docker_ssh_key_path and __import__("pathlib").Path(s.docker_ssh_key_path).is_file()
-        ),
+        "docker_ssh_key_present": _ssh_key_present(s),
         "time": format_de(now_berlin()),
     }
 
@@ -135,3 +149,90 @@ async def apply_setup(payload: SetupPayload) -> dict[str, Any]:
         "proxmox_configured": s.proxmox_configured,
         "time": format_de(now_berlin()),
     }
+
+
+def _docker_http_error(exc: docker_ctl.DockerControlError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=exc.message)
+
+
+@router.get("/guests/{guest_id}/rrd")
+async def guest_rrd(
+    guest_id: str,
+    request: Request,
+    timeframe: str = Query("hour", pattern="^(hour|day|week|month|year)$"),
+) -> dict[str, Any]:
+    """Proxmox RRD samples for guest header sparklines (CPU + Net)."""
+    engine = request.app.state.discovery_engine
+    try:
+        return await engine.fetch_guest_rrd(guest_id, timeframe=timeframe)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Proxmox-RRD fehlgeschlagen: {exc}",
+        ) from exc
+
+
+@router.post("/docker/compose/restart")
+async def docker_compose_restart(
+    payload: DockerComposeRestartPayload,
+    request: Request,
+) -> dict[str, Any]:
+    """Restart all services in a Compose project on the parent guest."""
+    settings = get_settings()
+    store = request.app.state.topology_store
+    try:
+        return await docker_ctl.run_compose_restart(
+            settings,
+            parent_id=payload.parent_id,
+            project=payload.project,
+            snapshot=store.snapshot,
+        )
+    except docker_ctl.DockerControlError as exc:
+        raise _docker_http_error(exc) from exc
+
+
+@router.post("/docker/{action}")
+async def docker_container_action(
+    action: Literal["start", "stop", "restart"],
+    payload: DockerActionPayload,
+    request: Request,
+) -> dict[str, Any]:
+    """Start / Stop / Restart a container via SSH (or local Docker socket)."""
+    settings = get_settings()
+    store = request.app.state.topology_store
+    try:
+        return await docker_ctl.run_container_action(
+            settings,
+            parent_id=payload.parent_id,
+            name=payload.name,
+            action=action,
+            snapshot=store.snapshot,
+        )
+    except docker_ctl.DockerControlError as exc:
+        raise _docker_http_error(exc) from exc
+
+
+@router.get("/docker/logs")
+async def docker_logs(
+    request: Request,
+    parent_id: str = Query(..., min_length=1),
+    name: str = Query(..., min_length=1),
+    tail: int = Query(200, ge=1, le=2000),
+) -> dict[str, Any]:
+    """Return last N lines of ``docker logs`` for a container."""
+    settings = get_settings()
+    store = request.app.state.topology_store
+    try:
+        return await docker_ctl.fetch_logs(
+            settings,
+            parent_id=parent_id,
+            name=name,
+            snapshot=store.snapshot,
+            tail=tail,
+        )
+    except docker_ctl.DockerControlError as exc:
+        raise _docker_http_error(exc) from exc

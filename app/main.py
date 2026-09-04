@@ -13,11 +13,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.api import router as api_router
+from app.api.ssh_ws import router as ssh_ws_router
 from app.config import get_settings
 from app.core.discovery import DiscoveryEngine
-from app.core.locale import format_de, now_berlin
+from app.core.locale import (
+    format_bytes,
+    format_de,
+    format_uptime,
+    metric_level,
+    now_berlin,
+)
 from app.core.registry import discover_and_load_modules, registry
 from app.core.topology import TopologyStore
+from app.core.tree import build_topology_tree
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +37,9 @@ logger = logging.getLogger("homelab-copilot")
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 TEMPLATES.env.globals["format_de"] = format_de
+TEMPLATES.env.globals["format_bytes"] = format_bytes
+TEMPLATES.env.globals["format_uptime"] = format_uptime
+TEMPLATES.env.globals["metric_level"] = metric_level
 
 
 async def _discovery_loop(app: FastAPI) -> None:
@@ -113,6 +124,7 @@ def create_app() -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
     app.include_router(api_router)
+    app.include_router(ssh_ws_router)
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> HTMLResponse:
@@ -126,6 +138,7 @@ def create_app() -> FastAPI:
                 "app_name": settings.app_name,
                 "app_version": settings.app_version,
                 "snapshot": snap,
+                "topology": build_topology_tree(snap),
                 "modules": modules,
                 "proxmox_configured": settings.proxmox_configured,
                 "now": format_de(now_berlin()),

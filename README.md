@@ -53,6 +53,21 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 6655 --reload
 | `DOCKER_SSH_KEY_PATH` | Key für Remote-Docker in LXCs (Default `/data/ssh/id_ed25519`) |
 | `DISCOVERY_INTERVAL_SECONDS` | Auto-Refresh (Default 300) |
 
+### Proxmox API-Token ACL (wichtig)
+
+Tokens mit **Privilege Separation** erben **nicht** die Rechte von `root@pam`. Ohne ACL liefert Proxmox oft **HTTP 200 mit leerer** `/lxc`-/`/qemu`-Liste (wirkt wie „0 Guests“).
+
+In der Proxmox-UI: **Datacenter → Permissions → Add**
+
+| Feld | Wert |
+|------|------|
+| Path | `/` |
+| API Token | `root@pam!copilot` (bzw. dein Token) |
+| Role | `PVEAuditor` (enthält `VM.Audit` + `Sys.Audit`) |
+| Propagate | ja |
+
+Alternativ Privilege Separation am Token deaktivieren (Token erbt dann User-Rechte) — weniger restriktiv.
+
 Alternativ: Setup-Assistent unter `/setup` (Laufzeit; für Persistenz Env-Vars setzen).
 
 ## PWA / Mobile

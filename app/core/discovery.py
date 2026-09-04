@@ -46,6 +46,19 @@ class DiscoveryEngine:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    @staticmethod
+    def _exc_text(exc: BaseException) -> str:
+        """httpx timeouts often have empty str(); keep a useful message."""
+        text = str(exc).strip()
+        if text:
+            return text
+        cause = exc.__cause__ or exc.__context__
+        if cause is not None:
+            nested = str(cause).strip()
+            if nested:
+                return f"{type(exc).__name__}: {nested}"
+        return type(exc).__name__
+
     async def refresh(self) -> TopologySnapshot:
         now = now_berlin()
         errors: list[str] = []
@@ -55,9 +68,10 @@ class DiscoveryEngine:
 
         if self.settings.proxmox_configured:
             try:
-                nodes, guests = await self._discover_proxmox()
+                nodes, guests, px_errors = await self._discover_proxmox()
+                errors.extend(px_errors)
             except Exception as exc:
-                msg = f"Proxmox-Discovery fehlgeschlagen: {exc}"
+                msg = f"Proxmox-Discovery fehlgeschlagen: {self._exc_text(exc)}"
                 logger.exception(msg)
                 errors.append(msg)
         else:
@@ -71,14 +85,16 @@ class DiscoveryEngine:
             local_ctrs = await self._discover_docker_local()
             containers.extend(local_ctrs)
         except Exception as exc:
-            msg = f"Lokale Docker-Discovery fehlgeschlagen: {exc}"
+            msg = f"Lokale Docker-Discovery fehlgeschlagen: {self._exc_text(exc)}"
             logger.warning(msg)
             errors.append(msg)
 
         ssh_targets = self._collect_ssh_targets(guests)
         if ssh_targets:
-            remote = await self._discover_docker_ssh_many(ssh_targets)
+            remote, ssh_err = await self._discover_docker_ssh_many(ssh_targets)
             containers.extend(remote)
+            if ssh_err:
+                errors.append(ssh_err)
 
         return TopologySnapshot(
             refreshed_at=format_de(now),
@@ -126,10 +142,64 @@ class DiscoveryEngine:
         resp.raise_for_status()
         return resp.json().get("data")
 
-    async def _discover_proxmox(self) -> tuple[list[TopologyEntity], list[TopologyEntity]]:
+    async def _probe_token_acl(
+        self, client: httpx.AsyncClient, headers: dict[str, str]
+    ) -> list[str]:
+        """Detect privilege-separated tokens without VM.Audit / Sys.Audit.
+
+        Proxmox often returns HTTP 200 with an empty list for /lxc and /qemu when
+        the token lacks ACL — that looks like "no guests" instead of 403.
+        """
+        hints: list[str] = []
+        try:
+            perms = await self._proxmox_get(client, "/access/permissions", headers)
+        except Exception as exc:
+            hints.append(
+                f"Proxmox-Berechtigungen konnten nicht geprüft werden: {self._exc_text(exc)}"
+            )
+            return hints
+
+        if not perms:
+            hints.append(
+                "API-Token hat keine effektiven Rechte (/access/permissions ist leer). "
+                "Bei Privilege Separation erbt der Token NICHT die Rechte von root@pam. "
+                "In der Proxmox-UI unter Datacenter → Permissions dem Token "
+                f"{self._token_acl_subject()} die Rolle PVEAuditor (oder VM.Audit + Sys.Audit) "
+                "auf Pfad `/` mit Propagate zuweisen — danach Discovery erneut starten."
+            )
+            return hints
+
+        flat = " ".join(
+            " ".join(v) if isinstance(v, list) else str(v)
+            for v in (perms.values() if isinstance(perms, dict) else [])
+        )
+        if "VM.Audit" not in flat and "Administrator" not in flat:
+            hints.append(
+                "API-Token fehlt VM.Audit — LXC/VM-Listen bleiben leer. "
+                "Rolle PVEAuditor (oder VM.Audit) auf `/` für "
+                f"{self._token_acl_subject()} setzen."
+            )
+        if "Sys.Audit" not in flat and "Administrator" not in flat:
+            hints.append(
+                "API-Token fehlt Sys.Audit — Node-Details und Cluster-Status eingeschränkt. "
+                "PVEAuditor auf `/` deckt Sys.Audit mit ab."
+            )
+        return hints
+
+    def _token_acl_subject(self) -> str:
+        s = self.settings
+        tid = s.proxmox_token_id or "?"
+        if "!" in tid:
+            return tid
+        return f"{s.proxmox_user}!{tid}"
+
+    async def _discover_proxmox(
+        self,
+    ) -> tuple[list[TopologyEntity], list[TopologyEntity], list[str]]:
         s = self.settings
         nodes: list[TopologyEntity] = []
         guests: list[TopologyEntity] = []
+        errors: list[str] = []
         stamp = format_de()
         stamp_iso = iso_utc()
 
@@ -140,12 +210,23 @@ class DiscoveryEngine:
             headers = self._proxmox_headers()
             if not headers and s.proxmox_password:
                 headers = await self._proxmox_ticket(client)
+            if not headers:
+                return nodes, guests, [
+                    "Keine Proxmox-Auth: PROXMOX_TOKEN_SECRET oder PROXMOX_PASSWORD setzen."
+                ]
+
+            # Surface ACL issues early (empty guest lists are usually permissions, not parsing)
+            errors.extend(await self._probe_token_acl(client, headers))
 
             node_list = await self._proxmox_get(client, "/nodes", headers)
+            node_names: list[str] = []
             for n in node_list or []:
                 node_name = n.get("node", "")
+                if not node_name:
+                    continue
                 if s.proxmox_node and node_name != s.proxmox_node:
                     continue
+                node_names.append(node_name)
                 node_entity = TopologyEntity(
                     id=f"node:{node_name}",
                     kind=EntityKind.NODE,
@@ -165,35 +246,86 @@ class DiscoveryEngine:
                 )
                 nodes.append(node_entity)
 
-                # LXC
+            # Prefer cluster/resources — covers all nodes in one call when ACL allows
+            seen_vmids: set[tuple[str, int]] = set()
+            try:
+                resources = await self._proxmox_get(
+                    client, "/cluster/resources?type=vm", headers
+                )
+                for raw in resources or []:
+                    node_name = raw.get("node") or ""
+                    if s.proxmox_node and node_name != s.proxmox_node:
+                        continue
+                    vmid = int(raw.get("vmid") or 0)
+                    if not node_name or not vmid:
+                        continue
+                    rtype = (raw.get("type") or "").lower()
+                    kind = EntityKind.LXC if rtype == "lxc" else EntityKind.QEMU
+                    seen_vmids.add((node_name, vmid))
+                    guests.append(
+                        await self._enrich_guest(
+                            client, headers, node_name, raw, kind, stamp, stamp_iso
+                        )
+                    )
+            except Exception as exc:
+                msg = f"Cluster-Resources (VMs) fehlgeschlagen: {self._exc_text(exc)}"
+                logger.warning(msg)
+                errors.append(msg)
+
+            for node_name in node_names:
+                # LXC (per-node; fills gaps if cluster/resources was empty/denied)
                 try:
                     lxcs = await self._proxmox_get(
                         client, f"/nodes/{quote(node_name)}/lxc", headers
                     )
                     for ct in lxcs or []:
+                        vmid = int(ct.get("vmid") or 0)
+                        if (node_name, vmid) in seen_vmids:
+                            continue
+                        seen_vmids.add((node_name, vmid))
                         guests.append(
                             await self._enrich_guest(
                                 client, headers, node_name, ct, EntityKind.LXC, stamp, stamp_iso
                             )
                         )
                 except Exception as exc:
-                    logger.warning("LXC list on %s failed: %s", node_name, exc)
+                    msg = (
+                        f"LXC-Liste auf Node {node_name} fehlgeschlagen: "
+                        f"{self._exc_text(exc)}"
+                    )
+                    logger.warning(msg)
+                    errors.append(msg)
 
-                # QEMU (optional visibility; Docker typically runs in LXC)
+                # QEMU
                 try:
                     vms = await self._proxmox_get(
                         client, f"/nodes/{quote(node_name)}/qemu", headers
                     )
                     for vm in vms or []:
+                        vmid = int(vm.get("vmid") or 0)
+                        if (node_name, vmid) in seen_vmids:
+                            continue
+                        seen_vmids.add((node_name, vmid))
                         guests.append(
                             await self._enrich_guest(
                                 client, headers, node_name, vm, EntityKind.QEMU, stamp, stamp_iso
                             )
                         )
                 except Exception as exc:
-                    logger.warning("QEMU list on %s failed: %s", node_name, exc)
+                    msg = (
+                        f"QEMU-Liste auf Node {node_name} fehlgeschlagen: "
+                        f"{self._exc_text(exc)}"
+                    )
+                    logger.warning(msg)
+                    errors.append(msg)
 
-        return nodes, guests
+            if nodes and not guests and not any("VM.Audit" in e or "keine effektiven Rechte" in e for e in errors):
+                errors.append(
+                    "Nodes gefunden, aber 0 Guests — vermutlich fehlende Token-ACL "
+                    "(VM.Audit). Proxmox liefert dann HTTP 200 mit leerer Liste."
+                )
+
+        return nodes, guests, errors
 
     async def _enrich_guest(
         self,
@@ -216,7 +348,7 @@ class DiscoveryEngine:
             vmid=vmid,
             hostname=name,
             parent_id=f"node:{node}",
-            meta={"cpus": raw.get("cpus"), "maxmem": raw.get("maxmem"), "uptime": raw.get("uptime")},
+            meta=self._guest_resource_meta(raw),
             discovered_at=stamp,
             discovered_at_iso=stamp_iso,
         )
@@ -225,7 +357,6 @@ class DiscoveryEngine:
             return entity
 
         # Pull agent / config network info for IPs
-        kind_path = "lxc" if kind == EntityKind.LXC else "qemu"
         ips: list[str] = []
         try:
             if kind == EntityKind.LXC:
@@ -233,6 +364,7 @@ class DiscoveryEngine:
                     client, f"/nodes/{quote(node)}/lxc/{vmid}/config", headers
                 )
                 ips.extend(self._ips_from_lxc_config(cfg or {}))
+                self._apply_lxc_config_meta(entity.meta, cfg or {})
             else:
                 # QEMU guest agent interfaces (best-effort)
                 ifaces = await self._proxmox_get(
@@ -246,6 +378,128 @@ class DiscoveryEngine:
 
         entity.ip_addresses = sorted(set(ips))
         return entity
+
+    @staticmethod
+    def _guest_resource_meta(raw: dict[str, Any]) -> dict[str, Any]:
+        """Normalize Proxmox guest resource fields for the detail header."""
+        cpu = raw.get("cpu")
+        mem = raw.get("mem")
+        maxmem = raw.get("maxmem")
+        disk = raw.get("disk")
+        maxdisk = raw.get("maxdisk")
+        meta: dict[str, Any] = {
+            "cpus": raw.get("cpus"),
+            "cpu": cpu,
+            "mem": mem,
+            "maxmem": maxmem,
+            "disk": disk,
+            "maxdisk": maxdisk,
+            "uptime": raw.get("uptime"),
+            "netin": raw.get("netin"),
+            "netout": raw.get("netout"),
+            "template": bool(raw.get("template")),
+            "tags": raw.get("tags") or "",
+            "lock": raw.get("lock") or "",
+        }
+        try:
+            if cpu is not None:
+                meta["cpu_pct"] = round(max(0.0, float(cpu) * 100.0), 1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if mem is not None and maxmem and float(maxmem) > 0:
+                meta["mem_pct"] = round(100.0 * float(mem) / float(maxmem), 1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if disk is not None and maxdisk and float(maxdisk) > 0:
+                meta["disk_pct"] = round(100.0 * float(disk) / float(maxdisk), 1)
+        except (TypeError, ValueError):
+            pass
+        return meta
+
+    @staticmethod
+    def _apply_lxc_config_meta(meta: dict[str, Any], cfg: dict[str, Any]) -> None:
+        unpriv = cfg.get("unprivileged")
+        if unpriv is not None:
+            meta["unprivileged"] = str(unpriv) in {"1", "true", "True"}
+        onboot = cfg.get("onboot")
+        if onboot is not None:
+            meta["onboot"] = str(onboot) in {"1", "true", "True"}
+        if cfg.get("tags") and not meta.get("tags"):
+            meta["tags"] = cfg.get("tags")
+
+    async def fetch_guest_rrd(
+        self,
+        guest_id: str,
+        *,
+        timeframe: str = "hour",
+    ) -> dict[str, Any]:
+        """Fetch Proxmox RRD samples for sparkline charts (selected guest only)."""
+        if not self.settings.proxmox_configured:
+            raise RuntimeError("Proxmox ist nicht konfiguriert.")
+        parts = guest_id.split(":")
+        if len(parts) != 3 or parts[0] not in {"lxc", "qemu"}:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}")
+        kind, node, vmid_s = parts
+        try:
+            vmid = int(vmid_s)
+        except ValueError as exc:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}") from exc
+        if timeframe not in {"hour", "day", "week", "month", "year"}:
+            timeframe = "hour"
+
+        async with httpx.AsyncClient(
+            verify=self.settings.proxmox_verify_ssl,
+            timeout=httpx.Timeout(20.0, connect=8.0),
+        ) as client:
+            headers = self._proxmox_headers()
+            if not headers and self.settings.proxmox_password:
+                headers = await self._proxmox_ticket(client)
+            if not headers:
+                raise RuntimeError("Keine Proxmox-Credentials verfügbar.")
+            path = (
+                f"/nodes/{quote(node)}/{kind}/{vmid}/rrddata"
+                f"?timeframe={quote(timeframe)}&cf=AVERAGE"
+            )
+            rows = await self._proxmox_get(client, path, headers) or []
+
+        cpu: list[float | None] = []
+        net: list[float | None] = []
+        times: list[int] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            t = row.get("time")
+            if t is None:
+                continue
+            try:
+                times.append(int(t))
+            except (TypeError, ValueError):
+                continue
+            c = row.get("cpu")
+            try:
+                cpu.append(round(float(c) * 100.0, 2) if c is not None else None)
+            except (TypeError, ValueError):
+                cpu.append(None)
+            ni, no = row.get("netin"), row.get("netout")
+            try:
+                n_val = 0.0
+                if ni is not None:
+                    n_val += float(ni)
+                if no is not None:
+                    n_val += float(no)
+                net.append(n_val if (ni is not None or no is not None) else None)
+            except (TypeError, ValueError):
+                net.append(None)
+
+        return {
+            "guest_id": guest_id,
+            "timeframe": timeframe,
+            "time": times,
+            "cpu": cpu,
+            "net": net,
+        }
 
     @staticmethod
     def _ips_from_lxc_config(cfg: dict[str, Any]) -> list[str]:
@@ -322,6 +576,12 @@ class DiscoveryEngine:
                 if n.get("IPAddress")
             ]
             name = c.name.lstrip("/") if c.name else c.short_id
+            labels = dict(c.labels or {})
+            meta: dict[str, Any] = {"short_id": c.short_id}
+            if labels.get("com.docker.compose.project"):
+                meta["compose_project"] = labels["com.docker.compose.project"]
+            if labels.get("com.docker.compose.service"):
+                meta["compose_service"] = labels["com.docker.compose.service"]
             out.append(
                 TopologyEntity(
                     id=f"docker:{parent_id}:{c.short_id}",
@@ -333,8 +593,8 @@ class DiscoveryEngine:
                     parent_id=parent_id,
                     image=image or None,
                     version=version,
-                    labels=dict(c.labels or {}),
-                    meta={"short_id": c.short_id},
+                    labels=labels,
+                    meta=meta,
                     discovered_at=stamp,
                     discovered_at_iso=stamp_iso,
                 )
@@ -345,9 +605,19 @@ class DiscoveryEngine:
     # Docker — remote via SSH (docker CLI on guest)
     # ------------------------------------------------------------------
 
+    def _ssh_key_path(self) -> Path:
+        """Resolve SSH key: configured path, else ``{data_dir}/ssh/id_ed25519``."""
+        configured = Path(self.settings.docker_ssh_key_path)
+        if configured.is_file():
+            return configured
+        fallback = Path(self.settings.data_dir) / "ssh" / "id_ed25519"
+        if fallback.is_file():
+            return fallback
+        return configured
+
     def _collect_ssh_targets(self, guests: list[TopologyEntity]) -> list[tuple[str, str]]:
         """Return (parent_id, ip) pairs for running guests with known IPs."""
-        key = Path(self.settings.docker_ssh_key_path)
+        key = self._ssh_key_path()
         if not key.is_file():
             logger.debug("SSH key not found at %s — skipping remote Docker scan", key)
             return []
@@ -361,39 +631,85 @@ class DiscoveryEngine:
 
     async def _discover_docker_ssh_many(
         self, targets: list[tuple[str, str]]
-    ) -> list[TopologyEntity]:
-        sem = asyncio.Semaphore(6)
+    ) -> tuple[list[TopologyEntity], str | None]:
+        """Scan guests via SSH with concurrency + overall time budget.
+
+        Returns (containers, optional_warning). Unreachable hosts fail fast;
+        unfinished targets after the budget are skipped so the HTTP request
+        does not hang the browser.
+        """
+        s = self.settings
+        sem = asyncio.Semaphore(s.docker_ssh_concurrency)
+        per_host = s.docker_ssh_timeout
+        budget = s.docker_ssh_budget_seconds
+        logger.info(
+            "SSH Docker scan: %d target(s), concurrency=%d, per_host=%.1fs, budget=%.1fs",
+            len(targets),
+            s.docker_ssh_concurrency,
+            per_host,
+            budget,
+        )
 
         async def one(parent_id: str, ip: str) -> list[TopologyEntity]:
             async with sem:
                 try:
-                    return await self._discover_docker_ssh(parent_id, ip)
+                    return await asyncio.wait_for(
+                        self._discover_docker_ssh(parent_id, ip),
+                        timeout=per_host,
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug("SSH Docker scan %s (%s): timed out after %.1fs", parent_id, ip, per_host)
+                    return []
                 except Exception as exc:
                     logger.debug("SSH Docker scan %s (%s): %s", parent_id, ip, exc)
                     return []
 
-        results = await asyncio.gather(*(one(pid, ip) for pid, ip in targets))
+        tasks = [asyncio.create_task(one(pid, ip)) for pid, ip in targets]
+        done, pending = await asyncio.wait(tasks, timeout=budget)
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
         merged: list[TopologyEntity] = []
-        for batch in results:
-            merged.extend(batch)
-        return merged
+        for t in done:
+            try:
+                merged.extend(t.result())
+            except Exception as exc:
+                logger.debug("SSH Docker scan task error: %s", exc)
+
+        warn: str | None = None
+        if pending:
+            warn = (
+                f"SSH-Docker-Scan Zeitbudget ({budget:.0f}s) erreicht — "
+                f"{len(pending)} von {len(targets)} Host(s) übersprungen."
+            )
+            logger.warning(warn)
+        else:
+            logger.info("SSH Docker scan finished: %d container(s)", len(merged))
+        return merged, warn
 
     async def _discover_docker_ssh(self, parent_id: str, ip: str) -> list[TopologyEntity]:
         s = self.settings
-        # Use `docker ps` JSON lines — works without Python docker SDK on guests.
+        # Include Compose project/service labels for dashboard stack grouping.
         cmd = (
             "docker ps -a --format "
-            "'{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}'"
+            "'{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|"
+            "{{.Label \"com.docker.compose.project\"}}|"
+            "{{.Label \"com.docker.compose.service\"}}'"
         )
+        # Keep connect short; command gets the remaining per-host budget via wait_for.
+        connect_timeout = min(2.0, s.docker_ssh_timeout)
         async with asyncssh.connect(
             ip,
             port=s.docker_ssh_port,
             username=s.docker_ssh_user,
-            client_keys=[s.docker_ssh_key_path],
+            client_keys=[str(self._ssh_key_path())],
             known_hosts=None,
-            connect_timeout=s.docker_ssh_timeout,
+            connect_timeout=connect_timeout,
+            login_timeout=connect_timeout,
         ) as conn:
-            result = await conn.run(cmd, check=False)
+            result = await conn.run(cmd, check=False, timeout=max(1.0, s.docker_ssh_timeout - 0.5))
         if result.exit_status != 0:
             # Docker not installed / permission denied — not an error for topology
             return []
@@ -409,8 +725,22 @@ class DiscoveryEngine:
             if len(parts) < 4:
                 continue
             cid, name, image, status_raw = parts[0], parts[1], parts[2], parts[3]
+            compose_project = (parts[4].strip() if len(parts) > 4 else "") or ""
+            compose_service = (parts[5].strip() if len(parts) > 5 else "") or ""
+            # Names can be comma-separated aliases — prefer the first.
+            name = name.split(",", 1)[0].strip()
             status = EntityStatus.RUNNING if status_raw.lower().startswith("up") else EntityStatus.STOPPED
             version = image.split(":")[-1] if ":" in image else None
+            labels: dict[str, str] = {}
+            if compose_project:
+                labels["com.docker.compose.project"] = compose_project
+            if compose_service:
+                labels["com.docker.compose.service"] = compose_service
+            meta: dict[str, Any] = {"via": "ssh", "raw_status": status_raw}
+            if compose_project:
+                meta["compose_project"] = compose_project
+            if compose_service:
+                meta["compose_service"] = compose_service
             out.append(
                 TopologyEntity(
                     id=f"docker:{parent_id}:{cid[:12]}",
@@ -422,7 +752,8 @@ class DiscoveryEngine:
                     parent_id=parent_id,
                     image=image,
                     version=version,
-                    meta={"via": "ssh", "raw_status": status_raw},
+                    labels=labels,
+                    meta=meta,
                     discovered_at=stamp,
                     discovered_at_iso=stamp_iso,
                 )

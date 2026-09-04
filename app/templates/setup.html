@@ -9,6 +9,12 @@
     Proxmox einmal verbinden. Hostnames und IPs werden danach automatisch erkannt.
     Für dauerhafte Konfiguration Umgebungsvariablen im Container setzen.
   </p>
+  <p class="mt-3 max-w-xl rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 text-sm text-[var(--muted)]">
+    <strong class="text-[var(--text)]">Token-Rechte:</strong>
+    Bei Privilege Separation dem Token unter Datacenter → Permissions die Rolle
+    <code class="text-[var(--text)]">PVEAuditor</code> auf Pfad
+    <code class="text-[var(--text)]">/</code> (Propagate) zuweisen — sonst erscheinen 0 Guests.
+  </p>
   <p class="mt-2 text-sm text-[var(--muted)]">Aktuelle Zeit: {{ now }}</p>
 </section>
 
@@ -57,8 +63,13 @@
     <label for="docker_use_local_socket" class="text-sm">Lokalen Docker-Socket scannen</label>
   </div>
   <div>
-    <label class="label" for="docker_ssh_user">SSH-User für Remote-Docker</label>
+    <label class="label" for="docker_ssh_user">SSH-User für Remote-Docker &amp; Terminal</label>
     <input class="field" id="docker_ssh_user" name="docker_ssh_user" type="text" value="{{ settings.docker_ssh_user }}" />
+    <p class="mt-2 text-sm text-[var(--muted)]">
+      Derselbe SSH-Schlüssel (<code class="text-[var(--text)]">DOCKER_SSH_KEY_PATH</code> bzw.
+      <code class="text-[var(--text)]">data/ssh/id_ed25519</code>) wird für Docker-Discovery,
+      Container-Steuerung und das Browser-Terminal auf Guest-Karten verwendet.
+    </p>
   </div>
 
   <div class="flex flex-wrap gap-3 pt-2">

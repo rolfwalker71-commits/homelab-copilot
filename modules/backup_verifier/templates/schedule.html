@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}Backup-Zeitplan — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Modul · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Backup-Zeitplan</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)]">
+    Crontab auf dem Copilot-Host (Marker-Block). Im Container: Block manuell installieren.
+  </p>
+</section>
+
+{% include "_subnav.html" %}
+
+<div id="setup-banner" class="mb-6 hidden animate-in surface p-4 text-sm" role="status"></div>
+
+<article class="surface p-4 sm:p-5 animate-in">
+  <h2 class="font-display text-lg font-bold">Zeitplan</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">
+    Automatische Stack-Backups über Cron-Presets oder eigenen Ausdruck.
+  </p>
+  <form id="sched-form" class="mt-4 space-y-3" novalidate>
+    <div>
+      <label class="label" for="sched-stack">Stack</label>
+      <select id="sched-stack" class="field" required></select>
+    </div>
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 max-w-xl">
+      <div>
+        <label class="label" for="sched-preset">Preset</label>
+        <select id="sched-preset" class="field">
+          <option value="daily">Täglich</option>
+          <option value="weekly">Wöchentlich</option>
+          <option value="custom">Cron (custom)</option>
+        </select>
+      </div>
+      <div>
+        <label class="label" for="sched-time">Uhrzeit</label>
+        <input id="sched-time" class="field" type="time" value="03:00" />
+      </div>
+    </div>
+    <div id="sched-weekly-wrap" class="hidden max-w-xl">
+      <label class="label" for="sched-weekday">Wochentag</label>
+      <select id="sched-weekday" class="field">
+        <option value="0">Sonntag</option>
+        <option value="1">Montag</option>
+        <option value="2">Dienstag</option>
+        <option value="3">Mittwoch</option>
+        <option value="4">Donnerstag</option>
+        <option value="5">Freitag</option>
+        <option value="6">Samstag</option>
+      </select>
+    </div>
+    <div id="sched-cron-wrap" class="hidden max-w-xl">
+      <label class="label" for="sched-cron">Cron-Ausdruck</label>
+      <input id="sched-cron" class="field" placeholder="0 3 * * *" />
+    </div>
+    <button type="submit" class="btn btn-primary">Zeitplan speichern</button>
+  </form>
+  <ul id="sched-list" class="mt-4 space-y-2 text-sm"></ul>
+  <pre id="cron-preview" class="mt-3 max-h-40 overflow-auto rounded-lg border border-[var(--border)] p-3 text-xs text-[var(--muted)] whitespace-pre-wrap"></pre>
+</article>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/backup_verifier';
+
+  async function loadStatus() {
+    const res = await fetch(API + '/status');
+    const data = await res.json();
+    const banner = document.getElementById('setup-banner');
+    const parts = [];
+    if (!data.ssh_key_present) parts.push('SSH-Schlüssel fehlt — Remote-Backups nicht möglich.');
+    if (!data.synology.configured) parts.push('Synology nicht konfiguriert — dritter Hop wird übersprungen.');
+    else if (!data.synology.key_present) parts.push('Synology-Key fehlt.');
+    if (!data.crontab_available) parts.push('Kein crontab hier (Container?) — Zeitplan-Block manuell auf dem Host setzen.');
+    if (parts.length) {
+      banner.classList.remove('hidden');
+      banner.innerHTML = '<strong>Setup:</strong> ' + parts.join(' ');
+    } else {
+      banner.classList.add('hidden');
+    }
+  }
+
+  async function loadStacks() {
+    const res = await fetch(API + '/stacks');
+    const data = await res.json();
+    const stacks = data.stacks || [];
+    const opts = stacks.map((s) => {
+      const val = encodeURIComponent(s.parent_id) + '|' + encodeURIComponent(s.stack);
+      return `<option value="${val}">${s.guest_name} · ${s.stack} (${s.containers})</option>`;
+    }).join('');
+    const empty = '<option value="">Kein Compose-Stack gefunden</option>';
+    document.getElementById('sched-stack').innerHTML = opts || empty;
+  }
+
+  function parseStackVal(val) {
+    const i = val.indexOf('|');
+    if (i < 0) return null;
+    return {
+      parent_id: decodeURIComponent(val.slice(0, i)),
+      project: decodeURIComponent(val.slice(i + 1)),
+    };
+  }
+
+  async function loadSchedules() {
+    const res = await fetch(API + '/schedules');
+    const data = await res.json();
+    const list = document.getElementById('sched-list');
+    const items = data.schedules || [];
+    list.innerHTML = items.length ? items.map((s) => `
+      <li class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] p-2">
+        <span><strong>${s.stack}</strong> · <code>${s.cron_expr}</code> · ${s.enabled ? 'aktiv' : 'aus'}</span>
+        <button type="button" class="btn btn-ghost btn-xs" data-del-sched="${s.id}">Löschen</button>
+      </li>`).join('') : '<li class="text-[var(--muted)]">Keine Zeitpläne.</li>';
+    document.getElementById('cron-preview').textContent = data.preview || '';
+  }
+
+  document.getElementById('sched-preset')?.addEventListener('change', (e) => {
+    const v = e.target.value;
+    document.getElementById('sched-weekly-wrap').classList.toggle('hidden', v !== 'weekly');
+    document.getElementById('sched-cron-wrap').classList.toggle('hidden', v !== 'custom');
+  });
+
+  document.getElementById('sched-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const parsed = parseStackVal(document.getElementById('sched-stack').value);
+    if (!parsed) return;
+    const preset = document.getElementById('sched-preset').value;
+    const body = {
+      parent_id: parsed.parent_id,
+      stack: parsed.project,
+      preset,
+      time: document.getElementById('sched-time').value || '03:00',
+      weekday: Number(document.getElementById('sched-weekday').value) || 0,
+      cron_expr: document.getElementById('sched-cron').value || null,
+      enabled: true,
+    };
+    const res = await fetch(API + '/schedules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(data.detail || 'Speichern fehlgeschlagen');
+      return;
+    }
+    await loadSchedules();
+  });
+
+  document.getElementById('sched-list')?.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-del-sched]');
+    if (!btn) return;
+    await fetch(API + '/schedules/' + btn.getAttribute('data-del-sched'), { method: 'DELETE' });
+    await loadSchedules();
+  });
+
+  async function refreshAll() {
+    await Promise.all([loadStatus(), loadStacks(), loadSchedules()]);
+  }
+  document.getElementById('btn-refresh-all')?.addEventListener('click', refreshAll);
+  refreshAll();
+})();
+</script>
+{% endblock %}

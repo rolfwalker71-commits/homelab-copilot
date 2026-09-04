@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block title %}Backup-Verlauf — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Modul · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Backup-Verlauf</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)]">
+    Läufe, Verify-Status und Restore für Compose-Stack-Backups.
+  </p>
+</section>
+
+{% include "_subnav.html" %}
+
+<article class="surface p-4 sm:p-5 animate-in">
+  <div class="flex flex-wrap items-center justify-between gap-2">
+    <h2 class="font-display text-lg font-bold">Verlauf</h2>
+    <span id="history-meta" class="text-sm text-[var(--muted)]"></span>
+  </div>
+  <div class="mt-3 overflow-x-auto">
+    <table class="w-full text-left text-sm" id="history-table">
+      <thead>
+        <tr class="border-b border-[var(--border)] text-[var(--muted)]">
+          <th class="py-2 pr-2 font-medium">Zeit</th>
+          <th class="py-2 pr-2 font-medium">Stack</th>
+          <th class="py-2 pr-2 font-medium">Status</th>
+          <th class="py-2 pr-2 font-medium">Ziele</th>
+          <th class="py-2 pr-2 font-medium">Größe</th>
+          <th class="py-2 pr-2 font-medium">Verify</th>
+          <th class="py-2 font-medium">Aktion</th>
+        </tr>
+      </thead>
+      <tbody id="history-body">
+        <tr><td class="py-3 text-[var(--muted)]" colspan="7">Laden…</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details id="run-detail" class="mt-4 hidden">
+    <summary class="cursor-pointer font-medium">Lauf-Details</summary>
+    <pre id="run-detail-body" class="mt-2 max-h-64 overflow-auto rounded-lg border border-[var(--border)] p-3 text-xs whitespace-pre-wrap"></pre>
+  </details>
+</article>
+
+<dialog id="restore-dialog" class="logs-dialog">
+  <form method="dialog" class="logs-dialog-form" id="restore-form">
+    <header class="logs-dialog-head">
+      <h2 class="logs-dialog-title">Wiederherstellen</h2>
+      <button type="submit" class="btn btn-ghost btn-sm" value="cancel">Abbrechen</button>
+    </header>
+    <div class="p-4 space-y-3 text-sm">
+      <p id="restore-text">Stack wird gestoppt und Volumes überschrieben.</p>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="restore-confirm" class="h-5 w-5" />
+        Ich bestätige den Restore
+      </label>
+      <label class="label" for="restore-source">Quelle</label>
+      <select id="restore-source" class="field">
+        <option value="copilot">Copilot</option>
+        <option value="synology">Synology</option>
+      </select>
+      <button type="button" id="restore-go" class="btn btn-primary">Restore starten</button>
+      <p id="restore-msg" class="text-[var(--muted)]" role="status"></p>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/backup_verifier';
+  let restoreRunId = null;
+
+  function toast(el, msg, ok) {
+    if (!el) return;
+    el.textContent = msg;
+    el.style.color = ok === false ? 'var(--danger, #c44)' : '';
+  }
+
+  function destChip(label, status) {
+    const s = status || '—';
+    return `<span class="chip chip-${s === 'ok' ? 'running' : s === 'failed' ? 'stopped' : 'unknown'}" title="${label}">${label}: ${s}</span>`;
+  }
+
+  async function loadHistory() {
+    const res = await fetch(API + '/history?limit=40');
+    const data = await res.json();
+    document.getElementById('history-meta').textContent = data.time || '';
+    const body = document.getElementById('history-body');
+    const runs = data.runs || [];
+    if (!runs.length) {
+      body.innerHTML = '<tr><td class="py-3 text-[var(--muted)]" colspan="7">Noch keine Läufe.</td></tr>';
+      return;
+    }
+    body.innerHTML = runs.map((r) => {
+      const size = r.size_bytes != null ? (r.size_bytes / (1024 * 1024)).toFixed(1) + ' MiB' : '—';
+      return `<tr class="border-b border-[var(--border)] align-top">
+        <td class="py-2 pr-2 whitespace-nowrap">${r.created_at || ''}</td>
+        <td class="py-2 pr-2"><div class="font-medium break-words">${r.stack}</div><div class="text-[var(--muted)] text-xs">${r.guest_name || ''}</div></td>
+        <td class="py-2 pr-2"><span class="chip chip-${r.status === 'success' ? 'running' : r.status === 'failed' ? 'stopped' : 'unknown'}">${r.status}</span></td>
+        <td class="py-2 pr-2 flex flex-wrap gap-1">${destChip('LXC', r.lxc_status)}${destChip('Copilot', r.copilot_status)}${destChip('Syno', r.synology_status)}</td>
+        <td class="py-2 pr-2 whitespace-nowrap">${size}</td>
+        <td class="py-2 pr-2">${r.verify_status || '—'}</td>
+        <td class="py-2 whitespace-nowrap">
+          <button type="button" class="btn btn-ghost btn-xs" data-detail="${r.id}">Log</button>
+          ${['success','partial'].includes(r.status) ? `<button type="button" class="btn btn-ghost btn-xs" data-restore="${r.id}" data-stack="${r.stack}">Restore</button>` : ''}
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  document.getElementById('history-body')?.addEventListener('click', async (e) => {
+    const detail = e.target.closest('[data-detail]');
+    if (detail) {
+      const id = detail.getAttribute('data-detail');
+      const res = await fetch(API + '/history/' + id);
+      const data = await res.json();
+      const box = document.getElementById('run-detail');
+      const body = document.getElementById('run-detail-body');
+      box.classList.remove('hidden');
+      body.textContent = (data.run && data.run.log_text) || JSON.stringify(data.run, null, 2);
+      return;
+    }
+    const restore = e.target.closest('[data-restore]');
+    if (restore) {
+      restoreRunId = Number(restore.getAttribute('data-restore'));
+      document.getElementById('restore-text').textContent =
+        'Restore für Stack „' + restore.getAttribute('data-stack') + '“ (Lauf #' + restoreRunId + '). Stack wird gestoppt.';
+      document.getElementById('restore-confirm').checked = false;
+      document.getElementById('restore-msg').textContent = '';
+      document.getElementById('restore-dialog').showModal();
+    }
+  });
+
+  document.getElementById('restore-go')?.addEventListener('click', async () => {
+    const msg = document.getElementById('restore-msg');
+    if (!document.getElementById('restore-confirm').checked) {
+      toast(msg, 'Bitte bestätigen', false);
+      return;
+    }
+    toast(msg, 'Restore läuft…');
+    const res = await fetch(API + '/history/' + restoreRunId + '/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirm: true,
+        source: document.getElementById('restore-source').value,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return toast(msg, data.detail || 'Fehler', false);
+    toast(msg, data.message || 'OK');
+  });
+
+  document.getElementById('btn-refresh-all')?.addEventListener('click', loadHistory);
+  loadHistory();
+  setInterval(loadHistory, 12000);
+})();
+</script>
+{% endblock %}

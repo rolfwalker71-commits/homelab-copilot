@@ -46,7 +46,11 @@ class Settings(BaseSettings):
     docker_ssh_user: str = "root"
     docker_ssh_key_path: str = "/data/ssh/id_ed25519"
     docker_ssh_port: int = 22
-    docker_ssh_timeout: float = 8.0
+    # Per-host connect+command budget (unreachable hosts should fail fast).
+    docker_ssh_timeout: float = Field(default=3.0, ge=0.5, le=30.0)
+    docker_ssh_concurrency: int = Field(default=4, ge=1, le=16)
+    # Cap total SSH scan time so POST /discovery/refresh stays browser-friendly.
+    docker_ssh_budget_seconds: float = Field(default=25.0, ge=5.0, le=120.0)
 
     @property
     def db_path(self) -> Path:

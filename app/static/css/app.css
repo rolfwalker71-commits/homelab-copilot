@@ -203,8 +203,47 @@ html[data-chrome="desktop"] .entity-card:hover {
   color: var(--warn);
 }
 
+/* Soft tonal row fills by status (Docker + Proxmox detail panels).
+   Rail uses status dots instead — see .topo-rail-status-*.
+   Soft mixes keep WCAG contrast on var(--text) / var(--muted). */
+.row-status-running {
+  background: color-mix(in srgb, #43a047 15%, var(--card));
+}
+
+.row-status-stopped,
+.row-status-exited,
+.row-status-dead {
+  background: color-mix(in srgb, var(--danger) 13%, var(--card));
+}
+
+.row-status-paused,
+.row-status-unknown,
+.row-status-error,
+.row-status-created,
+.row-status-restarting {
+  background: color-mix(in srgb, var(--warn) 13%, var(--card));
+}
+
 @media (prefers-color-scheme: light) {
   .chip-running { color: #1b5e20; }
+
+  .row-status-running {
+    background: color-mix(in srgb, #2e7d32 11%, var(--card));
+  }
+
+  .row-status-stopped,
+  .row-status-exited,
+  .row-status-dead {
+    background: color-mix(in srgb, var(--danger) 10%, var(--card));
+  }
+
+  .row-status-paused,
+  .row-status-unknown,
+  .row-status-error,
+  .row-status-created,
+  .row-status-restarting {
+    background: color-mix(in srgb, var(--warn) 10%, var(--card));
+  }
 }
 
 /* ── Buttons ──────────────────────────────── */
@@ -580,4 +619,1447 @@ html[data-chrome="android"] .actions-desktop .btn-primary {
 
 html[data-chrome="desktop"] .actions-desktop {
   display: flex;
+}
+
+/* ── Topology cards (Node → Guest grid → Docker chips) ── */
+.topo {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* Master-detail shell: rail + detail pane */
+.topo-section-head {
+  margin-bottom: 0.85rem;
+}
+
+.topo-section-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  max-width: 40rem;
+}
+
+.topo-shell {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+  align-items: stretch;
+  min-height: min(70vh, 42rem);
+}
+
+@media (min-width: 56rem) {
+  .topo-shell {
+    grid-template-columns: minmax(14rem, 17.5rem) minmax(0, 1fr);
+    gap: 0.85rem;
+  }
+}
+
+.topo-rail {
+  background: var(--surface-container);
+  border: 1px solid color-mix(in srgb, var(--outline) 75%, transparent);
+  border-radius: var(--radius);
+  padding: 0.65rem 0.55rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: min(40vh, 22rem);
+  overflow: auto;
+}
+
+@media (min-width: 56rem) {
+  .topo-rail {
+    max-height: min(70vh, 42rem);
+  }
+}
+
+html[data-chrome="desktop"] .topo-rail {
+  border-radius: var(--radius);
+}
+
+html[data-chrome="android"] .topo-rail {
+  border-radius: 1.25rem;
+  border-color: transparent;
+}
+
+.topo-rail-top {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-bottom: 0.35rem;
+}
+
+.topo-rail-title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.topo-rail-filter-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-ctrl);
+  background: var(--card);
+  color: var(--text);
+  padding: 0.45rem 0.65rem;
+  font-size: 0.8125rem;
+}
+
+.topo-rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.topo-rail-group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.4rem 0.35rem;
+  border: none;
+  border-radius: calc(var(--radius) * 0.45);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.topo-rail-group-head:hover {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.topo-rail-group-head:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.topo-rail-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 0.18s var(--motion);
+}
+
+.topo-rail-group.is-collapsed .topo-rail-chevron {
+  transform: rotate(-90deg);
+}
+
+.topo-rail-node-icon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.topo-rail-group-name {
+  font-weight: 700;
+  font-size: 0.8125rem;
+  min-width: 0;
+}
+
+.topo-rail-group.is-collapsed .topo-rail-list,
+.topo-rail-group.is-collapsed .topo-rail-empty {
+  display: none;
+}
+
+.topo-rail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.topo-rail-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  border-radius: 0.5rem;
+  padding: 0.45rem 0.55rem 0.45rem 0.5rem;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 0.55rem;
+  align-items: start;
+  min-width: 0;
+  font: inherit;
+  box-shadow: none;
+}
+
+.topo-rail-item:hover {
+  background: color-mix(in srgb, var(--primary) 7%, transparent);
+}
+
+.topo-rail-item:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+/* Mockup selection: lavender/primary tonal fill + left accent bar (no status wash) */
+.topo-rail-item.is-selected {
+  background: color-mix(in srgb, var(--primary) 16%, var(--card));
+  box-shadow: inset 3px 0 0 var(--primary);
+  border-color: transparent;
+}
+
+html[data-chrome="android"] .topo-rail-item {
+  border-radius: 0.75rem;
+}
+
+html[data-chrome="android"] .topo-rail-item.is-selected {
+  background: color-mix(in srgb, var(--primary) 18%, var(--card));
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-chrome="android"] .topo-rail-item.is-selected {
+    background: color-mix(in srgb, var(--primary-container) 72%, var(--card));
+  }
+}
+
+.topo-rail-status {
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-top: 0.35rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--muted);
+}
+
+.topo-rail-status-running {
+  background: #43a047;
+}
+
+.topo-rail-status-stopped,
+.topo-rail-status-exited,
+.topo-rail-status-dead {
+  background: var(--danger);
+}
+
+.topo-rail-status-paused,
+.topo-rail-status-unknown,
+.topo-rail-status-error,
+.topo-rail-status-created,
+.topo-rail-status-restarting {
+  background: var(--warn);
+}
+
+@media (prefers-color-scheme: light) {
+  .topo-rail-status-running {
+    background: #2e7d32;
+  }
+}
+
+.topo-rail-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.topo-rail-item-name {
+  font-weight: 500;
+  font-size: 0.875rem;
+  line-height: 1.25;
+  min-width: 0;
+}
+
+.topo-rail-item-sub {
+  font-size: 0.6875rem;
+  line-height: 1.3;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.topo-rail-empty {
+  margin: 0;
+  padding: 0.35rem 0.5rem 0.35rem 1.6rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.topo-detail {
+  background: var(--surface-container);
+  border: 1px solid color-mix(in srgb, var(--outline) 75%, transparent);
+  border-radius: var(--radius);
+  padding: 0.85rem 0.9rem 1rem;
+  min-width: 0;
+  min-height: 16rem;
+}
+
+html[data-chrome="android"] .topo-detail {
+  border-radius: 1.25rem;
+  border-color: transparent;
+}
+
+.topo-detail-empty {
+  display: grid;
+  place-content: center;
+  text-align: center;
+  min-height: 12rem;
+  padding: 1.5rem;
+}
+
+.topo-detail-panel[hidden] {
+  display: none !important;
+}
+
+.topo-detail-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: flex-start;
+  column-gap: 1rem;
+  row-gap: 0;
+  margin-bottom: 0.85rem;
+  padding: 0.65rem 0.75rem 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
+  border-radius: calc(var(--radius) * 0.55);
+  background: var(--card);
+}
+
+.topo-detail-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: fit-content;
+  margin: 0;
+  padding: 0.05rem 0.15rem;
+  text-align: left;
+  font: inherit;
+  border-radius: calc(var(--radius) * 0.4);
+  line-height: 1;
+}
+
+.topo-detail-toggle:hover {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.topo-detail-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.topo-detail-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 0.18s var(--motion);
+}
+
+.topo-detail-panel.is-collapsed .topo-detail-chevron {
+  transform: rotate(-90deg);
+}
+
+.topo-detail-kind-icon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.topo-detail-lead {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  min-width: 0;
+}
+
+.topo-detail-heading {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.topo-detail-panel.is-collapsed .topo-detail-body,
+.topo-detail-panel.is-collapsed .topo-detail-metrics,
+.topo-detail-panel.is-collapsed .topo-detail-facts {
+  display: none;
+}
+
+.topo-detail-panel.is-collapsed .topo-detail-head {
+  margin-bottom: 0;
+  border-bottom-color: transparent;
+}
+
+/* Guest detail header: status via background (no chip) */
+.topo-detail-head.row-status-running {
+  background: color-mix(in srgb, #43a047 15%, var(--card));
+}
+
+.topo-detail-head.row-status-stopped,
+.topo-detail-head.row-status-exited,
+.topo-detail-head.row-status-dead {
+  background: color-mix(in srgb, var(--danger) 13%, var(--card));
+}
+
+.topo-detail-head.row-status-paused,
+.topo-detail-head.row-status-unknown,
+.topo-detail-head.row-status-error,
+.topo-detail-head.row-status-created,
+.topo-detail-head.row-status-restarting {
+  background: color-mix(in srgb, var(--warn) 13%, var(--card));
+}
+
+@media (prefers-color-scheme: light) {
+  .topo-detail-head.row-status-running {
+    background: color-mix(in srgb, #2e7d32 12%, var(--card));
+  }
+
+  .topo-detail-head.row-status-stopped,
+  .topo-detail-head.row-status-exited,
+  .topo-detail-head.row-status-dead {
+    background: color-mix(in srgb, var(--danger) 12%, var(--card));
+  }
+
+  .topo-detail-head.row-status-paused,
+  .topo-detail-head.row-status-unknown,
+  .topo-detail-head.row-status-error,
+  .topo-detail-head.row-status-created,
+  .topo-detail-head.row-status-restarting {
+    background: color-mix(in srgb, var(--warn) 12%, var(--card));
+  }
+}
+
+.topo-detail-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.6rem;
+}
+
+.topo-detail-name {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.topo-detail-meta {
+  display: block;
+  margin: 0.1rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.topo-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  align-self: start;
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+}
+
+.topo-detail-facts {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.topo-fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 100%;
+  padding: 0.28rem 0.55rem 0.28rem 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
+  color: var(--text);
+  font-size: 0.75rem;
+  line-height: 1.2;
+}
+
+html[data-chrome="desktop"] .topo-fact {
+  border-radius: var(--radius-ctrl);
+  background: color-mix(in srgb, var(--background) 55%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
+}
+
+.topo-fact-icon {
+  display: inline-flex;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.topo-fact-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.topo-fact-value {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.topo-fact-warn {
+  background: color-mix(in srgb, var(--warn) 16%, var(--card));
+}
+
+.topo-fact-warn .topo-fact-icon,
+.topo-fact-warn .topo-fact-value {
+  color: var(--warn);
+}
+
+.topo-detail-metrics {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.75rem 1rem;
+  margin-top: 0.55rem;
+  padding: 0.7rem 0.75rem;
+  border-radius: calc(var(--radius) * 0.55);
+  background: color-mix(in srgb, var(--background) 45%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--outline) 55%, transparent);
+}
+
+html[data-chrome="android"] .topo-detail-metrics {
+  border-radius: 1rem;
+  border-color: transparent;
+  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+}
+
+.topo-metric-gauges {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(6.5rem, 1fr));
+  gap: 0.65rem 0.85rem;
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+.topo-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  min-width: 0;
+}
+
+.topo-metric-top {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.topo-metric-icon {
+  display: inline-flex;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.topo-metric-label {
+  font-size: 0.6875rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.topo-metric-value {
+  font-size: 0.875rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.topo-metric-bar {
+  height: 0.375rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--outline) 45%, transparent);
+  overflow: hidden;
+}
+
+.topo-metric-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #2e7d32;
+  min-width: 0;
+  transition: width 0.35s var(--motion);
+}
+
+.topo-metric.level-warn .topo-metric-bar-fill {
+  background: var(--warn);
+}
+
+.topo-metric.level-danger .topo-metric-bar-fill {
+  background: var(--danger);
+}
+
+.topo-metric.level-unknown .topo-metric-bar-fill {
+  background: color-mix(in srgb, var(--outline) 50%, transparent);
+}
+
+.topo-metric.level-ok .topo-metric-icon {
+  color: #2e7d32;
+}
+
+.topo-metric.level-warn .topo-metric-icon {
+  color: var(--warn);
+}
+
+.topo-metric.level-danger .topo-metric-icon {
+  color: var(--danger);
+}
+
+@media (prefers-color-scheme: dark) {
+  .topo-metric.level-ok .topo-metric-icon {
+    color: #81c784;
+  }
+
+  .topo-metric.level-ok .topo-metric-bar-fill {
+    background: #81c784;
+  }
+}
+
+.topo-metric-sub {
+  font-size: 0.6875rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+
+.topo-metric-sparks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.5rem 0.75rem;
+  flex: 0 1 auto;
+  padding-left: 0.75rem;
+  border-left: 1px solid color-mix(in srgb, var(--outline) 60%, transparent);
+}
+
+.topo-spark {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.2rem;
+  min-width: 6rem;
+}
+
+.topo-spark-label {
+  font-size: 0.6875rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.topo-spark-svg {
+  width: 6rem;
+  height: 1.75rem;
+  display: block;
+  overflow: visible;
+}
+
+.topo-spark-line {
+  stroke: var(--primary);
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.topo-spark[data-spark="net"] .topo-spark-line {
+  stroke: color-mix(in srgb, var(--primary) 40%, #2e7d32);
+}
+
+.topo-spark.is-empty .topo-spark-line {
+  opacity: 0.3;
+}
+
+.topo-detail-none {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+@media (max-width: 40rem) {
+  .topo-metric-gauges {
+    grid-template-columns: 1fr;
+  }
+
+  .topo-metric-sparks {
+    width: 100%;
+    padding-left: 0;
+    padding-top: 0.55rem;
+    border-left: 0;
+    border-top: 1px solid color-mix(in srgb, var(--outline) 60%, transparent);
+  }
+}
+
+/* Detail pane: one full-width stack card per row (no multi-column squeeze) */
+.topo-app-grid .topo-docker-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.topo-app-grid .topo-singles {
+  width: 100%;
+}
+
+.topo-stack-restart {
+  flex: 0 0 auto;
+}
+
+.topo-stack-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+}
+
+.topo-node-card {
+  background: var(--surface-container);
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  overflow: hidden;
+}
+
+html[data-chrome="desktop"] .topo-node-card {
+  background: var(--card);
+  border-color: var(--outline);
+  border-left: 3px solid var(--primary);
+}
+
+.topo-node-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  padding: 1rem 1.15rem 0.85rem;
+}
+
+html[data-chrome="desktop"] .topo-node-header {
+  padding: 0.75rem 1rem 0.55rem;
+  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+  border-bottom: 1px solid var(--outline);
+}
+
+.topo-node-heading {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.topo-node-name {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+html[data-chrome="desktop"] .topo-node-name {
+  font-size: 1rem;
+}
+
+.topo-node-counts {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.topo-node-docker-n {
+  color: var(--primary);
+}
+
+.topo-sep {
+  margin: 0 0.15rem;
+  opacity: 0.6;
+}
+
+.topo-guest-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem 1.1rem;
+}
+
+@media (min-width: 40rem) {
+  .topo-guest-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 64rem) {
+  .topo-guest-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.65rem;
+    padding: 0.75rem 1rem 1rem;
+  }
+}
+
+html[data-chrome="desktop"] .topo-guest-grid {
+  gap: 0.55rem;
+}
+
+.topo-guest-card {
+  background: var(--card);
+  border-radius: calc(var(--radius) * 0.85);
+  border: 1px solid transparent;
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+html[data-chrome="android"] .topo-guest-card {
+  border-radius: 1.25rem;
+  box-shadow: none;
+}
+
+html[data-chrome="desktop"] .topo-guest-card {
+  border-color: var(--outline);
+  border-left: 2px solid color-mix(in srgb, var(--primary) 55%, var(--outline));
+  border-radius: var(--radius);
+  padding: 0.65rem 0.75rem;
+  gap: 0.25rem;
+}
+
+.topo-guest-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.topo-kind {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.topo-guest-name {
+  margin: 0;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+html[data-chrome="desktop"] .topo-guest-name {
+  font-size: 0.9375rem;
+}
+
+.topo-guest-ip {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-chrome="desktop"] .topo-guest-ip {
+  font-size: 0.75rem;
+}
+
+.topo-muted {
+  opacity: 0.85;
+}
+
+.topo-count {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--on-surface-variant) 14%, transparent);
+}
+
+.topo-count-accent {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+.chip-sm {
+  padding: 0.1rem 0.45rem;
+  font-size: 0.6875rem;
+}
+
+/* Docker: collapsed by default inside guest card */
+.topo-docker-disclosure {
+  margin-top: 0.4rem;
+  border-top: 1px solid color-mix(in srgb, var(--outline) 55%, transparent);
+  padding-top: 0.4rem;
+}
+
+.topo-docker-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  cursor: pointer;
+  list-style: none;
+  min-height: 2rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--primary);
+  user-select: none;
+}
+
+.topo-docker-summary::-webkit-details-marker,
+.topo-stack-summary::-webkit-details-marker {
+  display: none;
+}
+
+.topo-docker-summary-label {
+  letter-spacing: 0.01em;
+}
+
+.topo-chevron {
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.2s var(--motion);
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.topo-chevron-sm {
+  width: 0.35rem;
+  height: 0.35rem;
+}
+
+details[open] > summary .topo-chevron {
+  transform: rotate(45deg);
+}
+
+.topo-docker-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+
+.topo-docker-panel-orphan {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0 1rem 1.1rem;
+}
+
+html[data-chrome="desktop"] .topo-docker-panel-orphan {
+  padding: 0.65rem 1rem 0.9rem;
+  gap: 0.5rem;
+}
+
+.topo-docker-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
+.topo-docker-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.55rem;
+  padding: 0.45rem 0.65rem;
+  background: color-mix(in srgb, var(--background) 50%, var(--card));
+  border-radius: calc(var(--radius) * 0.55);
+  border: 1px solid transparent;
+  min-width: 0;
+}
+
+/* Status tint wins over default docker-row surface */
+.topo-docker-chip.row-status-running {
+  background: color-mix(in srgb, #43a047 15%, color-mix(in srgb, var(--background) 45%, var(--card)));
+}
+
+.topo-docker-chip.row-status-stopped,
+.topo-docker-chip.row-status-exited,
+.topo-docker-chip.row-status-dead {
+  background: color-mix(in srgb, var(--danger) 13%, color-mix(in srgb, var(--background) 45%, var(--card)));
+}
+
+.topo-docker-chip.row-status-paused,
+.topo-docker-chip.row-status-unknown,
+.topo-docker-chip.row-status-error,
+.topo-docker-chip.row-status-created,
+.topo-docker-chip.row-status-restarting {
+  background: color-mix(in srgb, var(--warn) 13%, color-mix(in srgb, var(--background) 45%, var(--card)));
+}
+
+@media (prefers-color-scheme: light) {
+  .topo-docker-chip.row-status-running {
+    background: color-mix(in srgb, #2e7d32 11%, color-mix(in srgb, var(--background) 40%, var(--card)));
+  }
+
+  .topo-docker-chip.row-status-stopped,
+  .topo-docker-chip.row-status-exited,
+  .topo-docker-chip.row-status-dead {
+    background: color-mix(in srgb, var(--danger) 10%, color-mix(in srgb, var(--background) 40%, var(--card)));
+  }
+
+  .topo-docker-chip.row-status-paused,
+  .topo-docker-chip.row-status-unknown,
+  .topo-docker-chip.row-status-error,
+  .topo-docker-chip.row-status-created,
+  .topo-docker-chip.row-status-restarting {
+    background: color-mix(in srgb, var(--warn) 10%, color-mix(in srgb, var(--background) 40%, var(--card)));
+  }
+}
+
+.topo-docker-chip-name {
+  flex: 1 1 8rem;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  line-height: 1.3;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.topo-docker-chip-img {
+  flex: 0 1 auto;
+  max-width: min(24rem, 100%);
+  font-size: 0.6875rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.25;
+}
+
+html[data-chrome="android"] .topo-docker-chip {
+  border-radius: 0.75rem;
+  min-height: 2.25rem;
+}
+
+html[data-chrome="desktop"] .topo-docker-chip {
+  padding: 0.35rem 0.55rem;
+  border-color: var(--outline);
+  border-radius: var(--radius-ctrl);
+  min-height: 1.85rem;
+  flex-wrap: nowrap;
+}
+
+html[data-chrome="desktop"] .topo-docker-chip-name {
+  font-size: 0.8125rem;
+  flex: 1 1 auto;
+}
+
+html[data-chrome="desktop"] .topo-docker-chip-img {
+  max-width: min(28rem, 40%);
+  flex-shrink: 1;
+}
+
+.topo-stack-card {
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: calc(var(--radius) * 0.55);
+  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
+  padding: 0.55rem 0.7rem 0.65rem;
+}
+
+html[data-chrome="desktop"] .topo-stack-card {
+  border-radius: var(--radius-ctrl);
+  padding: 0.5rem 0.75rem 0.55rem;
+}
+
+.topo-stack-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+  margin-bottom: 0.4rem;
+}
+
+.topo-stack-card.is-collapsed .topo-stack-card-head {
+  margin-bottom: 0;
+}
+
+.topo-stack-card-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0.15rem 0.2rem 0.15rem 0;
+  text-align: left;
+  font: inherit;
+  border-radius: calc(var(--radius) * 0.4);
+}
+
+.topo-stack-card-toggle:hover {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.topo-stack-card-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.topo-stack-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 0.18s var(--motion);
+}
+
+.topo-stack-card.is-collapsed .topo-stack-chevron {
+  transform: rotate(-90deg);
+}
+
+.topo-stack-card.is-collapsed > .topo-docker-chips {
+  display: none;
+}
+
+.topo-stack-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.35rem;
+  min-width: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.topo-stack-name {
+  min-width: 0;
+}
+
+.topo-stack-meta {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 0.75rem;
+}
+
+.topo-stack-badge {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--primary);
+  opacity: 0.9;
+}
+
+.topo-stack-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  margin-left: 0.15rem;
+}
+
+.topo-stack-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+.topo-stack-dot-running {
+  background: #2e7d32;
+}
+
+.topo-stack-dot-exited,
+.topo-stack-dot-stopped,
+.topo-stack-dot-dead {
+  background: var(--warn);
+}
+
+.topo-stack-dot-paused,
+.topo-stack-dot-created,
+.topo-stack-dot-restarting {
+  background: #c9a227;
+}
+
+.topo-singles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.topo-singles-label {
+  margin: 0.15rem 0 0;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.topo-docker-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.btn-icon {
+  appearance: none;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--primary);
+  border-radius: 0.4rem;
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0 0.3rem;
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.btn-icon:hover {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+}
+
+.btn-icon:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+html[data-chrome="desktop"] .btn-icon {
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  border-radius: var(--radius-ctrl);
+  border-color: var(--outline);
+}
+
+.btn-sm {
+  min-height: 1.75rem;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.75rem;
+}
+
+.btn-xs {
+  min-height: 1.55rem;
+  padding: 0.12rem 0.45rem;
+  font-size: 0.6875rem;
+}
+
+@media (min-width: 40rem) {
+  .topo-docker-chip {
+    flex-wrap: nowrap;
+  }
+}
+
+.topo-guest-actions {
+  margin-top: 0.35rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.ssh-dialog {
+  width: min(56rem, calc(100vw - 0.75rem));
+  height: min(40rem, calc(100vh - 1rem));
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 1px solid var(--outline);
+  border-radius: calc(var(--radius) * 0.9);
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 18px 52px color-mix(in srgb, #000 40%, transparent);
+  overflow: hidden;
+}
+
+.ssh-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.ssh-dialog::backdrop {
+  background: color-mix(in srgb, #000 50%, transparent);
+}
+
+html[data-chrome="android"] .ssh-dialog {
+  width: calc(100vw - 0.5rem);
+  height: calc(100dvh - 0.75rem - env(safe-area-inset-bottom, 0px));
+  border-radius: 1.25rem;
+}
+
+.ssh-dialog-inner {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+}
+
+.ssh-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.85rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
+  flex: 0 0 auto;
+}
+
+.ssh-dialog-heading {
+  min-width: 0;
+}
+
+.ssh-dialog-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-dialog-sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.ssh-terminal {
+  flex: 1 1 auto;
+  min-height: 12rem;
+  padding: 0.4rem;
+  background: #121016;
+  position: relative;
+}
+
+.ssh-terminal .xterm {
+  height: 100%;
+}
+
+.ssh-terminal .xterm-viewport {
+  overflow-y: auto !important;
+}
+
+.ssh-terminal-fallback {
+  margin: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  color: #c8c0d0;
+  white-space: pre-wrap;
+}
+
+.ssh-terminal-fallback-error {
+  color: #ffb4ab;
+}
+
+.toast {
+  position: fixed;
+  z-index: 80;
+  left: 50%;
+  bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  max-width: min(28rem, calc(100vw - 2rem));
+  padding: 0.7rem 1rem;
+  border-radius: calc(var(--radius) * 0.75);
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--outline);
+  box-shadow: 0 8px 28px color-mix(in srgb, #000 28%, transparent);
+  font-size: 0.875rem;
+  font-weight: 560;
+}
+
+.toast-error {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--outline));
+  color: var(--warn);
+}
+
+.logs-dialog {
+  width: min(44rem, calc(100vw - 1.5rem));
+  max-height: min(80vh, 36rem);
+  padding: 0;
+  border: 1px solid var(--outline);
+  border-radius: calc(var(--radius) * 0.85);
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 16px 48px color-mix(in srgb, #000 35%, transparent);
+}
+
+.logs-dialog::backdrop {
+  background: color-mix(in srgb, #000 45%, transparent);
+}
+
+.logs-dialog-form {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+}
+
+.logs-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
+}
+
+.logs-dialog-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logs-dialog-body {
+  margin: 0;
+  padding: 0.85rem 0.9rem 1rem;
+  overflow: auto;
+  max-height: min(65vh, 28rem);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: color-mix(in srgb, var(--background) 70%, var(--card));
+}
+
+.topo-empty {
+  margin: 0;
+  padding: 0.5rem 1.15rem 1rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+html[data-chrome="android"] .topo-docker-summary:active {
+  opacity: 0.85;
 }
