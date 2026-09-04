@@ -8,13 +8,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.api import router as api_router
 from app.api.ssh_ws import router as ssh_ws_router
 from app.config import get_settings
+from app.core.app_store import AppStore
+from app.core.auth import TotpAuthMiddleware, ensure_totp_secret
 from app.core.discovery import DiscoveryEngine
 from app.core.locale import (
     format_bytes,
@@ -23,6 +25,7 @@ from app.core.locale import (
     metric_level,
     now_berlin,
 )
+from app.core.push import ensure_vapid_keys
 from app.core.registry import discover_and_load_modules, registry
 from app.core.topology import TopologyStore
 from app.core.tree import build_topology_tree
@@ -78,9 +81,23 @@ async def lifespan(app: FastAPI):
     await store.connect()
     engine = DiscoveryEngine(settings)
 
+    app_store = AppStore(settings.app_db_path)
+    await app_store.connect()
+    cookie_secret = await app_store.ensure_cookie_secret()
+    await ensure_totp_secret(app_store)
+    vapid = await ensure_vapid_keys(app_store, settings)
+
     app.state.topology_store = store
     app.state.discovery_engine = engine
     app.state.settings = settings
+    app.state.app_store = app_store
+    app.state.cookie_secret = cookie_secret
+
+    logger.info(
+        "Auth/Push bereit — TOTP=%s VAPID-public=%s…",
+        "ja" if await app_store.get_totp_secret() else "nein",
+        (vapid.get("public_key") or "")[:12],
+    )
 
     # Load drop-in modules (patcher / backup_verifier placeholders skip until ready)
     modules_path = settings.modules_dir
@@ -109,6 +126,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await registry.run_shutdown(app)
+    await app_store.close()
     await store.close()
 
 
@@ -122,9 +140,27 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
 
+    app.add_middleware(TotpAuthMiddleware)
+
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
     app.include_router(api_router)
     app.include_router(ssh_ws_router)
+
+    @app.get("/auth/login", response_class=HTMLResponse)
+    async def auth_login_page(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request,
+            "auth_login.html",
+            {
+                "app_name": settings.app_name,
+                "now": format_de(now_berlin()),
+                "next": request.query_params.get("next") or "/",
+            },
+        )
+
+    @app.get("/auth")
+    async def auth_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/auth/login", status_code=302)
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> HTMLResponse:
@@ -153,6 +189,7 @@ def create_app() -> FastAPI:
             {
                 "app_name": settings.app_name,
                 "settings": get_settings(),
+                "modules": registry.list_modules(),
                 "now": format_de(now_berlin()),
             },
         )

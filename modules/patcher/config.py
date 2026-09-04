@@ -25,6 +25,13 @@ class PatcherSettings(BaseSettings):
     patcher_connect_timeout: float = Field(default=15.0, ge=3.0, le=60.0)
     patcher_api_base: str = "http://127.0.0.1:6655"
 
+    # In-process daily scan of all hosts (works inside Docker; no host crontab needed)
+    patcher_daily_enabled: bool = True
+    # Hour in Europe/Berlin (0–23). Ignored when PATCHER_CRON is set.
+    patcher_daily_hour: int = Field(default=4, ge=0, le=23)
+    # Optional 5-field cron: "m h dom mon dow" (e.g. "0 4 * * *")
+    patcher_cron: str = ""
+
     # OpenAI-compatible chat API (Ollama: http://127.0.0.1:11434/v1)
     patcher_llm_api_key: str = ""
     patcher_llm_base_url: str = "https://api.openai.com/v1"

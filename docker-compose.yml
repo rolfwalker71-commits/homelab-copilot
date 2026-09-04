@@ -39,6 +39,15 @@ services:
       BACKUP_ARCHIVE_TIMEOUT: ${BACKUP_ARCHIVE_TIMEOUT:-3600}
       BACKUP_TRANSFER_TIMEOUT: ${BACKUP_TRANSFER_TIMEOUT:-3600}
       BACKUP_API_BASE: ${BACKUP_API_BASE:-http://127.0.0.1:6655}
+      PATCHER_DAILY_ENABLED: ${PATCHER_DAILY_ENABLED:-true}
+      PATCHER_DAILY_HOUR: ${PATCHER_DAILY_HOUR:-4}
+      PATCHER_CRON: ${PATCHER_CRON:-}
+      TOTP_COOKIE_DAYS: ${TOTP_COOKIE_DAYS:-30}
+      TOTP_ISSUER: ${TOTP_ISSUER:-HomelabOps}
+      TOTP_COOKIE_SECURE: ${TOTP_COOKIE_SECURE:-auto}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@localhost}
     volumes:
       # Named volume ONLY for /data (SQLite, backups, …). Never also mount ./data:/data —
       # a bind mount overwrites the named volume → SQLite "unable to open database file" crash-loop.

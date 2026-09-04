@@ -11,6 +11,8 @@ from app.config import Settings, get_settings
 from app.core import docker_control as docker_ctl
 from app.core.locale import format_de, now_berlin
 from app.core.registry import registry
+from app.api.auth import router as auth_router
+from app.api.push import router as push_router
 
 
 def _ssh_key_present(s: Settings) -> bool:
@@ -18,6 +20,8 @@ def _ssh_key_present(s: Settings) -> bool:
 
 
 router = APIRouter(prefix="/api")
+router.include_router(auth_router)
+router.include_router(push_router)
 
 
 class SetupPayload(BaseModel):

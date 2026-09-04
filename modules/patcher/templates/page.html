@@ -3,11 +3,21 @@
 
 {% block content %}
 <section class="mb-6 animate-in">
-  <p class="eyebrow">Modul · v{{ module_version }}</p>
-  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Patch-Management</h1>
-  <p class="mt-2 max-w-3xl text-[var(--muted)]">
-    Ausstehende Updates auf Proxmox-Guests und manuellen Linux-Hosts scannen, bewerten und mit Bestätigung einspielen.
-  </p>
+  <div class="flex flex-wrap items-start justify-between gap-3">
+    <div class="min-w-0 flex-1">
+      <p class="eyebrow">Modul · v{{ module_version }}</p>
+      <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Patch-Management</h1>
+      <p class="mt-2 max-w-3xl text-[var(--muted)]">
+        Ausstehende Updates auf Proxmox-Guests und manuellen Linux-Hosts scannen, bewerten und mit Bestätigung einspielen.
+      </p>
+    </div>
+    <div class="flex flex-wrap items-center gap-2 shrink-0 pt-1">
+      <button type="button" id="btn-scan-all" class="btn btn-primary" disabled>
+        Alle Hosts prüfen
+      </button>
+    </div>
+  </div>
+  <p id="scan-all-hint" class="mt-2 text-sm text-[var(--muted)]" role="status"></p>
 </section>
 
 {% include "_subnav.html" %}
@@ -196,7 +206,175 @@
     document.querySelectorAll('.btn-scan, .btn-apply, .btn-reboot').forEach(function (b) {
       if (on) b.disabled = true;
     });
+    const scanAllBtn = document.getElementById('btn-scan-all');
+    if (scanAllBtn) scanAllBtn.disabled = on;
   }
+
+  let scanAllPoll = null;
+
+  function setScanAllBusy(on) {
+    const btn = document.getElementById('btn-scan-all');
+    if (btn) {
+      btn.disabled = on || busy;
+      btn.textContent = on ? 'Prüfung läuft…' : 'Alle Hosts prüfen';
+    }
+  }
+
+  function updateScanAllProgress(st) {
+    const hint = document.getElementById('scan-all-hint');
+    const root = progressRoot();
+    if (!root) return;
+    root.classList.remove('hidden');
+    const running = !!st.running;
+    root.setAttribute('aria-busy', running ? 'true' : 'false');
+    const spinner = document.getElementById('jp-spinner');
+    if (spinner) spinner.classList.toggle('hidden', !running);
+    document.getElementById('jp-title').textContent = running
+      ? 'Alle Hosts prüfen'
+      : 'Prüfung abgeschlossen';
+    const idx = Number(st.current_index) || 0;
+    const total = Number(st.total) || 0;
+    let pct = 0;
+    if (total > 0) {
+      pct = running
+        ? Math.max(0, Math.min(99, Math.round(((idx - 1) / total) * 100)))
+        : 100;
+      if (running && idx > 0) {
+        pct = Math.max(1, Math.min(99, Math.round(((idx - 0.15) / total) * 100)));
+      }
+    }
+    document.getElementById('jp-phase').textContent = running
+      ? ((st.current_target || '…') + (total ? ' (' + idx + '/' + total + ')' : ''))
+      : (st.trigger === 'daily' ? 'Täglicher Scan' : 'Manueller Scan');
+    document.getElementById('jp-message').textContent = st.message || '';
+    document.getElementById('jp-message').style.color = st.error ? 'var(--danger, #c44)' : '';
+    document.getElementById('jp-percent').textContent = pct + '\u00a0%';
+    document.getElementById('jp-bar').style.width = pct + '%';
+    document.getElementById('jp-bar').style.background = st.error
+      ? 'var(--danger, #c44)'
+      : 'var(--primary)';
+    document.getElementById('jp-bar-wrap').setAttribute('aria-valuenow', String(pct));
+    if (hint) {
+      hint.textContent = st.message || (running ? 'Scan läuft…' : '');
+    }
+    if (!running && st.last_summary) {
+      const foot = document.getElementById('jp-footer');
+      foot.classList.remove('hidden');
+      const s = st.last_summary;
+      foot.textContent =
+        (s.hosts_with_updates || 0) + ' Host(s) mit Updates · ' +
+        (s.total_updates || 0) + ' Pakete · ' +
+        (s.hosts_with_errors || 0) + ' Fehler';
+      foot.style.color = (s.hosts_with_errors ? 'var(--danger, #c44)' : '');
+    }
+  }
+
+  async function pollScanAll() {
+    clearInterval(scanAllPoll);
+    return new Promise(function (resolve) {
+      async function tick() {
+        try {
+          const r = await fetch(API + '/scan-all/status');
+          const st = await r.json();
+          updateScanAllProgress(st);
+          setScanAllBusy(!!st.running);
+          if (!st.running && (st.finished_at || st.error || st.last_summary)) {
+            clearInterval(scanAllPoll);
+            resolve(st);
+          } else if (!st.running && !st.started_at) {
+            // not started yet — keep polling briefly after POST
+          }
+        } catch (e) {
+          clearInterval(scanAllPoll);
+          resolve(null);
+        }
+      }
+      tick();
+      scanAllPoll = setInterval(tick, 900);
+    });
+  }
+
+  async function startScanAll() {
+    if (busy || (document.getElementById('btn-scan-all') || {}).disabled) return;
+    setBusy(true);
+    setScanAllBusy(true);
+    activeTargetId = null;
+    showProgress('scan', 'alle Hosts');
+    document.getElementById('jp-title').textContent = 'Alle Hosts prüfen';
+    document.getElementById('jp-phase').textContent = 'Start';
+    try {
+      const r = await fetch(API + '/scan-all', { method: 'POST' });
+      const j = await r.json();
+      if (!r.ok) {
+        finishProgress({
+          ok: false,
+          phase: 'Fehler',
+          percent: 100,
+          message: j.detail || 'Scan-All fehlgeschlagen',
+          error: j.detail || 'Scan-All fehlgeschlagen',
+        });
+        return;
+      }
+      // Mark running ASAP so poll doesn't exit early
+      updateScanAllProgress({
+        running: true,
+        total: 0,
+        current_index: 0,
+        message: 'Prüfung gestartet…',
+        trigger: 'manual',
+      });
+      const done = await pollScanAll();
+      if (done) updateScanAllProgress(done);
+      await loadTargets();
+    } catch (e) {
+      finishProgress({
+        ok: false,
+        phase: 'Fehler',
+        percent: 100,
+        message: String(e),
+        error: String(e),
+      });
+    } finally {
+      setBusy(false);
+      setScanAllBusy(false);
+      await loadTargets();
+    }
+  }
+
+  document.getElementById('btn-scan-all')?.addEventListener('click', function () {
+    startScanAll();
+  });
+
+  // Resume UI if a scan-all is already running (e.g. daily job or refresh mid-run)
+  fetch(API + '/scan-all/status')
+    .then(function (r) { return r.json(); })
+    .then(function (st) {
+      const btn = document.getElementById('btn-scan-all');
+      if (btn) btn.disabled = false;
+      if (st.running) {
+        setBusy(true);
+        setScanAllBusy(true);
+        showProgress('scan', 'alle Hosts');
+        pollScanAll().then(function () {
+          setBusy(false);
+          setScanAllBusy(false);
+          loadTargets();
+        });
+      } else if (st.last_summary && st.finished_at) {
+        const hint = document.getElementById('scan-all-hint');
+        if (hint) {
+          hint.textContent =
+            'Letzte Gesamtprüfung: ' + (st.finished_at || '') +
+            (st.last_summary
+              ? ' — ' + (st.last_summary.hosts_with_updates || 0) + ' Host(s) mit Updates'
+              : '');
+        }
+      }
+    })
+    .catch(function () {
+      const btn = document.getElementById('btn-scan-all');
+      if (btn) btn.disabled = false;
+    });
 
   function renderTargets(targets) {
     const root = document.getElementById('target-list');

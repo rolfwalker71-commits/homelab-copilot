@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Setup — {{ app_name }}{% endblock %}
+{% from "_icons.html" import ico %}
 
 {% block content %}
 <section class="mb-8 animate-in">
@@ -18,7 +19,14 @@
   <p class="mt-2 text-sm text-[var(--muted)]">Aktuelle Zeit: {{ now }}</p>
 </section>
 
-<form id="setup-form" class="surface animate-in animate-in-delay-1 max-w-xl space-y-5 p-5 sm:p-6" novalidate>
+<nav class="mb-6 flex flex-wrap gap-2 text-sm" aria-label="Setup-Bereiche">
+  <a href="#proxmox" class="btn btn-ghost btn-sm">Proxmox</a>
+  <a href="#security" class="btn btn-ghost btn-sm">Sicherheit</a>
+  <a href="#modules" class="btn btn-ghost btn-sm">Module</a>
+</nav>
+
+<form id="setup-form" class="surface animate-in animate-in-delay-1 max-w-xl space-y-5 p-5 sm:p-6 mb-10" novalidate>
+  <h2 id="proxmox" class="font-display text-lg font-bold scroll-mt-24">Proxmox &amp; Docker</h2>
   <div>
     <label class="label" for="proxmox_host">Proxmox Host / IP</label>
     <input class="field" id="proxmox_host" name="proxmox_host" type="text"
@@ -74,14 +82,87 @@
 
   <div class="flex flex-wrap gap-3 pt-2">
     <button type="submit" class="btn btn-primary">Speichern &amp; Discovery starten</button>
-    <a href="/" class="btn btn-ghost">Abbrechen</a>
+    <a href="/" class="btn btn-ghost">Zur Topologie</a>
   </div>
   <p id="setup-msg" class="text-sm text-[var(--muted)]" role="status"></p>
 </form>
+
+<section id="security" class="mb-10 max-w-xl scroll-mt-24 animate-in" aria-labelledby="security-heading">
+  <h2 id="security-heading" class="font-display mb-2 text-xl font-bold leading-snug">Sicherheit &amp; Benachrichtigungen</h2>
+  <p class="mb-4 text-sm text-[var(--muted)]">
+    TOTP schützt die gesamte Website. Web-Push meldet u.&nbsp;a. gefundene Updates nach dem täglichen Patch-Check.
+  </p>
+
+  <article class="surface space-y-4 p-5 sm:p-6 mb-4">
+    <h3 class="font-semibold">TOTP / Authenticator</h3>
+    <p id="totp-status" class="text-sm text-[var(--muted)]">Lade Status…</p>
+    <div id="totp-recovery" class="hidden space-y-3">
+      <p class="text-sm text-[var(--muted)]">QR zum erneuten Scannen (z.&nbsp;B. neues Telefon):</p>
+      <div class="flex justify-center">
+        <img id="setup-totp-qr" alt="TOTP QR-Code" class="max-w-[200px] rounded-lg border border-[var(--border)] bg-white p-2" width="200" height="200" />
+      </div>
+      <code id="setup-totp-secret" class="block break-all rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 text-sm"></code>
+    </div>
+    <div class="flex flex-wrap gap-2">
+      <button type="button" id="btn-show-totp" class="btn btn-ghost btn-sm">QR / Geheimnis anzeigen</button>
+      <button type="button" id="btn-logout" class="btn btn-ghost btn-sm">Abmelden</button>
+    </div>
+  </article>
+
+  <article class="surface space-y-4 p-5 sm:p-6">
+    <h3 class="font-semibold">Web-Push-Benachrichtigungen</h3>
+    <p id="push-status" class="text-sm text-[var(--muted)]">Lade Status…</p>
+    <p class="text-sm text-[var(--muted)]">
+      VAPID-Schlüssel werden beim Start automatisch erzeugt und unter <code class="text-[var(--text)]">/data</code> gespeichert.
+      Du musst nur Benachrichtigungen freigeben.
+    </p>
+    <div class="flex flex-wrap gap-2">
+      <button type="button" id="btn-push-enable" class="btn btn-primary btn-sm">Benachrichtigungen aktivieren</button>
+      <button type="button" id="btn-push-disable" class="btn btn-ghost btn-sm">Deaktivieren</button>
+    </div>
+    <p id="push-msg" class="text-sm text-[var(--muted)]" role="status"></p>
+  </article>
+</section>
+
+<section id="modules" class="mb-6 scroll-mt-24 animate-in" aria-labelledby="modules-heading">
+  <h2 id="modules-heading" class="font-display mb-2 text-xl font-bold leading-snug">Module</h2>
+  <p class="mb-4 max-w-xl text-sm text-[var(--muted)]">
+    Geladene Erweiterungen. Patch und Backup sind auch über die Hauptnavigation erreichbar.
+  </p>
+  <div class="grid gap-3 sm:grid-cols-2 max-w-3xl">
+    {% for m in modules %}
+    <article class="entity-card">
+      <div class="module-card-head">
+        <span class="module-card-ico" aria-hidden="true">{% if m.name == 'backup_verifier' %}{{ ico('backup') }}{% elif m.name == 'patcher' %}{{ ico('patch') }}{% else %}{{ ico('modules') }}{% endif %}</span>
+        <div class="min-w-0 flex-1">
+          <h3 class="font-semibold break-words leading-snug">{{ m.name }} <span class="text-sm font-normal text-[var(--muted)]">v{{ m.version }}</span></h3>
+          <p class="mt-1 text-sm text-[var(--muted)]">{{ m.description }}</p>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <span class="chip {% if m.enabled %}chip-running{% else %}chip-stopped{% endif %}">
+              {% if m.enabled %}aktiv{% else %}deaktiviert{% endif %}
+            </span>
+            {% set ui = (m.meta or {}).get('ui_path') %}
+            {% if ui %}
+            <a href="{{ ui }}" class="btn btn-ghost btn-xs">Öffnen</a>
+            {% elif m.name == 'backup_verifier' %}
+            <a href="/modules/backup_verifier" class="btn btn-ghost btn-xs">Öffnen</a>
+            {% elif m.name == 'patcher' %}
+            <a href="/modules/patcher" class="btn btn-ghost btn-xs">Öffnen</a>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </article>
+    {% else %}
+    <p class="text-sm text-[var(--muted)]">Keine Module geladen.</p>
+    {% endfor %}
+  </div>
+</section>
 {% endblock %}
 
 {% block scripts %}
 <script>
+(function () {
   document.getElementById('setup-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const form = e.target;
@@ -97,7 +178,6 @@
       docker_use_local_socket: form.docker_use_local_socket.checked,
       docker_ssh_user: form.docker_ssh_user.value.trim() || 'root',
     };
-    // Keep existing secrets if fields left blank
     if (!data.proxmox_token_secret) delete data.proxmox_token_secret;
     if (!data.proxmox_password) delete data.proxmox_password;
 
@@ -117,5 +197,121 @@
       msg.textContent = 'Fehler: ' + err.message;
     }
   });
+
+  async function refreshTotpStatus() {
+    const el = document.getElementById('totp-status');
+    try {
+      const r = await fetch('/api/auth/status');
+      const d = await r.json();
+      el.textContent = d.totp_confirmed
+        ? ('TOTP aktiv · Session ca. ' + (d.cookie_days || 30) + ' Tage · ' + (d.authenticated ? 'angemeldet' : 'nicht angemeldet'))
+        : 'TOTP noch nicht bestätigt — bitte unter /auth/login einrichten.';
+    } catch (e) {
+      el.textContent = 'Status nicht verfügbar.';
+    }
+  }
+
+  document.getElementById('btn-show-totp')?.addEventListener('click', async () => {
+    const box = document.getElementById('totp-recovery');
+    try {
+      const r = await fetch('/api/auth/setup');
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'Fehler');
+      document.getElementById('setup-totp-qr').src = d.qr_data_uri;
+      document.getElementById('setup-totp-secret').textContent = d.secret;
+      box.classList.remove('hidden');
+    } catch (err) {
+      document.getElementById('totp-status').textContent = 'Fehler: ' + err.message;
+    }
+  });
+
+  document.getElementById('btn-logout')?.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.href = '/auth/login';
+  });
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  async function refreshPushStatus() {
+    const el = document.getElementById('push-status');
+    try {
+      const r = await fetch('/api/push/status');
+      const d = await r.json();
+      el.textContent = d.configured
+        ? ('VAPID bereit · ' + (d.subscription_count || 0) + ' Abonnement(s)')
+        : 'VAPID noch nicht bereit.';
+    } catch (e) {
+      el.textContent = 'Push-Status nicht verfügbar.';
+    }
+  }
+
+  document.getElementById('btn-push-enable')?.addEventListener('click', async () => {
+    const msg = document.getElementById('push-msg');
+    msg.textContent = 'Aktiviere…';
+    try {
+      if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+        throw new Error('Dieser Browser unterstützt keine Web-Push-Benachrichtigungen.');
+      }
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') throw new Error('Berechtigung verweigert.');
+      const reg = await navigator.serviceWorker.ready;
+      const keyRes = await fetch('/api/push/vapid-public-key');
+      const keyData = await keyRes.json();
+      if (!keyRes.ok || !keyData.publicKey) throw new Error('Kein VAPID-Public-Key.');
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(keyData.publicKey),
+        });
+      }
+      const raw = sub.toJSON();
+      const r = await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          endpoint: raw.endpoint,
+          keys: { p256dh: raw.keys.p256dh, auth: raw.keys.auth },
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'Subscribe fehlgeschlagen');
+      msg.textContent = d.message || 'Aktiviert.';
+      refreshPushStatus();
+    } catch (err) {
+      msg.textContent = 'Fehler: ' + err.message;
+    }
+  });
+
+  document.getElementById('btn-push-disable')?.addEventListener('click', async () => {
+    const msg = document.getElementById('push-msg');
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await fetch('/api/push/unsubscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: sub.endpoint }),
+        });
+        await sub.unsubscribe();
+      }
+      msg.textContent = 'Benachrichtigungen deaktiviert.';
+      refreshPushStatus();
+    } catch (err) {
+      msg.textContent = 'Fehler: ' + err.message;
+    }
+  });
+
+  refreshTotpStatus();
+  refreshPushStatus();
+})();
 </script>
 {% endblock %}

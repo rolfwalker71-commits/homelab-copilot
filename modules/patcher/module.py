@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ from patcher import cron as cron_mod
 from patcher.jobs import JOBS
 from patcher.llm import LlmError, summarize_scan
 from patcher.scan import ScanError, scan_target
+from patcher.scheduler import SCAN_ALL, begin_scan_all, daily_scan_loop, run_scan_all_hosts
 from patcher.sshutil import ssh_probe
 from patcher.store import PatcherStore
 from patcher.targets import list_targets, resolve_target
@@ -36,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _store: PatcherStore | None = None
+_daily_task: Any = None
 
 
 def _make_templates() -> Jinja2Templates:
@@ -165,7 +168,7 @@ async def _run_scan_job(
     store = _store
     if store is None:
         JOBS.finish(job_id, status="failed", error="Store nicht bereit")
-        return
+        return {"status": "failed", "scan_id": None, "summary": {}, "error": "Store nicht bereit"}
     scan_id: int | None = None
     try:
         target = await resolve_target(store, snapshot, target_id)
@@ -235,6 +238,12 @@ async def _run_scan_job(
             ),
             phase="Fertig",
         )
+        return {
+            "status": "success",
+            "scan_id": scan_id,
+            "summary": summary,
+            "error": None,
+        }
     except (ScanError, DockerControlError, RuntimeError) as exc:
         msg = getattr(exc, "message", None) or str(exc)
         if scan_id is not None:
@@ -243,6 +252,7 @@ async def _run_scan_job(
             except Exception:
                 logger.exception("finish_scan failed")
         JOBS.finish(job_id, status="failed", error=msg)
+        return {"status": "failed", "scan_id": scan_id, "summary": {}, "error": msg}
     except Exception as exc:
         logger.exception("scan job failed")
         if scan_id is not None:
@@ -251,6 +261,99 @@ async def _run_scan_job(
             except Exception:
                 logger.exception("finish_scan failed")
         JOBS.finish(job_id, status="failed", error=str(exc))
+        return {"status": "failed", "scan_id": scan_id, "summary": {}, "error": str(exc)}
+
+
+async def _notify_scan_findings(summary: dict[str, Any]) -> None:
+    """Push when daily/manual all-host scan finds updates or errors."""
+    hosts_u = int(summary.get("hosts_with_updates") or 0)
+    hosts_e = int(summary.get("hosts_with_errors") or 0)
+    total = int(summary.get("total_updates") or 0)
+    security = int(summary.get("total_security") or 0)
+    if hosts_u <= 0 and hosts_e <= 0:
+        return
+    try:
+        from app.core.push import send_push_to_all
+
+        # app.state is set on the FastAPI app; pull store via a soft global if needed
+        store = None
+        try:
+            from app.main import app as fastapi_app
+
+            store = getattr(fastapi_app.state, "app_store", None)
+        except Exception:
+            store = None
+        if store is None:
+            return
+        parts = []
+        if hosts_u:
+            parts.append(
+                f"{hosts_u} Host(s) mit {total} Update(s) ({security} Security)"
+            )
+        if hosts_e:
+            parts.append(f"{hosts_e} Host(s) mit Fehlern")
+        body = " · ".join(parts)
+        await send_push_to_all(
+            store,
+            title="HomelabOps — Patch-Check",
+            body=body,
+            url="/modules/patcher",
+            tag="patcher-scan",
+        )
+    except Exception:
+        logger.exception("Push-Benachrichtigung fehlgeschlagen")
+
+
+async def _scan_one_target_sync(target, *, snapshot, do_summarize: bool = False) -> dict[str, Any]:
+    """Run a single-host scan synchronously (for sequential scan-all)."""
+    job = JOBS.create(kind="scan", target_id=target.id)
+    result = await _run_scan_job(
+        job.id,
+        target_id=target.id,
+        snapshot=snapshot,
+        do_summarize=do_summarize,
+    )
+    return result or {"status": "failed", "summary": {}, "error": "unbekannt"}
+
+
+async def _run_scan_all(
+    *,
+    snapshot,
+    trigger: str,
+    do_summarize: bool = False,
+    already_begun: bool = False,
+) -> dict[str, Any]:
+    store = _store
+    if store is None:
+        SCAN_ALL.running = False
+        return {"ok": False, "error": "Store nicht bereit."}
+    targets = await list_targets(store, snapshot)
+
+    async def scan_one(target):
+        return await _scan_one_target_sync(
+            target, snapshot=snapshot, do_summarize=do_summarize
+        )
+
+    async def on_complete(summary: dict[str, Any]) -> None:
+        try:
+            from app.main import app as fastapi_app
+
+            app_store = getattr(fastapi_app.state, "app_store", None)
+            if app_store is not None:
+                await app_store.set_patcher_last_daily(
+                    summary.get("finished_at_iso") or ""
+                )
+        except Exception:
+            logger.exception("patcher last_daily speichern fehlgeschlagen")
+        await _notify_scan_findings(summary)
+
+    return await run_scan_all_hosts(
+        targets=targets,
+        scan_one=scan_one,
+        trigger=trigger,
+        on_complete=on_complete,
+        already_begun=already_begun,
+    )
 
 
 async def _run_apply_job(
@@ -413,6 +516,42 @@ async def api_scan(
         do_summarize=payload.summarize,
     )
     return job.to_dict()
+
+
+@router.get("/scan-all/status")
+async def api_scan_all_status() -> dict[str, Any]:
+    ps = get_patcher_settings()
+    return {
+        **SCAN_ALL.to_dict(),
+        "daily_enabled": ps.patcher_daily_enabled,
+        "daily_hour": ps.patcher_daily_hour,
+        "daily_cron": ps.patcher_cron or None,
+    }
+
+
+@router.post("/scan-all")
+async def api_scan_all(
+    request: Request,
+    background: BackgroundTasks,
+    wait: bool = False,
+) -> dict[str, Any]:
+    """Sequentially scan all patch targets (manual „Alle Hosts prüfen“)."""
+    begun = await begin_scan_all(trigger="manual")
+    if begun is None:
+        raise HTTPException(status_code=409, detail="Scan läuft bereits.")
+    snap = _snapshot(request)
+    if wait:
+        return await _run_scan_all(
+            snapshot=snap, trigger="manual", do_summarize=False, already_begun=True
+        )
+    background.add_task(
+        _run_scan_all,
+        snapshot=snap,
+        trigger="manual",
+        do_summarize=False,
+        already_begun=True,
+    )
+    return {"ok": True, "started": True, **SCAN_ALL.to_dict()}
 
 
 @router.post("/apply")
@@ -612,7 +751,7 @@ class PatcherModule:
         return router
 
     async def on_startup(self, app: FastAPI) -> None:
-        global _store
+        global _store, _daily_task
         ps = get_patcher_settings()
         _store = PatcherStore(ps.db_path)
         await _store.connect()
@@ -663,10 +802,48 @@ class PatcherModule:
                 _page_ctx("schedule"),
             )
 
-        logger.info("patcher ready — DB %s", ps.db_path)
+        async def _daily_runner() -> None:
+            async def get_targets_and_scan() -> None:
+                store: TopologyStore = app.state.topology_store
+                snap = store.snapshot
+                logger.info("Patcher Daily-Scan startet…")
+                await _run_scan_all(
+                    snapshot=snap, trigger="daily", do_summarize=False
+                )
+
+            await daily_scan_loop(
+                enabled=ps.patcher_daily_enabled,
+                cron_expr=ps.patcher_cron,
+                hour=ps.patcher_daily_hour,
+                get_targets_and_scan=get_targets_and_scan,
+            )
+
+        if ps.patcher_daily_enabled:
+            _daily_task = asyncio.create_task(
+                _daily_runner(), name="patcher-daily-scan"
+            )
+            app.state.patcher_daily_task = _daily_task
+
+        logger.info(
+            "patcher ready — DB %s · daily=%s hour=%s cron=%r",
+            ps.db_path,
+            ps.patcher_daily_enabled,
+            ps.patcher_daily_hour,
+            ps.patcher_cron or "",
+        )
 
     async def on_shutdown(self, app: FastAPI) -> None:
-        global _store
+        global _store, _daily_task
+        task = getattr(app.state, "patcher_daily_task", None) or _daily_task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            _daily_task = None
         if _store:
             await _store.close()
             _store = None

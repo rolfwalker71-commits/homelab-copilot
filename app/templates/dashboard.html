@@ -799,33 +799,6 @@
   {% endif %}
 </section>
 
-<section class="mb-6" aria-labelledby="modules-heading">
-  <h2 id="modules-heading" class="font-display mb-4 text-xl font-bold leading-snug">Module</h2>
-  <div class="grid gap-3 sm:grid-cols-2">
-    {% for m in modules %}
-    <article class="entity-card">
-      <div class="module-card-head">
-        <span class="module-card-ico" aria-hidden="true">{% if m.name == 'backup_verifier' %}{{ ico('backup') }}{% elif m.name == 'patcher' %}{{ ico('patch') }}{% else %}{{ ico('modules') }}{% endif %}</span>
-        <div class="min-w-0 flex-1">
-          <h3 class="font-semibold break-words leading-snug">{{ m.name }} <span class="text-sm font-normal text-[var(--muted)]">v{{ m.version }}</span></h3>
-          <p class="mt-1 text-sm text-[var(--muted)]">{{ m.description }}</p>
-          <div class="mt-3 flex flex-wrap items-center gap-2">
-            <span class="chip {% if m.enabled %}chip-running{% else %}chip-stopped{% endif %}">
-              {% if m.enabled %}aktiv{% else %}deaktiviert{% endif %}
-            </span>
-            {% if m.name == 'backup_verifier' %}
-            <a href="/modules/backup_verifier" class="btn btn-ghost btn-xs">Öffnen</a>
-            {% elif m.name == 'patcher' %}
-            <a href="/modules/patcher" class="btn btn-ghost btn-xs">Öffnen</a>
-            {% endif %}
-          </div>
-        </div>
-      </div>
-    </article>
-    {% endfor %}
-  </div>
-</section>
-
 <div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
 
 <dialog id="logs-dialog" class="logs-dialog">

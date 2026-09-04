@@ -9,3 +9,8 @@ aiosqlite==0.20.0
 asyncssh==2.19.0
 docker==7.1.0
 orjson==3.10.12
+pyotp==2.9.0
+qrcode==8.0
+Pillow==11.1.0
+pywebpush==2.0.1
+cryptography==44.0.0

@@ -1,7 +1,8 @@
 /* Homelab Operations Copilot — Service Worker (PWA)
  * Cache-first for static assets; network-first for HTML/API with offline fallback.
+ * Web Push: show notifications for patch findings etc.
  */
-const CACHE_VERSION = "hlops-v13";
+const CACHE_VERSION = "hlops-v14";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const OFFLINE_URL = "/offline";
 
@@ -29,8 +30,48 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+self.addEventListener("push", (event) => {
+  let data = { title: "HomelabOps", body: "Neue Benachrichtigung", url: "/", tag: "homelab-ops" };
+  try {
+    if (event.data) {
+      const parsed = event.data.json();
+      data = Object.assign({}, data, parsed);
+    }
+  } catch (_) {
+    try {
+      data.body = event.data ? event.data.text() : data.body;
+    } catch (__) {
+      /* ignore */
+    }
+  }
+  event.waitUntil(
+    self.registration.showNotification(data.title || "HomelabOps", {
+      body: data.body || "",
+      tag: data.tag || "homelab-ops",
+      data: { url: data.url || "/" },
+      icon: "/static/icons/icon-192.png",
+      badge: "/static/icons/icon-192.png",
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || "/";
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+      for (const client of list) {
+        if ("focus" in client) {
+          client.navigate(url);
+          return client.focus();
+        }
+      }
+      if (clients.openWindow) return clients.openWindow(url);
+    })
+  );
+});
+
 async function networkFirstNavigation(req) {
-  // Brief retry: short backend restarts often fail the first navigation fetch.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(req);
@@ -56,12 +97,10 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
-  // API: network only (no stale topology)
   if (url.pathname.startsWith("/api/")) {
     return;
   }
 
-  // Static assets: cache-first
   if (url.pathname.startsWith("/static/")) {
     event.respondWith(
       caches.match(req).then((cached) => {
@@ -78,7 +117,6 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // HTML navigations: network-first (+ brief retry), offline fallback
   if (req.mode === "navigate" || (req.headers.get("accept") || "").includes("text/html")) {
     event.respondWith(networkFirstNavigation(req));
   }

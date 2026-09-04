@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Anmelden — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mx-auto max-w-md animate-in">
+  <p class="eyebrow">Sicherheit</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug" id="auth-title">Anmelden</h1>
+  <p class="mt-2 text-[var(--muted)]" id="auth-lead">
+    Gib den Code aus deiner Authenticator-App ein.
+  </p>
+
+  <div id="setup-panel" class="mt-6 surface hidden space-y-4 p-5 sm:p-6">
+    <p class="text-sm text-[var(--muted)]">
+      Ersteinrichtung: Scanne den QR-Code mit einer TOTP-App (z.&nbsp;B. Aegis, Authy, Google Authenticator)
+      und bestätige mit dem aktuellen Code.
+    </p>
+    <div class="flex justify-center">
+      <img id="totp-qr" alt="TOTP QR-Code" class="max-w-[220px] rounded-lg border border-[var(--border)] bg-white p-2" width="220" height="220" />
+    </div>
+    <div>
+      <p class="label">Geheimnis (Wiederherstellung)</p>
+      <code id="totp-secret" class="block break-all rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 text-sm"></code>
+    </div>
+  </div>
+
+  <form id="auth-form" class="mt-6 surface space-y-4 p-5 sm:p-6" novalidate>
+    <div>
+      <label class="label" for="totp-code">Einmalcode</label>
+      <input class="field text-center text-2xl tracking-[0.35em] font-semibold"
+             id="totp-code" name="code" type="text" inputmode="numeric"
+             pattern="[0-9 ]*" maxlength="12" autocomplete="one-time-code"
+             placeholder="000000" required autofocus />
+    </div>
+    <button type="submit" class="btn btn-primary w-full" id="auth-submit">Anmelden</button>
+    <p id="auth-msg" class="text-sm text-[var(--muted)]" role="status"></p>
+  </form>
+  <p class="mt-4 text-center text-xs text-[var(--muted)]">{{ now }}</p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const nextUrl = {{ next|tojson }};
+  const title = document.getElementById('auth-title');
+  const lead = document.getElementById('auth-lead');
+  const panel = document.getElementById('setup-panel');
+  const msg = document.getElementById('auth-msg');
+  const form = document.getElementById('auth-form');
+
+  async function loadStatus() {
+    const r = await fetch('/api/auth/status');
+    const d = await r.json();
+    if (d.authenticated) {
+      window.location.href = nextUrl || '/';
+      return;
+    }
+    if (d.needs_setup || !d.totp_confirmed) {
+      title.textContent = 'TOTP einrichten';
+      lead.textContent = 'Scanne den QR-Code und bestätige mit dem Code aus der App.';
+      panel.classList.remove('hidden');
+      if (d.qr_data_uri) document.getElementById('totp-qr').src = d.qr_data_uri;
+      if (d.secret) document.getElementById('totp-secret').textContent = d.secret;
+      document.getElementById('auth-submit').textContent = 'Einrichten & anmelden';
+    } else {
+      title.textContent = 'Anmelden';
+      lead.textContent = 'Gib den Code aus deiner Authenticator-App ein.';
+      panel.classList.add('hidden');
+      document.getElementById('auth-submit').textContent = 'Anmelden';
+    }
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    msg.textContent = 'Prüfe…';
+    try {
+      const r = await fetch('/api/auth/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: document.getElementById('totp-code').value }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'Anmeldung fehlgeschlagen');
+      msg.textContent = d.message || 'OK';
+      window.location.href = nextUrl || '/';
+    } catch (err) {
+      msg.textContent = 'Fehler: ' + err.message;
+    }
+  });
+
+  loadStatus().catch((err) => {
+    msg.textContent = 'Status konnte nicht geladen werden: ' + err.message;
+  });
+})();
+</script>
+{% endblock %}

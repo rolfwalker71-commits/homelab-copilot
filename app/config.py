@@ -52,9 +52,24 @@ class Settings(BaseSettings):
     # Cap total SSH scan time so POST /discovery/refresh stays browser-friendly.
     docker_ssh_budget_seconds: float = Field(default=25.0, ge=5.0, le=120.0)
 
+    # --- TOTP site gate ---
+    totp_cookie_days: int = Field(default=30, ge=1, le=365)
+    totp_issuer: str = "HomelabOps"
+    # auto | true | false — Secure cookie flag (auto = HTTPS / X-Forwarded-Proto)
+    totp_cookie_secure: str = "auto"
+
+    # --- Web Push (optional env override; else generated into DATA_DIR SQLite) ---
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_subject: str = "mailto:admin@localhost"
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "topology.db"
+
+    @property
+    def app_db_path(self) -> Path:
+        return self.data_dir / "app.db"
 
     @property
     def proxmox_configured(self) -> bool:
