@@ -59,6 +59,32 @@ class DiscoveryEngine:
                 return f"{type(exc).__name__}: {nested}"
         return type(exc).__name__
 
+    @staticmethod
+    def _is_docker_socket_permission_error(exc: BaseException) -> bool:
+        """True when connecting to docker.sock failed with EACCES (possibly nested)."""
+        cur: BaseException | None = exc
+        seen: set[int] = set()
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            if isinstance(cur, PermissionError):
+                return True
+            if getattr(cur, "errno", None) == 13:
+                return True
+            text = str(cur).lower()
+            if "permission denied" in text or "permissionerror(13" in text:
+                return True
+            nxt = cur.__cause__ or cur.__context__
+            if isinstance(cur.args, tuple):
+                for arg in cur.args:
+                    if isinstance(arg, BaseException):
+                        nxt = nxt or arg
+                    elif isinstance(arg, tuple):
+                        for inner in arg:
+                            if isinstance(inner, BaseException):
+                                nxt = nxt or inner
+            cur = nxt if isinstance(nxt, BaseException) else None
+        return False
+
     async def refresh(self) -> TopologySnapshot:
         now = now_berlin()
         errors: list[str] = []
@@ -80,14 +106,22 @@ class DiscoveryEngine:
                 "oder den Setup-Assistenten verwenden."
             )
 
-        # Docker: local socket first, then SSH to discovered guest IPs
+        # Docker: local socket first (optional), then SSH to discovered guest IPs
         try:
             local_ctrs = await self._discover_docker_local()
             containers.extend(local_ctrs)
         except Exception as exc:
-            msg = f"Lokale Docker-Discovery fehlgeschlagen: {self._exc_text(exc)}"
-            logger.warning(msg)
-            errors.append(msg)
+            if self._is_docker_socket_permission_error(exc):
+                # Optional path — EACCES is noise when discovery is SSH-only.
+                logger.info(
+                    "Kein Zugriff auf docker.sock (%s) — lokal übersprungen "
+                    "(DOCKER_USE_LOCAL_SOCKET=false oder User in Gruppe docker).",
+                    self.settings.docker_socket,
+                )
+            else:
+                msg = f"Lokale Docker-Discovery fehlgeschlagen: {self._exc_text(exc)}"
+                logger.warning(msg)
+                errors.append(msg)
 
         ssh_targets = self._collect_ssh_targets(guests)
         if ssh_targets:
