@@ -123,7 +123,9 @@ class DiscoveryEngine:
                 logger.warning(msg)
                 errors.append(msg)
 
-        ssh_targets = self._collect_ssh_targets(guests)
+        ssh_targets, ssh_skip = self._collect_ssh_targets(guests)
+        if ssh_skip:
+            errors.append(ssh_skip)
         if ssh_targets:
             remote, ssh_err = await self._discover_docker_ssh_many(ssh_targets)
             containers.extend(remote)
@@ -649,19 +651,38 @@ class DiscoveryEngine:
             return fallback
         return configured
 
-    def _collect_ssh_targets(self, guests: list[TopologyEntity]) -> list[tuple[str, str]]:
-        """Return (parent_id, ip) pairs for running guests with known IPs."""
-        key = self._ssh_key_path()
-        if not key.is_file():
-            logger.debug("SSH key not found at %s — skipping remote Docker scan", key)
-            return []
-        targets: list[tuple[str, str]] = []
+    def _collect_ssh_targets(
+        self, guests: list[TopologyEntity]
+    ) -> tuple[list[tuple[str, str]], str | None]:
+        """Return ((parent_id, ip) pairs, optional skip reason for topology.errors)."""
+        candidates: list[tuple[str, str]] = []
         for g in guests:
             if g.status != EntityStatus.RUNNING or not g.ip_addresses:
                 continue
             # Prefer first non-loopback IP
-            targets.append((g.id, g.ip_addresses[0]))
-        return targets
+            candidates.append((g.id, g.ip_addresses[0]))
+
+        if not candidates:
+            return [], None
+
+        key = self._ssh_key_path()
+        if key.is_file():
+            return candidates, None
+
+        configured = Path(self.settings.docker_ssh_key_path)
+        fallback = Path(self.settings.data_dir) / "ssh" / "id_ed25519"
+        paths = str(configured)
+        if str(fallback) != str(configured):
+            paths = f"{configured} (Fallback {fallback} ebenfalls fehlend)"
+        msg = (
+            f"SSH-Key nicht gefunden unter {paths} — "
+            f"Docker-Scan per SSH für {len(candidates)} Host(s) übersprungen. "
+            f"Key in den Container mounten "
+            f"(z. B. ./ssh/id_ed25519:/data/ssh/id_ed25519:ro) "
+            f"oder DOCKER_SSH_KEY_PATH setzen."
+        )
+        logger.warning(msg)
+        return [], msg
 
     async def _discover_docker_ssh_many(
         self, targets: list[tuple[str, str]]

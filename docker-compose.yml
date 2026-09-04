@@ -20,7 +20,8 @@ services:
       PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET:-}
       PROXMOX_PASSWORD: ${PROXMOX_PASSWORD:-}
       PROXMOX_VERIFY_SSL: ${PROXMOX_VERIFY_SSL:-false}
-      DOCKER_USE_LOCAL_SOCKET: ${DOCKER_USE_LOCAL_SOCKET:-true}
+      # false = discover Docker via SSH to LXCs (production default). true only with docker.sock below.
+      DOCKER_USE_LOCAL_SOCKET: ${DOCKER_USE_LOCAL_SOCKET:-false}
       DOCKER_SSH_USER: ${DOCKER_SSH_USER:-root}
       DOCKER_SSH_KEY_PATH: /data/ssh/id_ed25519
       BACKUP_COPILOT_DIR: ${BACKUP_COPILOT_DIR:-/data/backups}
@@ -39,11 +40,20 @@ services:
       BACKUP_TRANSFER_TIMEOUT: ${BACKUP_TRANSFER_TIMEOUT:-3600}
       BACKUP_API_BASE: ${BACKUP_API_BASE:-http://127.0.0.1:6655}
     volumes:
+      # Named volume ONLY for /data (SQLite, backups, …). Never also mount ./data:/data —
+      # a bind mount overwrites the named volume → SQLite "unable to open database file" crash-loop.
+      # App UID 10001 (appuser); the named volume is created with correct ownership.
       - copilot-data:/data
-      # Optional: mount host Docker socket for local container discovery
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Optional: mount SSH private key for remote LXC Docker scans
-      # - ./ssh/id_ed25519:/data/ssh/id_ed25519:ro
+      # Optional: host Docker socket for local discovery. Leave commented on production
+      # (use SSH to LXCs). If you enable this, also set DOCKER_USE_LOCAL_SOCKET=true.
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
+      # SSH private key ONLY (file → file). Key must exist as a FILE before compose up
+      # (missing path → Docker creates a DIRECTORY → broken SSH / 0 containers discovered).
+      # Wrong:  ./data:/data  or  key/dir mounted onto /data  → hides named volume.
+      # Right:  copilot-data:/data + key file mounted onto /data/ssh/id_ed25519.
+      # Prepare: mkdir -p data/ssh && install -m 600 id_ed25519 data/ssh/id_ed25519
+      # Prod .env: DOCKER_SSH_KEY_HOST_PATH=/home/homelab-copilot/data/ssh/id_ed25519
+      - ${DOCKER_SSH_KEY_HOST_PATH:-./data/ssh/id_ed25519}:/data/ssh/id_ed25519:ro
     restart: unless-stopped
 
 volumes:

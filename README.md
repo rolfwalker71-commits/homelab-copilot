@@ -50,8 +50,16 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 6655 --reload
 | `PROXMOX_PASSWORD` | Fallback-Login |
 | `PROXMOX_VERIFY_SSL` | `true`/`false` |
 | `DOCKER_USE_LOCAL_SOCKET` | `/var/run/docker.sock` scannen |
-| `DOCKER_SSH_KEY_PATH` | Key für Remote-Docker in LXCs (Default `/data/ssh/id_ed25519`) |
+| `DOCKER_SSH_KEY_HOST_PATH` | Host-Datei für den SSH-Key (Compose → `/data/ssh/id_ed25519:ro`) |
+| `DOCKER_SSH_KEY_PATH` | Key-Pfad *im Container* (Default `/data/ssh/id_ed25519`) |
 | `DISCOVERY_INTERVAL_SECONDS` | Auto-Refresh (Default 300) |
+
+### Volumes / SSH-Key (Produktion)
+
+- Persistenz: Named Volume `copilot-data` → `/data` (SQLite `topology.db`, Backups, …).
+- SSH-Key: **nur** die Key-Datei bind-mounten, z. B. `DOCKER_SSH_KEY_HOST_PATH=/home/homelab-copilot/data/ssh/id_ed25519` → `/data/ssh/id_ed25519:ro`.
+- **Nicht** den Key oder ein Host-Verzeichnis auf `/data` mounten — sonst ersetzt der Mount das Data-Volume und die App crash-loopt mit `unable to open database file` (Prozess läuft als UID `10001`).
+- Key-Datei auf dem Host **vor** `compose up` anlegen (`chmod 600`); fehlt die Datei, legt Docker dort ein Verzeichnis an.
 
 ### Proxmox API-Token ACL (wichtig)
 
