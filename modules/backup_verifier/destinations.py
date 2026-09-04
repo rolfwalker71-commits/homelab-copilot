@@ -137,15 +137,33 @@ def resolve_auth(
         "key_pem": None,
     }
     if mode == AUTH_PASSWORD:
-        out["password"] = secret or None
+        if not secret:
+            raise DockerControlError(
+                "Passwort-Auth gewählt, aber kein Passwort hinterlegt. "
+                "Passwort eintragen, „In Liste übernehmen“ und Speichern — "
+                "„Leer lassen“ behält nur ein bereits gespeichertes Secret.",
+                status_code=400,
+            )
+        out["password"] = secret
     elif mode == AUTH_KEY_PATH:
         p = Path(secret) if secret else ssh_key_path(settings)
         out["key"] = p
     elif mode == AUTH_KEY_PEM:
-        out["key_pem"] = secret or None
+        if not secret:
+            raise DockerControlError(
+                "PEM-Auth gewählt, aber kein Private Key hinterlegt.",
+                status_code=400,
+            )
+        out["key_pem"] = secret
     else:
         out["key"] = ssh_key_path(settings)
     return out
+
+
+def _restricted_ssh_shell(dest: dict[str, Any], port: int) -> bool:
+    """Hetzner Storage Box port 23: limited shell (no pipes/&&, no ``test``)."""
+    preset = (dest.get("preset") or "").strip()
+    return preset == "storage_box" or port == 23
 
 
 async def check_destination(
@@ -202,29 +220,73 @@ async def check_destination(
             "message": "Host und Remote-Pfad sind für SFTP erforderlich.",
         }
 
-    auth = resolve_auth(dest, settings)
     try:
-        await sshutil.ssh_run_ok(
-            settings,
-            host,
-            f"mkdir -p -- {shlex.quote(remote_path)} && "
-            f"test -w {shlex.quote(remote_path)} && "
-            f"touch {shlex.quote(remote_path.rstrip('/') + '/.hc_probe')} && "
-            f"rm -f -- {shlex.quote(remote_path.rstrip('/') + '/.hc_probe')}",
-            timeout=min(30.0, bsettings.backup_ssh_timeout),
-            username=auth["username"],
-            key=auth.get("key"),
-            key_pem=auth.get("key_pem"),
-            password=auth.get("password"),
-            port=auth["port"],
-        )
+        auth = resolve_auth(dest, settings)
+    except DockerControlError as exc:
+        return {"ok": False, "kind": kind, "message": exc.message}
+
+    timeout = min(30.0, bsettings.backup_ssh_timeout)
+    probe = remote_path.rstrip("/") + "/.hc_probe"
+    run_kw = dict(
+        username=auth["username"],
+        key=auth.get("key"),
+        key_pem=auth.get("key_pem"),
+        password=auth.get("password"),
+        port=auth["port"],
+        timeout=timeout,
+    )
+    try:
+        # Full shell (Synology): one compound command is fine.
+        # Storage Box port 23: no && / test — run simple whitelisted cmds only.
+        if _restricted_ssh_shell(dest, auth["port"]):
+            base = remote_path.rstrip("/")
+            if base not in ("/home", "home", ".", ""):
+                # mkdir may fail if dir exists; ignore — touch proves write access
+                try:
+                    await sshutil.ssh_run_ok(
+                        settings,
+                        host,
+                        f"mkdir {shlex.quote(base)}",
+                        **run_kw,
+                    )
+                except DockerControlError:
+                    pass
+            await sshutil.ssh_run_ok(
+                settings, host, f"touch {shlex.quote(probe)}", **run_kw
+            )
+            await sshutil.ssh_run_ok(
+                settings, host, f"rm {shlex.quote(probe)}", **run_kw
+            )
+        else:
+            await sshutil.ssh_run_ok(
+                settings,
+                host,
+                f"mkdir -p -- {shlex.quote(remote_path)} && "
+                f"test -w {shlex.quote(remote_path)} && "
+                f"touch {shlex.quote(probe)} && "
+                f"rm -f -- {shlex.quote(probe)}",
+                **run_kw,
+            )
         return {
             "ok": True,
             "kind": kind,
             "message": f"SFTP OK — {label} ({host}:{auth['port']} → {remote_path})",
         }
     except DockerControlError as exc:
-        return {"ok": False, "kind": kind, "message": exc.message}
+        msg = exc.message
+        low = msg.lower()
+        # Avoid duplicating shell/port-23 hints already in format_ssh_failure.
+        if (
+            _restricted_ssh_shell(dest, auth["port"])
+            and "port 23" not in low
+            and "ssh-unterstützung" not in low
+            and "authentifizierung fehlgeschlagen" not in low
+        ):
+            msg += (
+                " Hinweis: Storage Box braucht Port 23 und „SSH-Unterstützung“ "
+                "in der Hetzner Console (Port 22 = nur SFTP ohne Shell)."
+            )
+        return {"ok": False, "kind": kind, "message": msg}
     except Exception as exc:
         return {"ok": False, "kind": kind, "message": str(exc)}
 

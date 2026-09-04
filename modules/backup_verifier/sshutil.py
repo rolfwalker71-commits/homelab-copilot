@@ -53,10 +53,42 @@ def _ssh_connect_kwargs(
                 f"SSH-Key (PEM) ungültig: {exc}",
                 status_code=400,
             ) from exc
-    elif key is not None or not password:
-        key_path = key or ssh_key_path(settings)
-        kwargs["client_keys"] = [str(key_path)]
+    elif key is not None:
+        kwargs["client_keys"] = [str(key)]
+    elif not password:
+        # Key auth only when no password — never silent Docker-key fallback
+        # for intentional password mode (caller must pass password).
+        kwargs["client_keys"] = [str(ssh_key_path(settings))]
+    if password and "client_keys" not in kwargs:
+        # Prefer password; avoid probing keys that yield misleading Permission denied.
+        kwargs["preferred_auth"] = ("password", "keyboard-interactive")
     return kwargs
+
+
+def format_ssh_failure(ip: str, exc: BaseException, *, username: str | None = None) -> str:
+    """Map asyncssh/OS errors to clear German messages (auth vs shell vs other)."""
+    text = str(exc).strip()
+    low = text.lower()
+    user = (username or "").strip()
+    who = f" für Benutzer {user}" if user else ""
+
+    if isinstance(exc, asyncssh.PermissionDenied) or "permission denied" in low:
+        return (
+            f"Authentifizierung fehlgeschlagen{who} auf Host {ip}. "
+            f"Passwort/Key prüfen (nicht Port-22-SFTP-Test mit interaktivem ssh)."
+        )
+    if (
+        "shell request failed" in low
+        or "pty allocation" in low
+        or "channel open failure" in low
+        or ("channel" in low and "failed" in low)
+    ):
+        return (
+            f"SSH-Shell auf {ip} nicht verfügbar{who}. "
+            f"Hetzner Storage Box: Port 23 + „SSH-Unterstützung“ in der Console; "
+            f"Port 22 ist nur SFTP ohne Shell."
+        )
+    return f"SSH zu {ip} fehlgeschlagen: {text}"
 
 
 async def ssh_run(
@@ -92,7 +124,7 @@ async def ssh_run(
     except (OSError, asyncssh.Error) as exc:
         logger.warning("Backup SSH %s: %s", ip, exc)
         raise DockerControlError(
-            f"SSH zu {ip} fehlgeschlagen: {exc}",
+            format_ssh_failure(ip, exc, username=username),
             status_code=502,
         ) from exc
 
@@ -176,7 +208,7 @@ async def scp_get(
         ) from exc
     except (OSError, asyncssh.Error) as exc:
         raise DockerControlError(
-            f"SCP von {ip} fehlgeschlagen: {exc}",
+            format_ssh_failure(ip, exc, username=username),
             status_code=502,
         ) from exc
 
@@ -207,9 +239,15 @@ async def scp_put(
                 port=port,
             ),
         ) as conn:
-            # Ensure remote parent exists
+            # Ensure remote parent exists (Storage Box shell: no &&; mkdir -p ok on Synology)
             parent = str(Path(remote_path).parent)
-            await conn.run(f"mkdir -p -- {shlex.quote(parent)}", check=False, timeout=30)
+            if parent not in (".", "", "/"):
+                # Prefer -p; fall back to plain mkdir (Hetzner whitelist)
+                r = await conn.run(
+                    f"mkdir -p {shlex.quote(parent)}", check=False, timeout=30
+                )
+                if r.exit_status not in (0, None) and parent.startswith("/home"):
+                    await conn.run(f"mkdir {shlex.quote(parent)}", check=False, timeout=30)
             async with conn.start_sftp_client() as sftp:
                 await asyncio.wait_for(
                     sftp.put(str(local_path), remote_path),
@@ -222,7 +260,7 @@ async def scp_put(
         ) from exc
     except (OSError, asyncssh.Error) as exc:
         raise DockerControlError(
-            f"SCP nach {ip} fehlgeschlagen: {exc}",
+            format_ssh_failure(ip, exc, username=username),
             status_code=502,
         ) from exc
 
@@ -401,14 +439,10 @@ async def remote_sha256(
     password: str | None = None,
     port: int | None = None,
 ) -> str:
-    cmd = (
-        f"(sha256sum -- {shlex.quote(remote_path)} 2>/dev/null "
-        f"|| shasum -a 256 -- {shlex.quote(remote_path)}) | awk '{{print $1}}'"
-    )
-    out = await ssh_run_ok(
-        settings,
-        ip,
-        cmd,
+    # Storage Box (port 23): no pipes/||/awk — plain sha256sum only.
+    # Synology/full shell: fall back to shasum if needed.
+    quoted = shlex.quote(remote_path)
+    run_kw = dict(
         timeout=timeout,
         username=username,
         key=key,
@@ -416,6 +450,22 @@ async def remote_sha256(
         password=password,
         port=port,
     )
+    if port == 23:
+        out = await ssh_run_ok(
+            settings, ip, f"sha256sum {quoted}", **run_kw
+        )
+    else:
+        try:
+            out = await ssh_run_ok(
+                settings, ip, f"sha256sum -- {quoted}", **run_kw
+            )
+        except DockerControlError:
+            out = await ssh_run_ok(
+                settings,
+                ip,
+                f"shasum -a 256 -- {quoted}",
+                **run_kw,
+            )
     digest = out.strip().split()[0] if out.strip() else ""
     if len(digest) != 64:
         raise DockerControlError(

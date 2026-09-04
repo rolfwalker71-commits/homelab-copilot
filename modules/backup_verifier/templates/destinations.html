@@ -66,6 +66,12 @@
             <input class="field" id="f-port" type="number" value="22" />
           </div>
         </div>
+        <p id="f-port-hint" class="hidden text-xs text-[var(--muted)]">
+          Hetzner Storage Box: Port <strong>23</strong> (SSH mit mkdir/sha256sum).
+          Port 22 ist nur SFTP ohne Shell — Copilot braucht Port 23.
+          In der Hetzner Console „SSH-Unterstützung“ aktivieren.
+          Test: <code>ssh -p 23 USER@HOST</code> (nicht Port 22).
+        </p>
         <div>
           <label class="label" for="f-user">Benutzer</label>
           <input class="field" id="f-user" type="text" placeholder="backup" autocomplete="off" />
@@ -73,7 +79,10 @@
       </div>
       <div>
         <label class="label" for="f-path">Pfad</label>
-        <input class="field" id="f-path" type="text" placeholder="/volume1/backups oder /home/backup" />
+        <input class="field" id="f-path" type="text" placeholder="/volume1/backups oder /home/backups" />
+        <p id="f-path-hint" class="mt-1 hidden text-xs text-[var(--muted)]">
+          Storage Box: nur <code>/home</code> ist beschreibbar — z.&nbsp;B. <code>/home</code> oder <code>/home/backups</code>.
+        </p>
       </div>
       <div id="auth-fields" class="space-y-3">
         <div>
@@ -90,6 +99,10 @@
           <textarea class="field min-h-[5rem] font-mono text-xs" id="f-secret"
             placeholder="Leer lassen = bisheriges Secret behalten"></textarea>
           <p id="f-has-secret" class="mt-1 hidden text-xs text-[var(--muted)]">Es ist bereits ein Secret hinterlegt.</p>
+          <p id="f-secret-hint" class="mt-1 hidden text-xs text-[var(--muted)]">
+            Storage Box: Passwort-Auth wählen und Passwort hier eintragen (vor „Verbindung prüfen“).
+            Leer lassen behält nur ein bereits gespeichertes Passwort — bei neuem Ziel muss es explizit gesetzt werden.
+          </p>
         </div>
       </div>
       <div class="grid grid-cols-2 gap-3">
@@ -179,6 +192,7 @@
     document.getElementById('f-enabled').checked = item?.enabled !== false;
     document.getElementById('f-has-secret').classList.toggle('hidden', !item?.has_secret);
     syncFormVisibility();
+    syncPresetHints();
   }
 
   function readForm() {
@@ -239,13 +253,37 @@
 
   document.getElementById('f-kind').addEventListener('change', syncFormVisibility);
   document.getElementById('f-auth').addEventListener('change', syncFormVisibility);
+  function syncPresetHints() {
+    const p = document.getElementById('f-preset').value;
+    const isBox = p === 'storage_box';
+    document.getElementById('f-port-hint').classList.toggle('hidden', !isBox);
+    document.getElementById('f-path-hint').classList.toggle('hidden', !isBox);
+    document.getElementById('f-secret-hint').classList.toggle('hidden', !isBox);
+  }
+
+  function mergeSecretFromList(destination) {
+    if (destination.secret_ref) return destination;
+    if (selected >= 0 && items[selected]?.secret_ref) {
+      destination.secret_ref = items[selected].secret_ref;
+    }
+    return destination;
+  }
+
   document.getElementById('f-preset').addEventListener('change', () => {
     const p = document.getElementById('f-preset').value;
-    if (p === 'storage_box' && !document.getElementById('f-port').value) {
+    // Port 23 is required: Copilot uses SSH exec (mkdir, sha256sum), not SFTP-only (22).
+    if (p === 'storage_box') {
       document.getElementById('f-port').value = 23;
+      if (!document.getElementById('f-path').value.trim()) {
+        document.getElementById('f-path').value = '/home';
+      }
+      if (!document.getElementById('f-auth').value || document.getElementById('f-auth').value === 'key_docker') {
+        document.getElementById('f-auth').value = 'password';
+      }
     }
-    if (p === 'storage_box') document.getElementById('f-port').value = 23;
     if (p === 'synology') document.getElementById('f-port').value = 22;
+    syncFormVisibility();
+    syncPresetHints();
   });
 
   listEl.addEventListener('click', (e) => {
@@ -305,8 +343,13 @@
     const row = readForm();
     if (!row.label) row.label = kindLabel(row.kind);
     if (row.kind === 'host_staging') row.keep_count = 0;
-    if (selected >= 0) items[selected] = { ...items[selected], ...row };
-    else items.push(row);
+    if (selected >= 0) {
+      const prev = items[selected] || {};
+      // Blank secret = keep previous in-memory secret (same as server save semantics).
+      if (!row.secret_ref && prev.secret_ref) row.secret_ref = prev.secret_ref;
+      if (!row.secret_ref && prev.has_secret) row.has_secret = true;
+      items[selected] = { ...prev, ...row };
+    } else items.push(row);
     // Keep host_staging first
     items.sort((a, b) => {
       if (a.kind === 'host_staging') return -1;
@@ -320,7 +363,17 @@
 
   document.getElementById('btn-check').addEventListener('click', async () => {
     checkMsg.textContent = 'Prüfe…';
-    const destination = readForm();
+    const destination = mergeSecretFromList(readForm());
+    if (
+      destination.kind === 'sftp'
+      && destination.auth_mode === 'password'
+      && !destination.secret_ref
+      && !destination.id
+    ) {
+      checkMsg.textContent =
+        'Fehler: Passwort fehlt. Passwort eintragen (oder zuerst Speichern, wenn bereits hinterlegt).';
+      return;
+    }
     try {
       const res = await fetch(API + '/destinations/check', {
         method: 'POST',
@@ -356,6 +409,7 @@
   document.getElementById('btn-refresh-all')?.addEventListener('click', () => load());
   fillForm(null);
   syncFormVisibility();
+  syncPresetHints();
   load();
 })();
 </script>
