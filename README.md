@@ -2,7 +2,7 @@
 
 Phase-1-Foundation: Zero-Config Discovery für **Proxmox** (Nodes, LXC, QEMU) und **Docker** (lokaler Socket + SSH), unified Topology-Cache, erweiterbares Modul-Framework — als **PWA** (installierbar, mobil-tauglich).
 
-Spätere Module (ohne Core-Rewrite): AI-Driven Patch-Management (`modules/patcher/`), Smart Backup Integrity Verifier (`modules/backup_verifier/`).
+Spätere / vorhandene Module (ohne Core-Rewrite): AI-Driven Patch-Management (`modules/patcher/`), Smart Backup Integrity Verifier (`modules/backup_verifier/`).
 
 ## Stack
 
@@ -135,8 +135,8 @@ app/
   templates/           # Dashboard, Setup, Offline
 modules/
   example/             # Demo-Plugin
-  patcher/             # Phase 2 Platzhalter
-  backup_verifier/     # Phase 2 Platzhalter
+  patcher/             # AI-Driven Patch-Management (Scan/Apply)
+  backup_verifier/     # Smart Backup Integrity Verifier
 Dockerfile
 docker-compose.yml           # GHCR image only
 docker-compose.build.yml     # lokales build overlay

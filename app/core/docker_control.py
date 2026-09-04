@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import re
 import shlex
@@ -20,6 +22,15 @@ DockerAction = Literal["start", "stop", "restart"]
 
 # Docker container / compose project name allowlist (no shell metacharacters).
 _SAFE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+_COMPOSE_BASENAMES = frozenset(
+    {
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    }
+)
+_MAX_COMPOSE_BYTES = 512 * 1024
 
 
 class DockerControlError(Exception):
@@ -385,3 +396,444 @@ async def _local_logs(settings: Settings, *, name: str, tail: int) -> str:
             f"Lokale Logs fehlgeschlagen: {exc}",
             status_code=502,
         ) from exc
+
+
+def _normalize_abs_path(path: str) -> str:
+    raw = (path or "").strip()
+    if not raw or "\x00" in raw:
+        raise DockerControlError("Ungültiger Dateipfad.", status_code=400)
+    if not raw.startswith("/"):
+        raise DockerControlError(
+            "Compose-Pfad muss absolut sein.",
+            status_code=400,
+        )
+    # Collapse // and reject .. segments without resolving host FS.
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            raise DockerControlError(
+                "Pfad darf keine „..“-Segmente enthalten.",
+                status_code=400,
+            )
+        parts.append(part)
+    return "/" + "/".join(parts)
+
+
+def _compose_meta_from_inspects(inspects: list[dict[str, Any]]) -> dict[str, Any]:
+    working_dir: str | None = None
+    config_files: list[str] = []
+    for info in inspects:
+        labels = (info.get("Config") or {}).get("Labels") or {}
+        wd = labels.get("com.docker.compose.project.working_dir")
+        if wd and not working_dir:
+            working_dir = wd.rstrip("/")
+        cf = labels.get("com.docker.compose.project.config_files")
+        if cf:
+            for part in re.split(r"[,:]", cf):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    norm = _normalize_abs_path(part)
+                except DockerControlError:
+                    continue
+                if norm not in config_files:
+                    config_files.append(norm)
+    candidates = list(config_files)
+    if working_dir:
+        try:
+            wd_norm = _normalize_abs_path(working_dir)
+        except DockerControlError:
+            wd_norm = None
+        if wd_norm:
+            working_dir = wd_norm
+            for name in _COMPOSE_BASENAMES:
+                p = f"{wd_norm}/{name}"
+                if p not in candidates:
+                    candidates.append(p)
+    return {
+        "working_dir": working_dir,
+        "config_files": config_files,
+        "candidates": candidates,
+    }
+
+
+def _path_allowed(path: str, *, working_dir: str | None, config_files: list[str]) -> bool:
+    if path in config_files:
+        return True
+    if working_dir and path.startswith(working_dir.rstrip("/") + "/"):
+        return Path(path).name in _COMPOSE_BASENAMES
+    return False
+
+
+async def _inspect_compose_project(
+    settings: Settings,
+    *,
+    parent_id: str,
+    project: str,
+    snapshot: TopologySnapshot | None,
+) -> tuple[str | None, list[dict[str, Any]]]:
+    project = validate_docker_name(project, kind="Compose-Projekt")
+    ip = resolve_parent_ip(snapshot, parent_id)
+    if ip is None:
+        inspects = await _local_inspect_project(settings, project)
+        return None, inspects
+    if not ssh_key_present(settings):
+        raise DockerControlError(
+            "SSH-Schlüssel fehlt — Compose-Datei nicht erreichbar.",
+            status_code=503,
+        )
+    inspects = await _remote_inspect_project(settings, ip, project)
+    return ip, inspects
+
+
+async def _local_inspect_project(settings: Settings, project: str) -> list[dict[str, Any]]:
+    def _sync() -> list[dict[str, Any]]:
+        import docker
+
+        client = docker.DockerClient(base_url=f"unix://{settings.docker_socket}")
+        try:
+            matched = client.containers.list(
+                all=True,
+                filters={"label": f"com.docker.compose.project={project}"},
+            )
+            return [c.attrs for c in matched]
+        finally:
+            client.close()
+
+    try:
+        return await asyncio.to_thread(_sync)
+    except Exception as exc:
+        raise DockerControlError(
+            f"Lokales docker inspect fehlgeschlagen: {exc}",
+            status_code=502,
+        ) from exc
+
+
+async def _remote_inspect_project(
+    settings: Settings, ip: str, project: str
+) -> list[dict[str, Any]]:
+    list_cmd = (
+        "docker ps -aq --filter "
+        f"label=com.docker.compose.project={shlex.quote(project)}"
+    )
+    stdout, _, code = await _ssh_run(settings, ip, list_cmd)
+    if code != 0:
+        return []
+    ids = [x.strip() for x in stdout.splitlines() if x.strip()][:40]
+    if not ids:
+        return []
+    id_args = " ".join(shlex.quote(i) for i in ids)
+    stdout, stderr, code = await _ssh_run(settings, ip, f"docker inspect {id_args}")
+    if code != 0:
+        detail = (stderr or stdout or "").strip() or f"exit {code}"
+        raise DockerControlError(
+            f"docker inspect fehlgeschlagen: {detail}",
+            status_code=502,
+        )
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise DockerControlError(
+            f"docker inspect JSON ungültig: {exc}",
+            status_code=502,
+        ) from exc
+    return data if isinstance(data, list) else []
+
+
+async def _resolve_existing_compose_paths(
+    settings: Settings,
+    *,
+    ip: str | None,
+    candidates: list[str],
+    config_files: list[str],
+) -> list[str]:
+    existing: list[str] = []
+    # Prefer label-declared files first.
+    ordered = [p for p in candidates if p in config_files] + [
+        p for p in candidates if p not in config_files
+    ]
+    for path in ordered:
+        if await _remote_or_local_readable(settings, ip, path):
+            if path not in existing:
+                existing.append(path)
+    return existing
+
+
+async def _remote_or_local_readable(
+    settings: Settings, ip: str | None, path: str
+) -> bool:
+    check = f"test -r {shlex.quote(path)} && test -f {shlex.quote(path)}"
+    if ip is None:
+        proc = await asyncio.create_subprocess_shell(
+            check,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        code = await proc.wait()
+        return code == 0
+    _, _, code = await _ssh_run(settings, ip, check)
+    return code == 0
+
+
+async def fetch_compose_file(
+    settings: Settings,
+    *,
+    parent_id: str,
+    project: str,
+    snapshot: TopologySnapshot | None,
+    path: str | None = None,
+) -> dict[str, Any]:
+    ip, inspects = await _inspect_compose_project(
+        settings, parent_id=parent_id, project=project, snapshot=snapshot
+    )
+    if not inspects:
+        raise DockerControlError(
+            f"Keine Container für Compose-Projekt „{project}“ gefunden.",
+            status_code=404,
+        )
+    meta = _compose_meta_from_inspects(inspects)
+    existing = await _resolve_existing_compose_paths(
+        settings,
+        ip=ip,
+        candidates=meta["candidates"],
+        config_files=meta["config_files"],
+    )
+    if not existing:
+        raise DockerControlError(
+            "Keine Compose-Datei gefunden (Labels/Working-Dir). "
+            "Oft fehlt com.docker.compose.project.working_dir.",
+            status_code=404,
+        )
+
+    target = _normalize_abs_path(path) if path else existing[0]
+    if target not in existing and not _path_allowed(
+        target, working_dir=meta["working_dir"], config_files=meta["config_files"]
+    ):
+        raise DockerControlError(
+            "Pfad liegt außerhalb der erlaubten Compose-Dateien dieses Stacks.",
+            status_code=403,
+        )
+    if target not in existing:
+        raise DockerControlError(
+            f"Datei nicht gefunden: {target}",
+            status_code=404,
+        )
+
+    content = await _read_text_file(settings, ip, target)
+    return {
+        "ok": True,
+        "parent_id": parent_id,
+        "project": project,
+        "path": target,
+        "files": existing,
+        "working_dir": meta["working_dir"],
+        "content": content,
+        "editable": True,
+        "via": "local" if ip is None else "ssh",
+        "host": ip,
+        "message": f"Compose-Datei {Path(target).name} geladen.",
+    }
+
+
+async def save_compose_file(
+    settings: Settings,
+    *,
+    parent_id: str,
+    project: str,
+    path: str,
+    content: str,
+    snapshot: TopologySnapshot | None,
+) -> dict[str, Any]:
+    if content is None:
+        raise DockerControlError("Inhalt fehlt.", status_code=400)
+    raw = content.encode("utf-8")
+    if len(raw) > _MAX_COMPOSE_BYTES:
+        raise DockerControlError(
+            f"Datei zu groß (max {_MAX_COMPOSE_BYTES // 1024} KiB).",
+            status_code=413,
+        )
+    target = _normalize_abs_path(path)
+    ip, inspects = await _inspect_compose_project(
+        settings, parent_id=parent_id, project=project, snapshot=snapshot
+    )
+    if not inspects:
+        raise DockerControlError(
+            f"Keine Container für Compose-Projekt „{project}“ gefunden.",
+            status_code=404,
+        )
+    meta = _compose_meta_from_inspects(inspects)
+    if not _path_allowed(
+        target, working_dir=meta["working_dir"], config_files=meta["config_files"]
+    ):
+        raise DockerControlError(
+            "Schreiben nur in deklarierte Compose-Dateien / Working-Dir erlaubt.",
+            status_code=403,
+        )
+    await _write_text_file(settings, ip, target, content, backup=True)
+    return {
+        "ok": True,
+        "parent_id": parent_id,
+        "project": project,
+        "path": target,
+        "bytes": len(raw),
+        "via": "local" if ip is None else "ssh",
+        "host": ip,
+        "message": (
+            f"Gespeichert: {target} "
+            f"(Backup als {target}.bak). Stack ggf. neu starten."
+        ),
+    }
+
+
+async def _read_text_file(settings: Settings, ip: str | None, path: str) -> str:
+    if ip is None:
+
+        def _sync() -> str:
+            p = Path(path)
+            data = p.read_bytes()
+            if len(data) > _MAX_COMPOSE_BYTES:
+                raise DockerControlError(
+                    f"Datei zu groß (max {_MAX_COMPOSE_BYTES // 1024} KiB).",
+                    status_code=413,
+                )
+            return data.decode("utf-8", errors="replace")
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except DockerControlError:
+            raise
+        except OSError as exc:
+            raise DockerControlError(
+                f"Lesen fehlgeschlagen: {exc}",
+                status_code=502,
+            ) from exc
+
+    # Prefer SFTP; fall back to base64 cat.
+    key = ssh_key_path(settings)
+    try:
+        async with asyncssh.connect(
+            ip,
+            port=settings.docker_ssh_port,
+            username=settings.docker_ssh_user,
+            client_keys=[str(key)],
+            known_hosts=None,
+            connect_timeout=min(3.0, settings.docker_ssh_timeout + 1.0),
+            login_timeout=min(3.0, settings.docker_ssh_timeout + 1.0),
+        ) as conn:
+            async with conn.start_sftp_client() as sftp:
+                async with sftp.open(path, "rb") as f:
+                    data = await f.read(_MAX_COMPOSE_BYTES + 1)
+        if len(data) > _MAX_COMPOSE_BYTES:
+            raise DockerControlError(
+                f"Datei zu groß (max {_MAX_COMPOSE_BYTES // 1024} KiB).",
+                status_code=413,
+            )
+        if isinstance(data, str):
+            return data
+        return data.decode("utf-8", errors="replace")
+    except DockerControlError:
+        raise
+    except (OSError, asyncssh.Error) as exc:
+        logger.info("SFTP read failed for %s:%s (%s) — trying cat", ip, path, exc)
+        cmd = f"base64 -w0 -- {shlex.quote(path)} 2>/dev/null || base64 -- {shlex.quote(path)}"
+        stdout, stderr, code = await _ssh_run(settings, ip, cmd)
+        if code != 0:
+            detail = (stderr or stdout or "").strip() or f"exit {code}"
+            raise DockerControlError(
+                f"Lesen von {path} fehlgeschlagen: {detail}",
+                status_code=502,
+            ) from exc
+        try:
+            raw = base64.b64decode(stdout.strip(), validate=False)
+        except Exception as b64exc:
+            raise DockerControlError(
+                f"Datei-Inhalt ungültig (base64): {b64exc}",
+                status_code=502,
+            ) from b64exc
+        if len(raw) > _MAX_COMPOSE_BYTES:
+            raise DockerControlError(
+                f"Datei zu groß (max {_MAX_COMPOSE_BYTES // 1024} KiB).",
+                status_code=413,
+            )
+        return raw.decode("utf-8", errors="replace")
+
+
+async def _write_text_file(
+    settings: Settings,
+    ip: str | None,
+    path: str,
+    content: str,
+    *,
+    backup: bool = True,
+) -> None:
+    data = content.encode("utf-8")
+    if ip is None:
+
+        def _sync() -> None:
+            p = Path(path)
+            if backup and p.is_file():
+                bak = Path(str(p) + ".bak")
+                bak.write_bytes(p.read_bytes())
+            p.write_bytes(data)
+
+        try:
+            await asyncio.to_thread(_sync)
+            return
+        except OSError as exc:
+            raise DockerControlError(
+                f"Schreiben fehlgeschlagen: {exc}",
+                status_code=502,
+            ) from exc
+
+    key = ssh_key_path(settings)
+    try:
+        async with asyncssh.connect(
+            ip,
+            port=settings.docker_ssh_port,
+            username=settings.docker_ssh_user,
+            client_keys=[str(key)],
+            known_hosts=None,
+            connect_timeout=min(3.0, settings.docker_ssh_timeout + 1.0),
+            login_timeout=min(3.0, settings.docker_ssh_timeout + 1.0),
+        ) as conn:
+            if backup:
+                await conn.run(
+                    f"if [ -f {shlex.quote(path)} ]; then "
+                    f"cp -a -- {shlex.quote(path)} {shlex.quote(path + '.bak')}; fi",
+                    check=False,
+                )
+            async with conn.start_sftp_client() as sftp:
+                async with sftp.open(path, "wb") as f:
+                    await f.write(data)
+        return
+    except (OSError, asyncssh.Error) as exc:
+        logger.info("SFTP write failed for %s:%s (%s) — trying pipe", ip, path, exc)
+        sftp_err = exc
+
+    b64 = base64.b64encode(data).decode("ascii")
+    # Keep command size reasonable; for large files SFTP should have worked.
+    if len(b64) > 700_000:
+        raise DockerControlError(
+            f"Schreiben per SSH fehlgeschlagen: {sftp_err}",
+            status_code=502,
+        )
+    bak = (
+        f"if [ -f {shlex.quote(path)} ]; then "
+        f"cp -a -- {shlex.quote(path)} {shlex.quote(path + '.bak')}; fi && "
+        if backup
+        else ""
+    )
+    cmd = (
+        f"{bak}printf '%s' {shlex.quote(b64)} | base64 -d > {shlex.quote(path)}.tmp "
+        f"&& mv -f -- {shlex.quote(path)}.tmp {shlex.quote(path)}"
+    )
+    stdout, stderr, code = await _ssh_run(settings, ip, cmd)
+    if code != 0:
+        detail = (stderr or stdout or "").strip() or f"exit {code}"
+        raise DockerControlError(
+            f"Schreiben von {path} fehlgeschlagen: {detail}",
+            status_code=502,
+        )

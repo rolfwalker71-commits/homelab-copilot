@@ -1,0 +1,491 @@
+{% extends "base.html" %}
+{% block title %}Patch-Management — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Modul · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Patch-Management</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)]">
+    Ausstehende Updates auf Proxmox-Guests und manuellen Linux-Hosts scannen, bewerten und mit Bestätigung einspielen.
+  </p>
+</section>
+
+{% include "_subnav.html" %}
+
+<div id="setup-banner" class="mb-4 hidden animate-in surface p-3 text-sm" role="status"></div>
+
+<div id="job-progress" class="mb-4 hidden animate-in" aria-live="polite" aria-busy="false">
+  <div class="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 sm:p-4 space-y-3">
+    <div class="flex items-start gap-3">
+      <span id="jp-spinner" class="mt-0.5 inline-block h-5 w-5 shrink-0 rounded-full border-2 border-[var(--border)] border-t-[var(--primary)] animate-spin" aria-hidden="true"></span>
+      <div class="min-w-0 flex-1">
+        <p id="jp-title" class="font-medium text-[var(--text)]">Auftrag läuft…</p>
+        <p id="jp-phase" class="mt-0.5 text-sm text-[var(--muted)]">—</p>
+      </div>
+      <span id="jp-percent" class="shrink-0 text-sm font-medium tabular-nums text-[var(--text)]">0&nbsp;%</span>
+    </div>
+    <div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" id="jp-bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div id="jp-bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>
+    </div>
+    <p id="jp-message" class="text-sm text-[var(--muted)]">Status wird geladen…</p>
+    <pre id="jp-log" class="max-h-32 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words hidden"></pre>
+    <p id="jp-footer" class="text-sm hidden"></p>
+  </div>
+</div>
+
+<div id="target-list" class="space-y-3 animate-in">
+  <p class="text-sm text-[var(--muted)]">Lade Ziele…</p>
+</div>
+
+<dialog id="apply-dialog" class="rounded-xl border border-[var(--border)] bg-[var(--card)] p-0 text-[var(--text)] shadow-xl max-w-lg w-[calc(100%-2rem)]">
+  <form method="dialog" id="apply-form" class="p-4 sm:p-5 space-y-3">
+    <h2 class="font-display text-lg font-bold">Updates einspielen</h2>
+    <p id="apply-target-label" class="text-sm text-[var(--muted)]"></p>
+    <input type="hidden" id="apply-target-id" />
+    <div>
+      <label class="label" for="apply-filter">Umfang</label>
+      <select id="apply-filter" class="field">
+        <option value="security">Nur Security</option>
+        <option value="all" selected>Alle Updates</option>
+      </select>
+    </div>
+    <label class="flex items-start gap-2 text-sm">
+      <input type="checkbox" id="apply-confirm" class="mt-1 h-4 w-4" />
+      <span>Ich bestätige das Einspielen der Updates auf diesem Host.</span>
+    </label>
+    <div class="flex flex-wrap gap-2 pt-1">
+      <button type="submit" value="apply" class="btn btn-primary" id="btn-apply-go">Einspielen</button>
+      <button type="submit" value="cancel" class="btn btn-ghost">Abbrechen</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="detail-dialog" class="rounded-xl border border-[var(--border)] bg-[var(--card)] p-0 text-[var(--text)] shadow-xl max-w-2xl w-[calc(100%-2rem)] max-h-[85vh]">
+  <div class="p-4 sm:p-5 flex flex-col max-h-[85vh]">
+    <header class="flex items-start justify-between gap-2 mb-3">
+      <h2 id="detail-title" class="font-display text-lg font-bold">Scan-Details</h2>
+      <button type="button" id="detail-close" class="btn btn-ghost btn-sm">Schließen</button>
+    </header>
+    <div id="detail-body" class="overflow-y-auto text-sm space-y-3"></div>
+  </div>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/patcher';
+  let pollTimer = null;
+  let busy = false;
+  let activeTargetId = null;
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function chip(text, cls) {
+    return '<span class="chip ' + cls + '">' + esc(text) + '</span>';
+  }
+
+  function progressRoot() {
+    return document.getElementById('job-progress');
+  }
+
+  function showProgress(kind, targetName) {
+    const root = progressRoot();
+    if (!root) return;
+    root.classList.remove('hidden');
+    root.setAttribute('aria-busy', 'true');
+    document.getElementById('jp-spinner').classList.remove('hidden');
+    document.getElementById('jp-title').textContent =
+      (kind === 'apply' ? 'Updates werden eingespielt' : 'Scan läuft') +
+      (targetName ? ': ' + targetName : '…');
+    document.getElementById('jp-phase').textContent = 'Warteschlange';
+    document.getElementById('jp-message').textContent = 'Auftrag wird gestartet…';
+    document.getElementById('jp-message').style.color = '';
+    document.getElementById('jp-percent').textContent = '0\u00a0%';
+    document.getElementById('jp-bar').style.width = '0%';
+    document.getElementById('jp-bar').style.background = 'var(--primary)';
+    document.getElementById('jp-bar-wrap').setAttribute('aria-valuenow', '0');
+    const log = document.getElementById('jp-log');
+    log.textContent = '';
+    log.classList.add('hidden');
+    const foot = document.getElementById('jp-footer');
+    foot.classList.add('hidden');
+    foot.textContent = '';
+    root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function updateProgress(job) {
+    const pct = Math.max(0, Math.min(100, Number(job.percent) || 0));
+    document.getElementById('jp-phase').textContent = job.phase || '—';
+    document.getElementById('jp-message').textContent = job.message || job.status || '';
+    document.getElementById('jp-percent').textContent = pct + '\u00a0%';
+    document.getElementById('jp-bar').style.width = pct + '%';
+    document.getElementById('jp-bar-wrap').setAttribute('aria-valuenow', String(pct));
+    const lines = job.log_lines || [];
+    const log = document.getElementById('jp-log');
+    if (lines.length) {
+      log.classList.remove('hidden');
+      log.textContent = lines.join('\n');
+      log.scrollTop = log.scrollHeight;
+    }
+    setCardBusy(activeTargetId, true, job.phase, pct, job.message);
+  }
+
+  function finishProgress(job) {
+    const root = progressRoot();
+    if (!root) return;
+    root.setAttribute('aria-busy', 'false');
+    document.getElementById('jp-spinner').classList.add('hidden');
+    const ok = !!(job && job.ok);
+    const pct = 100;
+    document.getElementById('jp-percent').textContent = pct + '\u00a0%';
+    document.getElementById('jp-bar').style.width = pct + '%';
+    document.getElementById('jp-bar').style.background = ok
+      ? 'var(--primary)'
+      : 'var(--danger, #c44)';
+    document.getElementById('jp-phase').textContent = (job && job.phase) || (ok ? 'Fertig' : 'Fehler');
+    const msg = (job && (job.message || job.error)) || (ok ? 'Fertig' : 'Fehlgeschlagen');
+    document.getElementById('jp-message').textContent = msg;
+    document.getElementById('jp-message').style.color = ok ? '' : 'var(--danger, #c44)';
+    const foot = document.getElementById('jp-footer');
+    foot.classList.remove('hidden');
+    foot.style.color = ok ? '' : 'var(--danger, #c44)';
+    foot.textContent = ok ? 'Abgeschlossen.' : ('Fehler: ' + msg);
+    const lines = (job && job.log_lines) || [];
+    if (lines.length) {
+      const log = document.getElementById('jp-log');
+      log.classList.remove('hidden');
+      log.textContent = lines.join('\n');
+    }
+  }
+
+  function setCardBusy(targetId, on, phase, pct, message) {
+    if (!targetId) return;
+    const card = document.querySelector('.entity-card[data-id="' + CSS.escape(targetId) + '"]');
+    if (!card) return;
+    let box = card.querySelector('.card-progress');
+    if (on) {
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'card-progress mt-3 rounded-lg border border-[var(--border)] p-2 space-y-2';
+        card.appendChild(box);
+      }
+      box.innerHTML =
+        '<div class="flex items-center justify-between gap-2 text-sm">' +
+          '<span class="font-medium">' + esc(phase || 'Läuft…') + '</span>' +
+          '<span class="tabular-nums text-[var(--muted)]">' + (pct != null ? pct + '\u00a0%' : '') + '</span>' +
+        '</div>' +
+        '<div class="h-1.5 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]">' +
+          '<div class="h-full rounded-full bg-[var(--primary)] transition-[width] duration-300" style="width:' + (pct || 0) + '%"></div>' +
+        '</div>' +
+        '<p class="text-xs text-[var(--muted)]">' + esc(message || '') + '</p>';
+      card.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+    } else if (box) {
+      box.remove();
+    }
+  }
+
+  function setBusy(on) {
+    busy = on;
+    document.querySelectorAll('.btn-scan, .btn-apply, .btn-reboot').forEach(function (b) {
+      if (on) b.disabled = true;
+    });
+  }
+
+  function renderTargets(targets) {
+    const root = document.getElementById('target-list');
+    if (!targets.length) {
+      root.innerHTML = '<p class="text-sm text-[var(--muted)]">Keine Ziele. Starte Discovery oder lege unter Hosts manuelle Linux-Systeme an.</p>';
+      return;
+    }
+    root.innerHTML = targets.map(function (t) {
+      const pending = t.pending;
+      const sec = t.security;
+      let statusHtml = '<span class="text-sm text-[var(--muted)]">Noch nicht gescannt</span>';
+      if (pending != null) {
+        statusHtml =
+          chip(pending + ' Updates', pending ? 'chip-unknown' : 'chip-running') +
+          (sec ? ' ' + chip(sec + ' Security', 'chip-stopped') : '') +
+          (t.last_scan && t.last_scan.reboot_required ? ' ' + chip('Reboot', 'chip-stopped') : '');
+      } else if (t.last_scan_error) {
+        statusHtml = '<span class="text-sm" style="color:var(--danger,#c44)">' + esc(t.last_scan_error) + '</span>';
+      }
+      const meta = [t.kind, t.ip, t.last_scan && t.last_scan.pm, t.last_scan && t.last_scan.distro]
+        .filter(Boolean).map(esc).join(' · ');
+      const llm = t.last_scan && t.last_scan.llm_summary
+        ? '<p class="mt-2 text-sm text-[var(--muted)] line-clamp-3">' + esc(t.last_scan.llm_summary) + '</p>'
+        : '';
+      const lastAt = t.last_scan && t.last_scan.created_at
+        ? '<p class="mt-1 text-xs text-[var(--muted)]">Letzter Scan: ' + esc(t.last_scan.created_at) + '</p>'
+        : '';
+      return (
+        '<article class="entity-card" data-id="' + esc(t.id) + '">' +
+          '<div class="flex flex-wrap items-start justify-between gap-2">' +
+            '<div class="min-w-0">' +
+              '<h3 class="font-semibold break-words leading-snug">' + esc(t.name) + '</h3>' +
+              '<p class="mt-0.5 text-xs text-[var(--muted)]">' + meta + '</p>' +
+              lastAt +
+            '</div>' +
+            '<div class="target-status flex flex-wrap gap-1 justify-end">' + statusHtml + '</div>' +
+          '</div>' +
+          llm +
+          '<div class="mt-3 flex flex-wrap gap-2">' +
+            '<button type="button" class="btn btn-sm btn-primary btn-scan" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">Scannen</button>' +
+            '<button type="button" class="btn btn-sm btn-ghost btn-apply" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '"' +
+              (pending ? '' : ' disabled') + '>Einspielen</button>' +
+            (t.last_scan && t.last_scan.id
+              ? '<button type="button" class="btn btn-sm btn-ghost btn-detail" data-scan="' + t.last_scan.id + '">Details</button>'
+              : '') +
+            (t.last_scan && t.last_scan.reboot_required
+              ? '<button type="button" class="btn btn-sm btn-ghost btn-reboot" data-id="' + esc(t.id) + '">Reboot</button>'
+              : '') +
+          '</div>' +
+        '</article>'
+      );
+    }).join('');
+  }
+
+  async function loadStatus() {
+    const r = await fetch(API + '/status');
+    const d = await r.json();
+    const banner = document.getElementById('setup-banner');
+    if (!banner) return;
+    const notes = [];
+    if (!d.ssh_key_present) notes.push('SSH-Key fehlt — Scans nicht möglich.');
+    if (!d.llm_configured) notes.push('Kein LLM-Key — nur Heuristik, keine KI-Zusammenfassung.');
+    if (notes.length) {
+      banner.classList.remove('hidden');
+      banner.textContent = notes.join(' ');
+    } else {
+      banner.classList.add('hidden');
+    }
+  }
+
+  async function loadTargets() {
+    const r = await fetch(API + '/targets');
+    const d = await r.json();
+    renderTargets(d.targets || []);
+  }
+
+  async function pollJob(jobId) {
+    clearInterval(pollTimer);
+    return new Promise(function (resolve) {
+      async function tick() {
+        try {
+          const r = await fetch(API + '/jobs/' + jobId);
+          const j = await r.json();
+          updateProgress(j);
+          if (j.done) {
+            clearInterval(pollTimer);
+            finishProgress(j);
+            resolve(j);
+          }
+        } catch (e) {
+          clearInterval(pollTimer);
+          finishProgress({ ok: false, error: String(e), phase: 'Fehler', percent: 100, message: String(e) });
+          resolve(null);
+        }
+      }
+      tick();
+      pollTimer = setInterval(tick, 700);
+    });
+  }
+
+  async function runJob(kind, targetId, targetName, startFn) {
+    if (busy) return;
+    setBusy(true);
+    activeTargetId = targetId;
+    showProgress(kind, targetName);
+    setCardBusy(targetId, true, 'Start', 2, 'Auftrag wird gestartet…');
+    try {
+      const j = await startFn();
+      if (!j) return;
+      const done = await pollJob(j.job_id);
+      await loadTargets();
+      if (done && !done.ok) {
+        /* progress panel already shows error */
+      }
+    } catch (e) {
+      finishProgress({ ok: false, error: String(e), phase: 'Fehler', percent: 100, message: String(e) });
+    } finally {
+      setCardBusy(activeTargetId, false);
+      activeTargetId = null;
+      setBusy(false);
+      /* re-enable buttons via reload */
+      await loadTargets();
+    }
+  }
+
+  async function startScan(targetId, targetName) {
+    await runJob('scan', targetId, targetName, async function () {
+      const r = await fetch(API + '/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: targetId, summarize: true }),
+      });
+      const j = await r.json();
+      if (!r.ok) {
+        finishProgress({
+          ok: false,
+          phase: 'Fehler',
+          percent: 100,
+          message: j.detail || 'Scan fehlgeschlagen',
+          error: j.detail || 'Scan fehlgeschlagen',
+        });
+        return null;
+      }
+      return j;
+    });
+  }
+
+  function openApply(id, name) {
+    if (busy) return;
+    document.getElementById('apply-target-id').value = id;
+    document.getElementById('apply-target-label').textContent = name + ' (' + id + ')';
+    document.getElementById('apply-confirm').checked = false;
+    document.getElementById('apply-dialog').showModal();
+  }
+
+  document.getElementById('apply-form').addEventListener('submit', async function (ev) {
+    const submitter = ev.submitter;
+    if (!submitter || submitter.value !== 'apply') return;
+    ev.preventDefault();
+    const confirm = document.getElementById('apply-confirm').checked;
+    if (!confirm) {
+      finishProgress({
+        ok: false,
+        phase: 'Hinweis',
+        percent: 0,
+        message: 'Bitte Bestätigung setzen.',
+        error: 'Bitte Bestätigung setzen.',
+      });
+      progressRoot().classList.remove('hidden');
+      return;
+    }
+    const targetId = document.getElementById('apply-target-id').value;
+    const filter = document.getElementById('apply-filter').value;
+    const name = document.getElementById('apply-target-label').textContent || targetId;
+    document.getElementById('apply-dialog').close();
+    await runJob('apply', targetId, name, async function () {
+      const r = await fetch(API + '/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_id: targetId,
+          confirm: true,
+          package_filter: filter,
+        }),
+      });
+      const j = await r.json();
+      if (!r.ok) {
+        finishProgress({
+          ok: false,
+          phase: 'Fehler',
+          percent: 100,
+          message: j.detail || 'Apply fehlgeschlagen',
+          error: j.detail || 'Apply fehlgeschlagen',
+        });
+        return null;
+      }
+      return j;
+    });
+  });
+
+  async function showDetail(scanId) {
+    const r = await fetch(API + '/scans/' + scanId);
+    const d = await r.json();
+    if (!r.ok) {
+      finishProgress({
+        ok: false,
+        phase: 'Fehler',
+        percent: 100,
+        message: d.detail || 'Details fehlgeschlagen',
+      });
+      progressRoot().classList.remove('hidden');
+      return;
+    }
+    const scan = d.scan || {};
+    const pkgs = d.packages || [];
+    const title = document.getElementById('detail-title');
+    title.textContent = (scan.target_name || scan.target_id) + ' — Scan #' + scan.id;
+    let html = '';
+    if (scan.llm_summary) {
+      html += '<div class="rounded-lg border border-[var(--border)] p-3"><strong>KI:</strong><p class="mt-1 whitespace-pre-wrap">' + esc(scan.llm_summary) + '</p>' +
+        '<button type="button" class="btn btn-ghost btn-sm mt-2" id="btn-resummarize" data-scan="' + scan.id + '">Neu zusammenfassen</button></div>';
+    } else {
+      html += '<button type="button" class="btn btn-ghost btn-sm" id="btn-resummarize" data-scan="' + scan.id + '">KI-Zusammenfassung</button>';
+    }
+    html += '<p class="text-[var(--muted)]">' + esc(scan.distro || '') + ' · ' + esc(scan.pm || '') +
+      ' · ' + esc(String((scan.summary || {}).total || pkgs.length)) + ' Pakete' +
+      (scan.reboot_required ? ' · Reboot empfohlen' : '') + '</p>';
+    html += '<ul class="space-y-1 max-h-64 overflow-y-auto">';
+    pkgs.forEach(function (p) {
+      html += '<li class="flex flex-wrap gap-2 justify-between border-b border-[var(--border)] py-1">' +
+        '<span class="font-medium">' + esc(p.name) + '</span>' +
+        '<span class="text-[var(--muted)]">' + esc(p.current_version || '—') + ' → ' + esc(p.candidate_version || '—') + '</span>' +
+        chip(p.priority || 'normal', p.priority === 'security' ? 'chip-stopped' : 'chip-unknown') +
+        '</li>';
+    });
+    html += '</ul>';
+    document.getElementById('detail-body').innerHTML = html;
+    document.getElementById('detail-dialog').showModal();
+    document.getElementById('btn-resummarize')?.addEventListener('click', async function () {
+      const sr = await fetch(API + '/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scan_id: scanId }),
+      });
+      const sd = await sr.json();
+      if (!sr.ok) {
+        alert(sd.detail || 'Zusammenfassung fehlgeschlagen');
+        return;
+      }
+      showDetail(scanId);
+      loadTargets();
+    });
+  }
+
+  document.getElementById('detail-close').addEventListener('click', function () {
+    document.getElementById('detail-dialog').close();
+  });
+
+  document.getElementById('target-list').addEventListener('click', function (ev) {
+    const t = ev.target.closest('button');
+    if (!t || busy) return;
+    if (t.classList.contains('btn-scan')) startScan(t.dataset.id, t.dataset.name);
+    if (t.classList.contains('btn-apply')) openApply(t.dataset.id, t.dataset.name);
+    if (t.classList.contains('btn-detail')) showDetail(Number(t.dataset.scan));
+    if (t.classList.contains('btn-reboot')) {
+      if (!confirm('Host wirklich neu starten?')) return;
+      fetch(API + '/reboot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: t.dataset.id, confirm: true }),
+      }).then(function (r) { return r.json().then(function (d) { return { r: r, d: d }; }); })
+        .then(function (x) {
+          progressRoot().classList.remove('hidden');
+          finishProgress({
+            ok: x.r.ok,
+            phase: x.r.ok ? 'Reboot' : 'Fehler',
+            percent: 100,
+            message: x.r.ok ? (x.d.message || 'Reboot geplant') : (x.d.detail || 'Reboot fehlgeschlagen'),
+            error: x.r.ok ? null : (x.d.detail || 'Reboot fehlgeschlagen'),
+          });
+        });
+    }
+  });
+
+  loadStatus().catch(function () {});
+  loadTargets().catch(function (e) {
+    document.getElementById('target-list').innerHTML =
+      '<p class="text-sm" style="color:var(--danger,#c44)">' + esc(String(e)) + '</p>';
+  });
+})();
+</script>
+{% endblock %}

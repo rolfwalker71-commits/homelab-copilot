@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS backup_runs (
     verify_detail TEXT,
     preflight_json TEXT,
     manifest_json TEXT,
+    destinations_json TEXT,
     log_text TEXT,
     error_message TEXT
 );
@@ -73,6 +74,28 @@ CREATE TABLE IF NOT EXISTS schedules (
     updated_at_iso TEXT,
     note TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS backup_destinations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    preset TEXT NOT NULL DEFAULT 'custom',
+    host TEXT NOT NULL DEFAULT '',
+    port INTEGER NOT NULL DEFAULT 22,
+    username TEXT NOT NULL DEFAULT '',
+    remote_path TEXT NOT NULL DEFAULT '',
+    auth_mode TEXT NOT NULL DEFAULT 'key_docker',
+    secret_ref TEXT NOT NULL DEFAULT '',
+    keep_count INTEGER NOT NULL DEFAULT 5,
+    created_at TEXT NOT NULL,
+    created_at_iso TEXT NOT NULL,
+    updated_at TEXT,
+    updated_at_iso TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_backup_destinations_order
+    ON backup_destinations(sort_order ASC, id ASC);
 """
 
 
@@ -86,7 +109,17 @@ class BackupStore:
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        db = self._require()
+        async with db.execute("PRAGMA table_info(backup_runs)") as cur:
+            cols = {row[1] for row in await cur.fetchall()}
+        if "destinations_json" not in cols:
+            await db.execute(
+                "ALTER TABLE backup_runs ADD COLUMN destinations_json TEXT"
+            )
 
     async def close(self) -> None:
         if self._db:
@@ -101,16 +134,99 @@ class BackupStore:
     @staticmethod
     def _row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
         data = dict(row)
-        for key in ("preflight_json", "manifest_json"):
+        for key in ("preflight_json", "manifest_json", "destinations_json"):
             raw = data.get(key)
+            short = key.replace("_json", "")
             if isinstance(raw, str) and raw:
                 try:
-                    data[key.replace("_json", "")] = json.loads(raw)
+                    data[short] = json.loads(raw)
                 except json.JSONDecodeError:
-                    data[key.replace("_json", "")] = None
+                    data[short] = None
             else:
-                data[key.replace("_json", "")] = None
+                data[short] = None if key.endswith("_json") else raw
+        # Keep destinations_json raw for updates; also expose as destinations
+        if data.get("destinations") is None and data.get("destinations_json"):
+            pass
         return data
+
+    async def list_destinations(self) -> list[dict[str, Any]]:
+        db = self._require()
+        async with db.execute(
+            "SELECT * FROM backup_destinations ORDER BY sort_order ASC, id ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["enabled"] = bool(d.get("enabled"))
+            out.append(d)
+        return out
+
+    async def replace_destinations(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Replace entire destination list (preserves ids when provided)."""
+        db = self._require()
+        now = now_berlin()
+        stamp = format_de(now)
+        stamp_iso = iso_utc(now)
+        await db.execute("DELETE FROM backup_destinations")
+        for i, item in enumerate(items):
+            cols = (
+                "sort_order, enabled, kind, label, preset, "
+                "host, port, username, remote_path, "
+                "auth_mode, secret_ref, keep_count, "
+                "created_at, created_at_iso, updated_at, updated_at_iso"
+            )
+            vals: list[Any] = [
+                int(item.get("sort_order") if item.get("sort_order") is not None else i),
+                1 if item.get("enabled", True) else 0,
+                item.get("kind"),
+                item.get("label") or "",
+                item.get("preset") or "custom",
+                item.get("host") or "",
+                int(item.get("port") or 22),
+                item.get("username") or "",
+                item.get("remote_path") or "",
+                item.get("auth_mode") or "key_docker",
+                item.get("secret_ref") or "",
+                int(item.get("keep_count") if item.get("keep_count") is not None else 5),
+                stamp,
+                stamp_iso,
+                stamp,
+                stamp_iso,
+            ]
+            rid = item.get("id")
+            if rid is not None:
+                await db.execute(
+                    f"""
+                    INSERT INTO backup_destinations (
+                        id, {cols}
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [int(rid), *vals],
+                )
+            else:
+                await db.execute(
+                    f"""
+                    INSERT INTO backup_destinations (
+                        {cols}
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    vals,
+                )
+        await db.commit()
+        return await self.list_destinations()
+
+    async def get_destination(self, dest_id: int) -> dict[str, Any] | None:
+        db = self._require()
+        async with db.execute(
+            "SELECT * FROM backup_destinations WHERE id = ?", (dest_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["enabled"] = bool(d.get("enabled"))
+        return d
 
     async def create_run(
         self,
@@ -166,6 +282,7 @@ class BackupStore:
             "verify_detail",
             "preflight_json",
             "manifest_json",
+            "destinations_json",
             "log_text",
             "error_message",
         }

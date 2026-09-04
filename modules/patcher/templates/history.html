@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Patch-Verlauf — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Modul · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Verlauf</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)]">Scans und Apply-Läufe.</p>
+</section>
+
+{% include "_subnav.html" %}
+
+<div class="grid gap-6 lg:grid-cols-2 animate-in">
+  <section>
+    <h2 class="font-display text-lg font-bold mb-3">Scans</h2>
+    <div id="scan-list" class="space-y-2 text-sm">
+      <p class="text-[var(--muted)]">Laden…</p>
+    </div>
+  </section>
+  <section>
+    <h2 class="font-display text-lg font-bold mb-3">Apply</h2>
+    <div id="apply-list" class="space-y-2 text-sm">
+      <p class="text-[var(--muted)]">Laden…</p>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/patcher';
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function statusChip(st) {
+    const cls = st === 'success' ? 'chip-running' : (st === 'failed' ? 'chip-stopped' : 'chip-unknown');
+    return '<span class="chip ' + cls + '">' + esc(st) + '</span>';
+  }
+
+  async function load() {
+    const r = await fetch(API + '/history?limit=40');
+    const d = await r.json();
+    const scans = d.scans || [];
+    const applies = d.apply_runs || [];
+
+    document.getElementById('scan-list').innerHTML = scans.length
+      ? scans.map(function (s) {
+          const sum = s.summary || {};
+          return (
+            '<article class="entity-card">' +
+              '<div class="flex flex-wrap justify-between gap-2">' +
+                '<div><strong>' + esc(s.target_name || s.target_id) + '</strong>' +
+                '<p class="text-xs text-[var(--muted)]">' + esc(s.created_at) +
+                (s.pm ? ' · ' + esc(s.pm) : '') +
+                (sum.total != null ? ' · ' + sum.total + ' Updates' : '') + '</p></div>' +
+                statusChip(s.status) +
+              '</div>' +
+              (s.error_message ? '<p class="mt-1" style="color:var(--danger,#c44)">' + esc(s.error_message) + '</p>' : '') +
+            '</article>'
+          );
+        }).join('')
+      : '<p class="text-[var(--muted)]">Noch keine Scans.</p>';
+
+    document.getElementById('apply-list').innerHTML = applies.length
+      ? applies.map(function (a) {
+          return (
+            '<article class="entity-card">' +
+              '<div class="flex flex-wrap justify-between gap-2">' +
+                '<div><strong>' + esc(a.target_name || a.target_id) + '</strong>' +
+                '<p class="text-xs text-[var(--muted)]">' + esc(a.created_at) +
+                ' · ' + esc(a.package_filter) +
+                (a.reboot_required ? ' · Reboot' : '') + '</p></div>' +
+                statusChip(a.status) +
+              '</div>' +
+              (a.error_message ? '<p class="mt-1" style="color:var(--danger,#c44)">' + esc(a.error_message) + '</p>' : '') +
+            '</article>'
+          );
+        }).join('')
+      : '<p class="text-[var(--muted)]">Noch keine Apply-Läufe.</p>';
+  }
+
+  load().catch(function (e) {
+    document.getElementById('scan-list').textContent = String(e);
+  });
+})();
+</script>
+{% endblock %}

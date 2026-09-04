@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}Patch-Zeitplan — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Modul · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Scan-Zeitplan</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)]">
+    Geplante Scans (kein Auto-Apply). Einträge landen in der Host-Crontab.
+  </p>
+</section>
+
+{% include "_subnav.html" %}
+
+<p id="sched-msg" class="mb-3 text-sm text-[var(--muted)]" role="status"></p>
+
+<article class="surface p-4 sm:p-5 mb-6 animate-in">
+  <h2 class="font-display text-lg font-bold">Zeitplan anlegen</h2>
+  <form id="sched-form" class="mt-4 grid gap-3 sm:grid-cols-2">
+    <div class="sm:col-span-2">
+      <label class="label" for="sched-target">Ziel</label>
+      <select id="sched-target" class="field" required>
+        <option value="">Laden…</option>
+      </select>
+    </div>
+    <div>
+      <label class="label" for="sched-preset">Preset</label>
+      <select id="sched-preset" class="field">
+        <option value="daily">Täglich</option>
+        <option value="weekly">Wöchentlich</option>
+        <option value="custom">Custom Cron</option>
+      </select>
+    </div>
+    <div>
+      <label class="label" for="sched-time">Uhrzeit</label>
+      <input id="sched-time" class="field" value="04:00" />
+    </div>
+    <div id="weekday-wrap">
+      <label class="label" for="sched-weekday">Wochentag (0=So)</label>
+      <input id="sched-weekday" class="field" type="number" min="0" max="6" value="0" />
+    </div>
+    <div id="cron-wrap" class="hidden sm:col-span-2">
+      <label class="label" for="sched-cron">Cron</label>
+      <input id="sched-cron" class="field" placeholder="0 4 * * *" />
+    </div>
+    <div class="sm:col-span-2">
+      <label class="label" for="sched-note">Notiz</label>
+      <input id="sched-note" class="field" />
+    </div>
+    <div class="sm:col-span-2 flex flex-wrap gap-2">
+      <label class="flex items-center gap-2 text-sm mr-2">
+        <input type="checkbox" id="sched-enabled" class="h-4 w-4" checked /> Aktiv
+      </label>
+      <button type="submit" class="btn btn-primary">Speichern</button>
+    </div>
+  </form>
+</article>
+
+<div id="sched-list" class="space-y-3 animate-in">
+  <p class="text-sm text-[var(--muted)]">Laden…</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/patcher';
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function msg(text, ok) {
+    const el = document.getElementById('sched-msg');
+    el.textContent = text || '';
+    el.style.color = ok === false ? 'var(--danger, #c44)' : '';
+  }
+
+  function syncPresetUI() {
+    const p = document.getElementById('sched-preset').value;
+    document.getElementById('cron-wrap').classList.toggle('hidden', p !== 'custom');
+    document.getElementById('weekday-wrap').classList.toggle('hidden', p !== 'weekly');
+  }
+
+  document.getElementById('sched-preset').addEventListener('change', syncPresetUI);
+  syncPresetUI();
+
+  async function loadTargets() {
+    const r = await fetch(API + '/targets');
+    const d = await r.json();
+    const sel = document.getElementById('sched-target');
+    const targets = d.targets || [];
+    sel.innerHTML = targets.length
+      ? targets.map(function (t) {
+          return '<option value="' + esc(t.id) + '">' + esc(t.name) + ' (' + esc(t.id) + ')</option>';
+        }).join('')
+      : '<option value="">Keine Ziele</option>';
+  }
+
+  async function loadSchedules() {
+    const r = await fetch(API + '/schedules');
+    const d = await r.json();
+    if (!d.crontab_available) {
+      msg('Hinweis: crontab auf diesem Host nicht verfügbar — Zeitpläne werden nur gespeichert.', true);
+    }
+    const list = d.schedules || [];
+    const root = document.getElementById('sched-list');
+    if (!list.length) {
+      root.innerHTML = '<p class="text-sm text-[var(--muted)]">Keine Zeitpläne.</p>';
+      return;
+    }
+    root.innerHTML = list.map(function (s) {
+      return (
+        '<article class="entity-card flex flex-wrap justify-between gap-2">' +
+          '<div><strong>' + esc(s.target_id) + '</strong>' +
+          '<p class="text-xs text-[var(--muted)]">' + esc(s.cron_expr) +
+          ' · ' + esc(s.preset) + (s.enabled ? '' : ' · aus') + '</p>' +
+          (s.note ? '<p class="text-sm text-[var(--muted)]">' + esc(s.note) + '</p>' : '') +
+          '</div>' +
+          '<button type="button" class="btn btn-sm btn-ghost btn-del" data-id="' + s.id + '">Löschen</button>' +
+        '</article>'
+      );
+    }).join('');
+    root.querySelectorAll('.btn-del').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        if (!confirm('Zeitplan löschen?')) return;
+        const dr = await fetch(API + '/schedules/' + btn.dataset.id, { method: 'DELETE' });
+        const dd = await dr.json();
+        if (!dr.ok) { msg(dd.detail || 'Löschen fehlgeschlagen', false); return; }
+        msg('Gelöscht', true);
+        loadSchedules();
+      });
+    });
+  }
+
+  document.getElementById('sched-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    const body = {
+      target_id: document.getElementById('sched-target').value,
+      preset: document.getElementById('sched-preset').value,
+      time: document.getElementById('sched-time').value,
+      weekday: Number(document.getElementById('sched-weekday').value) || 0,
+      cron_expr: document.getElementById('sched-cron').value || null,
+      enabled: document.getElementById('sched-enabled').checked,
+      note: document.getElementById('sched-note').value,
+    };
+    const r = await fetch(API + '/schedules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) { msg(d.detail || 'Speichern fehlgeschlagen', false); return; }
+    let m = 'Gespeichert (' + d.cron_expr + ')';
+    if (d.crontab && d.crontab.ok === false) m += ' — Crontab: ' + (d.crontab.error || 'Fehler');
+    msg(m, true);
+    loadSchedules();
+  });
+
+  Promise.all([loadTargets(), loadSchedules()]).catch(function (e) { msg(String(e), false); });
+})();
+</script>
+{% endblock %}

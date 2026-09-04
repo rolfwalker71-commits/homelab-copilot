@@ -6,7 +6,7 @@
   <p class="eyebrow">Modul · v{{ module_version }}</p>
   <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Backup Verifier</h1>
   <p class="mt-2 max-w-3xl text-[var(--muted)]">
-    Compose-Stack-Backups in drei Kopien (LXC → Copilot → Synology) mit Checksum-Verify.
+    Compose-Stack-Backups über eine konfigurierbare Pipeline (Host → Copilot → SFTP) mit Checksum-Verify.
   </p>
   <aside class="mt-4 max-w-3xl rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 text-sm text-[var(--muted)]" role="note">
     <strong class="text-[var(--text)]">Hinweis:</strong>
@@ -18,7 +18,7 @@
 
 {% include "_subnav.html" %}
 
-<div id="setup-banner" class="mb-6 hidden animate-in surface p-4 text-sm" role="status"></div>
+<div id="setup-banner" class="mb-6 hidden animate-in setup-banner text-sm" role="status"></div>
 
 <article class="surface p-4 sm:p-5 animate-in">
   <h2 class="font-display text-lg font-bold">Backup starten</h2>
@@ -111,13 +111,30 @@
   }
 
   function destLabel(key, val) {
-    const names = { lxc: 'LXC', copilot: 'Copilot', synology: 'Synology' };
+    const names = { lxc: 'Host', host_staging: 'Host', copilot: 'Copilot', synology: 'Synology', sftp: 'SFTP' };
     const v = String(val || '—');
     let cls = 'unknown';
-    if (v === 'ok') cls = 'running';
+    if (v === 'ok' || v === 'cleared') cls = 'running';
     else if (v === 'failed') cls = 'stopped';
+    else if (v === 'partial' || v === 'running' || v === 'transfer') cls = 'partial';
     else if (v === 'skipped' || v === 'pending') cls = 'unknown';
     return `<span class="chip chip-${cls}">${esc(names[key] || key)}: ${esc(v)}</span>`;
+  }
+
+  function renderDestChips(job) {
+    const dest = document.getElementById('bp-dest');
+    if (!dest) return;
+    dest.classList.remove('hidden');
+    const hops = job.destination_hops;
+    if (Array.isArray(hops) && hops.length) {
+      dest.innerHTML = hops.map((h) => destLabel(h.label || h.kind, h.status)).join('');
+      return;
+    }
+    if (job.destinations) {
+      dest.innerHTML = Object.keys(job.destinations)
+        .map((k) => destLabel(k, job.destinations[k]))
+        .join('');
+    }
   }
 
   function showProgressPanel() {
@@ -213,11 +230,8 @@
         msg.style.color = 'var(--danger, #c44)';
       }
       const dest = document.getElementById('bp-dest');
-      if (dest && job.destinations) {
-        dest.classList.remove('hidden');
-        dest.innerHTML = ['lxc', 'copilot', 'synology']
-          .map((k) => destLabel(k, job.destinations[k]))
-          .join('');
+      if (dest && (job.destinations || job.destination_hops)) {
+        renderDestChips(job);
       }
       const foot = document.getElementById('bp-footer');
       const hist = job.history_run_url || job.history_url || '/modules/backup_verifier/history';
@@ -449,12 +463,20 @@
     const banner = document.getElementById('setup-banner');
     const parts = [];
     if (!data.ssh_key_present) parts.push('SSH-Schlüssel fehlt — Remote-Backups nicht möglich.');
-    if (!data.synology.configured) parts.push('Synology nicht konfiguriert — dritter Hop wird übersprungen.');
-    else if (!data.synology.key_present) parts.push('Synology-Key fehlt.');
+    const pipe = (data.pipeline || []).filter((p) => p.enabled);
+    if (pipe.length) {
+      parts.push('Pipeline: ' + pipe.map((p) => p.label || p.kind).join(' → '));
+    } else {
+      parts.push('Keine Ziele konfiguriert — unter „Ziele“ anlegen.');
+    }
+    const sftpOn = pipe.some((p) => p.kind === 'sftp');
+    if (!sftpOn) parts.push('Kein SFTP-Ziel aktiv (Synology/Storage Box optional).');
     if (!data.crontab_available) parts.push('Kein crontab hier (Container?) — Zeitplan-Block manuell auf dem Host setzen.');
     if (parts.length) {
       banner.classList.remove('hidden');
-      banner.innerHTML = '<strong>Setup:</strong> ' + parts.join(' ');
+      banner.innerHTML = '<span class="setup-banner-ico" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.25" stroke="currentColor" stroke-width="1.75"/><path d="M12 11v5.5M12 7.75h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></span>'
+        + '<div><strong>Setup:</strong> ' + parts.join(' · ')
+        + ' <a class="underline" href="/modules/backup_verifier/destinations">Ziele bearbeiten</a></div>';
     } else {
       banner.classList.add('hidden');
     }

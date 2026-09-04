@@ -1,0 +1,24 @@
+{# Patcher — secondary nav #}
+<nav class="module-subnav mb-4 flex flex-wrap items-center gap-2 animate-in" aria-label="Patch-Bereiche">
+  <a href="/modules/patcher"
+     class="btn btn-sm {% if active_view == 'overview' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'overview' %}aria-current="page"{% endif %}>
+    Übersicht
+  </a>
+  <a href="/modules/patcher/hosts"
+     class="btn btn-sm {% if active_view == 'hosts' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'hosts' %}aria-current="page"{% endif %}>
+    Hosts
+  </a>
+  <a href="/modules/patcher/schedule"
+     class="btn btn-sm {% if active_view == 'schedule' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'schedule' %}aria-current="page"{% endif %}>
+    Zeitplan
+  </a>
+  <a href="/modules/patcher/history"
+     class="btn btn-sm {% if active_view == 'history' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'history' %}aria-current="page"{% endif %}>
+    Verlauf
+  </a>
+  <a href="/" class="btn btn-ghost btn-sm">← Topologie</a>
+</nav>

@@ -1,0 +1,362 @@
+{% extends "base.html" %}
+{% block title %}Backup-Ziele — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Backup Verifier · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Backup-Ziele</h1>
+  <p class="mt-2 max-w-2xl text-[var(--muted)]">
+    Reihenfolge der Pipeline: zuerst Host-Staging (ephemer), dann dauerhafte Ziele
+    (Copilot, Synology / Storage Box per SFTP). Zugangsdaten werden in der lokalen DB gespeichert.
+  </p>
+</section>
+
+{% set active_view = 'destinations' %}
+{% include "_subnav.html" %}
+
+<div id="dest-msg" class="mb-4 text-sm text-[var(--muted)]" role="status"></div>
+
+<div class="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+  <section class="surface p-4 sm:p-5 animate-in">
+    <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <h2 class="font-display text-lg font-bold">Pipeline</h2>
+      <button type="button" id="btn-save" class="btn btn-primary btn-sm">Speichern</button>
+    </div>
+    <ul id="dest-list" class="space-y-2" role="list"></ul>
+    <p class="mt-3 text-xs text-[var(--muted)]">
+      ▲/▼ ändert die Reihenfolge. Host-Staging bleibt immer am Anfang und wird nach dem ersten
+      dauerhaften Hop gelöscht.
+    </p>
+  </section>
+
+  <section class="surface p-4 sm:p-5 animate-in">
+    <h2 class="font-display mb-3 text-lg font-bold">Ziel bearbeiten / hinzufügen</h2>
+    <form id="dest-form" class="space-y-3" novalidate>
+      <input type="hidden" id="f-id" value="" />
+      <div>
+        <label class="label" for="f-kind">Typ</label>
+        <select class="field" id="f-kind">
+          <option value="host_staging">Host-Staging (ephemer)</option>
+          <option value="copilot">Copilot (lokal)</option>
+          <option value="sftp">SFTP / SSH (Synology, Storage Box, …)</option>
+        </select>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label" for="f-label">Anzeigename</label>
+          <input class="field" id="f-label" type="text" placeholder="z. B. Synology" />
+        </div>
+        <div>
+          <label class="label" for="f-preset">Preset</label>
+          <select class="field" id="f-preset">
+            <option value="custom">Custom</option>
+            <option value="synology">Synology</option>
+            <option value="storage_box">Hetzner Storage Box</option>
+          </select>
+        </div>
+      </div>
+      <div id="sftp-fields" class="space-y-3">
+        <div class="grid grid-cols-3 gap-3">
+          <div class="col-span-2">
+            <label class="label" for="f-host">Host / URL</label>
+            <input class="field" id="f-host" type="text" placeholder="nas.local oder u123.your-storagebox.de" />
+          </div>
+          <div>
+            <label class="label" for="f-port">Port</label>
+            <input class="field" id="f-port" type="number" value="22" />
+          </div>
+        </div>
+        <div>
+          <label class="label" for="f-user">Benutzer</label>
+          <input class="field" id="f-user" type="text" placeholder="backup" autocomplete="off" />
+        </div>
+      </div>
+      <div>
+        <label class="label" for="f-path">Pfad</label>
+        <input class="field" id="f-path" type="text" placeholder="/volume1/backups oder /home/backup" />
+      </div>
+      <div id="auth-fields" class="space-y-3">
+        <div>
+          <label class="label" for="f-auth">Authentifizierung</label>
+          <select class="field" id="f-auth">
+            <option value="key_docker">Docker-/Discovery-SSH-Key</option>
+            <option value="key_path">SSH-Key-Pfad</option>
+            <option value="key_pem">SSH-Key (PEM einfügen)</option>
+            <option value="password">Passwort</option>
+          </select>
+        </div>
+        <div>
+          <label class="label" for="f-secret" id="f-secret-label">Secret / Key</label>
+          <textarea class="field min-h-[5rem] font-mono text-xs" id="f-secret"
+            placeholder="Leer lassen = bisheriges Secret behalten"></textarea>
+          <p id="f-has-secret" class="mt-1 hidden text-xs text-[var(--muted)]">Es ist bereits ein Secret hinterlegt.</p>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label" for="f-keep">Retention (Keep-N)</label>
+          <input class="field" id="f-keep" type="number" min="0" max="200" value="5" />
+        </div>
+        <div class="flex items-end gap-2 pb-1">
+          <input id="f-enabled" type="checkbox" class="h-5 w-5 rounded border-[var(--border)]" checked />
+          <label for="f-enabled" class="text-sm">Aktiv in Pipeline</label>
+        </div>
+      </div>
+      <div class="flex flex-wrap gap-2 pt-1">
+        <button type="button" id="btn-apply" class="btn btn-primary btn-sm">In Liste übernehmen</button>
+        <button type="button" id="btn-check" class="btn btn-ghost btn-sm">Verbindung prüfen</button>
+        <button type="button" id="btn-new" class="btn btn-ghost btn-sm">Neu</button>
+      </div>
+      <p id="check-msg" class="text-sm text-[var(--muted)]" role="status"></p>
+    </form>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/backup_verifier';
+  let items = [];
+  let selected = -1;
+
+  const listEl = document.getElementById('dest-list');
+  const msg = document.getElementById('dest-msg');
+  const checkMsg = document.getElementById('check-msg');
+
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+  }
+
+  function kindLabel(k) {
+    return ({ host_staging: 'Host-Staging', copilot: 'Copilot', sftp: 'SFTP' })[k] || k;
+  }
+
+  function kindIcon(k) {
+    const common = 'width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"';
+    if (k === 'host_staging') {
+      return `<svg ${common}><rect x="4" y="4" width="16" height="12" rx="1.5" stroke="currentColor" stroke-width="1.75"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>`;
+    }
+    if (k === 'copilot') {
+      return `<svg ${common}><path d="M5 8.5A3.5 3.5 0 018.5 5H14a5 5 0 010 10H9.5A3.5 3.5 0 015 11.5v-3z" stroke="currentColor" stroke-width="1.75"/><path d="M9 19h6" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>`;
+    }
+    return `<svg ${common}><path d="M12 3.5v10M8.5 9.5L12 13l3.5-3.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 15.5v2A2.5 2.5 0 007.5 20h9a2.5 2.5 0 002.5-2.5v-2" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>`;
+  }
+
+  function kindIcoClass(k) {
+    if (k === 'host_staging') return 'is-ephemeral';
+    if (k === 'sftp') return 'is-sftp';
+    return '';
+  }
+
+  function syncFormVisibility() {
+    const kind = document.getElementById('f-kind').value;
+    const auth = document.getElementById('f-auth').value;
+    document.getElementById('sftp-fields').hidden = kind !== 'sftp';
+    document.getElementById('auth-fields').hidden = kind !== 'sftp';
+    document.getElementById('f-keep').disabled = kind === 'host_staging';
+    const lab = document.getElementById('f-secret-label');
+    if (auth === 'password') lab.textContent = 'Passwort';
+    else if (auth === 'key_path') lab.textContent = 'Pfad zum Private Key';
+    else if (auth === 'key_pem') lab.textContent = 'Private Key (PEM)';
+    else lab.textContent = 'Secret (nicht nötig bei Docker-Key)';
+  }
+
+  function fillForm(item) {
+    document.getElementById('f-id').value = item?.id ?? '';
+    document.getElementById('f-kind').value = item?.kind || 'sftp';
+    document.getElementById('f-label').value = item?.label || '';
+    document.getElementById('f-preset').value = item?.preset || 'custom';
+    document.getElementById('f-host').value = item?.host || '';
+    document.getElementById('f-port').value = item?.port || 22;
+    document.getElementById('f-user').value = item?.username || '';
+    document.getElementById('f-path').value = item?.remote_path || '';
+    document.getElementById('f-auth').value = item?.auth_mode || 'key_docker';
+    document.getElementById('f-secret').value = '';
+    document.getElementById('f-keep').value = item?.keep_count ?? 5;
+    document.getElementById('f-enabled').checked = item?.enabled !== false;
+    document.getElementById('f-has-secret').classList.toggle('hidden', !item?.has_secret);
+    syncFormVisibility();
+  }
+
+  function readForm() {
+    const idRaw = document.getElementById('f-id').value.trim();
+    return {
+      id: idRaw ? Number(idRaw) : null,
+      kind: document.getElementById('f-kind').value,
+      label: document.getElementById('f-label').value.trim(),
+      preset: document.getElementById('f-preset').value,
+      host: document.getElementById('f-host').value.trim(),
+      port: Number(document.getElementById('f-port').value) || 22,
+      username: document.getElementById('f-user').value.trim(),
+      remote_path: document.getElementById('f-path').value.trim(),
+      auth_mode: document.getElementById('f-auth').value,
+      secret_ref: document.getElementById('f-secret').value,
+      keep_count: Number(document.getElementById('f-keep').value) || 0,
+      enabled: document.getElementById('f-enabled').checked,
+    };
+  }
+
+  function renderList() {
+    listEl.innerHTML = items.map((it, idx) => {
+      const keep = it.kind === 'host_staging'
+        ? '<span class="dest-keep-badge">ephemer</span>'
+        : `<span class="dest-keep-badge">keep ${esc(it.keep_count)}</span>`;
+      const meta = [
+        kindLabel(it.kind),
+        it.host || it.remote_path || '—',
+        it.enabled ? 'aktiv' : 'aus',
+      ].join(' · ');
+      return `<li class="rounded-xl border border-[var(--outline)] bg-[var(--card)] p-3 ${selected === idx ? 'ring-2 ring-[var(--primary)]' : ''}" data-idx="${idx}">
+        <div class="flex flex-wrap items-start gap-2">
+          <div class="dest-tile min-w-0 flex-1 cursor-pointer" data-select="${idx}">
+            <span class="dest-tile-ico ${kindIcoClass(it.kind)}">${kindIcon(it.kind)}</span>
+            <div class="min-w-0">
+              <p class="font-semibold break-words">${esc(it.label || kindLabel(it.kind))}</p>
+              <p class="text-xs text-[var(--muted)] break-words">${esc(meta)}</p>
+              <div class="mt-1.5">${keep}</div>
+            </div>
+          </div>
+          <div class="flex gap-1">
+            <button type="button" class="btn btn-ghost btn-xs" data-up="${idx}" title="Nach oben">▲</button>
+            <button type="button" class="btn btn-ghost btn-xs" data-down="${idx}" title="Nach unten">▼</button>
+            <button type="button" class="btn btn-ghost btn-xs" data-toggle="${idx}" title="Aktiv umschalten">${it.enabled ? 'An' : 'Aus'}</button>
+            <button type="button" class="btn btn-ghost btn-xs" data-del="${idx}" title="Entfernen">✕</button>
+          </div>
+        </div>
+      </li>`;
+    }).join('') || '<li class="text-sm text-[var(--muted)]">Keine Ziele.</li>';
+  }
+
+  async function load() {
+    const res = await fetch(API + '/destinations');
+    const data = await res.json();
+    items = data.destinations || [];
+    renderList();
+  }
+
+  document.getElementById('f-kind').addEventListener('change', syncFormVisibility);
+  document.getElementById('f-auth').addEventListener('change', syncFormVisibility);
+  document.getElementById('f-preset').addEventListener('change', () => {
+    const p = document.getElementById('f-preset').value;
+    if (p === 'storage_box' && !document.getElementById('f-port').value) {
+      document.getElementById('f-port').value = 23;
+    }
+    if (p === 'storage_box') document.getElementById('f-port').value = 23;
+    if (p === 'synology') document.getElementById('f-port').value = 22;
+  });
+
+  listEl.addEventListener('click', (e) => {
+    const t = e.target.closest('[data-select],[data-up],[data-down],[data-toggle],[data-del]');
+    if (!t) return;
+    if (t.hasAttribute('data-select')) {
+      selected = Number(t.getAttribute('data-select'));
+      fillForm(items[selected]);
+      renderList();
+      return;
+    }
+    if (t.hasAttribute('data-up')) {
+      const i = Number(t.getAttribute('data-up'));
+      if (i <= 0) return;
+      if (items[i].kind === 'host_staging') return;
+      if (items[i - 1].kind === 'host_staging') return;
+      [items[i - 1], items[i]] = [items[i], items[i - 1]];
+      renderList();
+      return;
+    }
+    if (t.hasAttribute('data-down')) {
+      const i = Number(t.getAttribute('data-down'));
+      if (i >= items.length - 1) return;
+      if (items[i].kind === 'host_staging') return;
+      [items[i], items[i + 1]] = [items[i + 1], items[i]];
+      renderList();
+      return;
+    }
+    if (t.hasAttribute('data-toggle')) {
+      const i = Number(t.getAttribute('data-toggle'));
+      items[i].enabled = !items[i].enabled;
+      renderList();
+      return;
+    }
+    if (t.hasAttribute('data-del')) {
+      const i = Number(t.getAttribute('data-del'));
+      if (items[i].kind === 'host_staging') {
+        msg.textContent = 'Host-Staging kann nicht entfernt werden.';
+        return;
+      }
+      items.splice(i, 1);
+      selected = -1;
+      renderList();
+    }
+  });
+
+  document.getElementById('btn-new').addEventListener('click', () => {
+    selected = -1;
+    fillForm({
+      kind: 'sftp', label: '', preset: 'custom', host: '', port: 22,
+      username: '', remote_path: '', auth_mode: 'key_docker', keep_count: 10, enabled: true,
+    });
+    renderList();
+  });
+
+  document.getElementById('btn-apply').addEventListener('click', () => {
+    const row = readForm();
+    if (!row.label) row.label = kindLabel(row.kind);
+    if (row.kind === 'host_staging') row.keep_count = 0;
+    if (selected >= 0) items[selected] = { ...items[selected], ...row };
+    else items.push(row);
+    // Keep host_staging first
+    items.sort((a, b) => {
+      if (a.kind === 'host_staging') return -1;
+      if (b.kind === 'host_staging') return 1;
+      return 0;
+    });
+    items.forEach((it, i) => { it.sort_order = i; });
+    msg.textContent = 'In Liste übernommen — noch Speichern klicken.';
+    renderList();
+  });
+
+  document.getElementById('btn-check').addEventListener('click', async () => {
+    checkMsg.textContent = 'Prüfe…';
+    const destination = readForm();
+    try {
+      const res = await fetch(API + '/destinations/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ destination }),
+      });
+      const data = await res.json();
+      checkMsg.textContent = (data.ok ? 'OK: ' : 'Fehler: ') + (data.message || res.status);
+    } catch (err) {
+      checkMsg.textContent = 'Fehler: ' + err.message;
+    }
+  });
+
+  document.getElementById('btn-save').addEventListener('click', async () => {
+    msg.textContent = 'Speichere…';
+    items.forEach((it, i) => { it.sort_order = i; });
+    try {
+      const res = await fetch(API + '/destinations', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ destinations: items }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Speichern fehlgeschlagen');
+      items = data.destinations || [];
+      msg.textContent = data.message || 'Gespeichert.';
+      renderList();
+    } catch (err) {
+      msg.textContent = 'Fehler: ' + err.message;
+    }
+  });
+
+  document.getElementById('btn-refresh-all')?.addEventListener('click', () => load());
+  fillForm(null);
+  syncFormVisibility();
+  load();
+})();
+</script>
+{% endblock %}

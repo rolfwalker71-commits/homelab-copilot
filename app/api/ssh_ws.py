@@ -21,19 +21,38 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def resolve_guest(snapshot: TopologySnapshot | None, guest_id: str) -> TopologyEntity:
-    """Resolve a topology guest by id — never trusts client-supplied hosts/IPs."""
-    guest_id = unquote((guest_id or "").strip())
-    if not guest_id:
-        raise ValueError("Guest-ID fehlt.")
+def resolve_ssh_target(
+    snapshot: TopologySnapshot | None, target_id: str
+) -> TopologyEntity:
+    """Resolve a topology guest or Proxmox node — never trusts client-supplied IPs."""
+    target_id = unquote((target_id or "").strip())
+    if not target_id:
+        raise ValueError("Ziel-ID fehlt.")
     if snapshot is None:
         raise ValueError("Keine Topologie geladen — bitte zuerst Discovery ausführen.")
+
     for g in snapshot.guests:
-        if g.id == guest_id:
+        if g.id == target_id:
             if not g.ip_addresses:
                 raise ValueError(f"Guest „{g.name}“ hat keine bekannte IP.")
             return g
-    raise ValueError("Guest nicht in der Topologie gefunden.")
+
+    for n in snapshot.nodes:
+        if n.id == target_id or (
+            target_id.startswith("node:") and n.name == target_id.split(":", 1)[-1]
+        ):
+            if not n.ip_addresses:
+                raise ValueError(
+                    f"Node „{n.name}“ hat keine bekannte IP — "
+                    "Discovery aktualisieren oder PROXMOX_HOST prüfen."
+                )
+            return n
+
+    raise ValueError("Ziel nicht in der Topologie gefunden.")
+
+
+# Backwards-compatible alias
+resolve_guest = resolve_ssh_target
 
 
 async def _ssh_connect(settings: Settings, ip: str) -> asyncssh.SSHClientConnection:
@@ -73,13 +92,13 @@ def _handle_control(process: asyncssh.SSHClientProcess, text: str) -> bool:
 
 @router.websocket("/ws/ssh/{guest_id:path}")
 async def ssh_terminal_ws(websocket: WebSocket, guest_id: str) -> None:
-    """Bidirectional SSH shell for a discovered guest (same key as Docker SSH)."""
+    """Bidirectional SSH shell for a discovered guest or Proxmox node."""
     await websocket.accept()
     settings = get_settings()
     store = websocket.app.state.topology_store
 
     try:
-        guest = resolve_guest(store.snapshot, guest_id)
+        guest = resolve_ssh_target(store.snapshot, guest_id)
     except ValueError as exc:
         await websocket.send_text(f"\r\n\x1b[31m{exc}\x1b[0m\r\n")
         await websocket.close(code=4000)

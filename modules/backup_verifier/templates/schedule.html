@@ -12,7 +12,7 @@
 
 {% include "_subnav.html" %}
 
-<div id="setup-banner" class="mb-6 hidden animate-in surface p-4 text-sm" role="status"></div>
+<div id="setup-banner" class="mb-6 hidden animate-in setup-banner text-sm" role="status"></div>
 
 <article class="surface p-4 sm:p-5 animate-in">
   <h2 class="font-display text-lg font-bold">Zeitplan</h2>
@@ -72,12 +72,15 @@
     const banner = document.getElementById('setup-banner');
     const parts = [];
     if (!data.ssh_key_present) parts.push('SSH-Schlüssel fehlt — Remote-Backups nicht möglich.');
-    if (!data.synology.configured) parts.push('Synology nicht konfiguriert — dritter Hop wird übersprungen.');
-    else if (!data.synology.key_present) parts.push('Synology-Key fehlt.');
+    const pipe = (data.pipeline || []).filter((p) => p.enabled);
+    if (pipe.length) parts.push('Pipeline: ' + pipe.map((p) => p.label || p.kind).join(' → '));
+    else parts.push('Keine Ziele — unter „Ziele“ konfigurieren.');
     if (!data.crontab_available) parts.push('Kein crontab hier (Container?) — Zeitplan-Block manuell auf dem Host setzen.');
     if (parts.length) {
       banner.classList.remove('hidden');
-      banner.innerHTML = '<strong>Setup:</strong> ' + parts.join(' ');
+      banner.innerHTML = '<span class="setup-banner-ico" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.25" stroke="currentColor" stroke-width="1.75"/><path d="M12 11v5.5M12 7.75h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></span>'
+        + '<div><strong>Setup:</strong> ' + parts.join(' · ')
+        + ' <a class="underline" href="/modules/backup_verifier/destinations">Ziele</a></div>';
     } else {
       banner.classList.add('hidden');
     }

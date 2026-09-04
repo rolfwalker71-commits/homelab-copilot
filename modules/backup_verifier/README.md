@@ -1,16 +1,19 @@
 # Smart Backup Integrity Verifier
 
-Compose-**stack** backups (not per-container) with three copies, checksum verify, history, schedule, and restore.
+Compose-**stack** backups (not per-container) with a configurable destination pipeline, checksum verify, history, schedule, and restore.
 
 ## What it does
 
 1. **Preflight inventory** via `docker inspect` — compose files, `.env`, named volumes, readable bind mounts, plus gap warnings.
-2. **Archive on the LXC** (SSH, same key as Docker discovery) under `BACKUP_LXC_DIR`.
-3. **Copy to Copilot** under `BACKUP_COPILOT_DIR` (default: `$DATA_DIR/backups`).
-4. **Copy to Synology** (SFTP) when configured; otherwise mark hop `skipped`.
-5. **Retention** after success: LXC max 2, Copilot max 5, Synology max 10 (oldest deleted).
-6. **Verify** SHA256 after each hop; overall status in SQLite history.
-7. If Synology fails but LXC+Copilot OK → run status **`partial`**.
+2. **Ordered pipeline** (configured under **Ziele** in the UI):
+   - `host_staging` — build archive on the LXC (ephemeral; purged after the first durable hop)
+   - `copilot` — copy to the Copilot host path
+   - `sftp` — Synology, Hetzner Storage Box, or custom SSH/SFTP
+3. **Retention** per durable destination (`keep_count` in the UI; env values only seed defaults).
+4. **Verify** SHA256 after each hop; overall status in SQLite history.
+5. If a later SFTP hop fails but Copilot succeeded → run status **`partial`**.
+
+Credentials and host/paths live in **SQLite** (`backup_verifier.db`). Env vars are an optional **seed** on first start.
 
 Unit of backup = **entire Compose project**. Containers share volumes/networks; restoring one container alone is wrong.
 
@@ -30,15 +33,18 @@ Default **quiesce**: `docker compose stop` before volume tar, then `up -d` / `st
 ## UI & API
 
 - Page: [`/modules/backup_verifier`](/modules/backup_verifier) (Backup / Zeitplan, volle Breite)
+- **Ziele:** [`/modules/backup_verifier/destinations`](/modules/backup_verifier/destinations) — pipeline order, SFTP auth, connection check
 - Verlauf: [`/modules/backup_verifier/history`](/modules/backup_verifier/history)
 - Stack cards: **Backup** / **Verlauf**
 - API prefix: `/api/modules/backup_verifier/`
-  - `GET /status` — setup / Synology / crontab
+  - `GET /status` — setup / `pipeline` / crontab
+  - `GET|PUT /destinations` — sorted list (secrets masked); full replace on PUT
+  - `POST /destinations/check` — connection test for one destination payload
   - `GET /preflight?parent_id=&project=`
   - `POST /run` — body `{parent_id, project, quiesce?}` → background job (`job_id`); poll `GET /jobs/{id}` for percent/phase; `?wait=true` sync
-  - `GET /jobs/{id}` — Fortschritt (percent, phase, log_lines, destinations)
+  - `GET /jobs/{id}` — Fortschritt (percent, phase, log_lines, destination hops)
   - `GET /history`, `GET /history/{id}`
-  - `POST /history/{id}/restore` — `{confirm: true, source: "copilot"|"synology"}`
+  - `POST /history/{id}/restore` — `{confirm: true, source: "<destination id|copilot|synology>"}`
   - `GET|POST /schedules`, `DELETE /schedules/{id}`, `POST /schedules/sync`
 
 ## Schedule (cron)
@@ -53,16 +59,17 @@ Schedules live in SQLite. The app syncs a **marker-managed** block into the user
 
 Inside Docker there is usually **no cron daemon** — copy the preview block onto the **host** crontab and set `BACKUP_API_BASE` to a reachable Copilot URL.
 
-## Config (env)
+## Config
 
-See `.env.example`:
+**Prefer the Ziele UI** for hosts, users, keys/passwords, keep counts, and order.
 
-- `BACKUP_COPILOT_DIR`, `BACKUP_LXC_DIR`
-- `BACKUP_LXC_KEEP` / `BACKUP_COPILOT_KEEP` / `BACKUP_SYNOLOGY_KEEP`
-- `BACKUP_SYNOLOGY_HOST`, `_USER`, `_PATH`, `_KEY_PATH` (optional → Docker SSH key)
+Optional env seed / paths (see `.env.example`):
+
+- `BACKUP_COPILOT_DIR`, `BACKUP_LXC_DIR` — local paths (still used at runtime)
+- `BACKUP_LXC_KEEP` / `BACKUP_COPILOT_KEEP` / `BACKUP_SYNOLOGY_KEEP` — seed keep counts
+- `BACKUP_SYNOLOGY_*` — optional first-start seed for one SFTP destination
 - `BACKUP_QUIESCE`, `BACKUP_API_BASE`
-- `BACKUP_SSH_TIMEOUT` (kurze SSH-Befehle, Default 120s)
-- `BACKUP_ARCHIVE_TIMEOUT` / `BACKUP_TRANSFER_TIMEOUT` (tar/SCP, Default 3600s; Archiv läuft detached + Poll)
+- `BACKUP_SSH_TIMEOUT` / `BACKUP_ARCHIVE_TIMEOUT` / `BACKUP_TRANSFER_TIMEOUT`
 
 DB: `$DATA_DIR/backup_verifier.db`
 

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Topologie — {{ app_name }}{% endblock %}
+{% from "_icons.html" import ico %}
 
 {% macro guest_tag_chips(g) -%}
 {% set tags = (g.meta or {}).get('tags_list') %}
@@ -30,33 +31,33 @@
     data-guest-name="{{ g.name }}"
     title="Start"
     aria-label="{{ g.name }} starten"
-    {% if running %}disabled{% endif %}>▶</button>
+    {% if running %}disabled{% endif %}>{{ ico('play', 14) }}</button>
   <button type="button" class="btn-icon"
     data-guest-power="shutdown"
     data-guest-id="{{ g.id }}"
     data-guest-name="{{ g.name }}"
     title="Herunterfahren (Shutdown)"
     aria-label="{{ g.name }} herunterfahren"
-    {% if not running %}disabled{% endif %}>■</button>
+    {% if not running %}disabled{% endif %}>{{ ico('stop', 14) }}</button>
   <button type="button" class="btn-icon"
     data-guest-power="reboot"
     data-guest-id="{{ g.id }}"
     data-guest-name="{{ g.name }}"
     title="Neustart"
     aria-label="{{ g.name }} neu starten"
-    {% if not running %}disabled{% endif %}>↻</button>
+    {% if not running %}disabled{% endif %}>{{ ico('restart', 14) }}</button>
 </nav>
 {%- endmacro %}
 
 {% macro docker_controls(parent_id, name, status) -%}
 <nav class="topo-docker-actions" aria-label="Steuerung {{ name }}">
   {% if status != 'running' %}
-  <button type="button" class="btn-icon" data-docker-action="start" data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Start" aria-label="{{ name }} starten">▶</button>
+  <button type="button" class="btn-icon" data-docker-action="start" data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Start" aria-label="{{ name }} starten">{{ ico('play', 14) }}</button>
   {% else %}
-  <button type="button" class="btn-icon" data-docker-action="stop" data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Stop" aria-label="{{ name }} stoppen">■</button>
+  <button type="button" class="btn-icon" data-docker-action="stop" data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Stop" aria-label="{{ name }} stoppen">{{ ico('stop', 14) }}</button>
   {% endif %}
-  <button type="button" class="btn-icon" data-docker-action="restart" data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Neustart" aria-label="{{ name }} neu starten">↻</button>
-  <button type="button" class="btn-icon" data-docker-logs data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Logs" aria-label="Logs von {{ name }}">☰</button>
+  <button type="button" class="btn-icon" data-docker-action="restart" data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Neustart" aria-label="{{ name }} neu starten">{{ ico('restart', 14) }}</button>
+  <button type="button" class="btn-icon" data-docker-logs data-parent-id="{{ parent_id }}" data-name="{{ name }}" title="Logs" aria-label="Logs von {{ name }}">{{ ico('logs', 14) }}</button>
 </nav>
 {%- endmacro %}
 
@@ -90,9 +91,6 @@
       <span class="topo-stack-card-title">
         <span class="topo-stack-name break-words">{{ item.name }}</span>
         <span class="topo-stack-meta">· {{ item.count }} Container</span>
-        {% if item.source == 'compose' %}
-        <span class="topo-stack-badge" title="Docker Compose Projekt">Compose</span>
-        {% endif %}
         <span class="topo-stack-dots" aria-hidden="true" title="Service-Status">
           {% for c in item.containers %}
           <span class="topo-stack-dot topo-stack-dot-{{ c.status }}"></span>
@@ -101,6 +99,18 @@
       </span>
     </button>
     <div class="topo-stack-actions">
+    {% if item.source == 'compose' and item.compose_project and item.containers and item.containers[0].parent_id %}
+    <button type="button"
+      class="topo-stack-badge topo-stack-badge-btn"
+      data-compose-file
+      data-parent-id="{{ item.containers[0].parent_id }}"
+      data-project="{{ item.compose_project }}"
+      title="docker-compose.yml anzeigen / bearbeiten">
+      Compose
+    </button>
+    {% elif item.source == 'compose' %}
+    <span class="topo-stack-badge" title="Docker Compose Projekt">Compose</span>
+    {% endif %}
     {% if item.compose_project and item.containers and item.containers[0].parent_id %}
     <button type="button" class="btn btn-ghost btn-xs topo-stack-restart"
       data-compose-restart
@@ -259,6 +269,7 @@
 
 {% macro node_detail_panel(node_block) -%}
 {% set m = node_block.meta or {} %}
+{% set node_ips = node_block.ip_addresses or (node_block.node.ip_addresses if node_block.node else []) %}
 {% set cpu_pct = m.get('cpu_pct') %}
 {% set mem_pct = m.get('mem_pct') %}
 {% set disk_pct = m.get('disk_pct') %}
@@ -287,7 +298,7 @@
 {% set icon_docker %}
 <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="5" width="2.2" height="2.2" rx="0.35" stroke="currentColor" stroke-width="1"/><rect x="5.2" y="5" width="2.2" height="2.2" rx="0.35" stroke="currentColor" stroke-width="1"/><rect x="7.9" y="5" width="2.2" height="2.2" rx="0.35" stroke="currentColor" stroke-width="1"/><rect x="5.2" y="2.3" width="2.2" height="2.2" rx="0.35" stroke="currentColor" stroke-width="1"/><path d="M2.5 9.5h9.5c1.2 0 2 .7 2 1.7S13.7 13 12.5 13H4.2C3 13 2 12.1 2 11c0-.7.4-1.3 1-1.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>
 {% endset %}
-<article class="topo-detail-panel topo-node-panel" data-node-panel="{{ node_block.name }}" data-node-detail data-node-detail-key="{{ node_block.name }}" hidden>
+<article class="topo-detail-panel topo-node-panel status-{{ node_block.status }}" data-status="{{ node_block.status }}" data-node-panel="{{ node_block.name }}" data-node-detail data-node-detail-key="{{ node_block.name }}" hidden>
   <header class="topo-detail-head row-status-{{ node_block.status }}"
     title="{{ node_block.name }} · {{ node_block.status }}"
     aria-label="Node {{ node_block.name }}, Status {{ node_block.status }}">
@@ -313,6 +324,9 @@
         </div>
         <p class="topo-detail-meta">
           Proxmox-Node
+          {% if node_ips %}
+          · {{ node_ips | join(', ') }}
+          {% endif %}
           {% if m.get('uptime') is not none %}
           · Uptime <span data-node-live="uptime">{{ format_uptime(m.get('uptime')) }}</span>
           {% else %}
@@ -328,6 +342,18 @@
         </p>
       </div>
     </div>
+    {% if node_ips %}
+    <div class="topo-detail-actions">
+      <button type="button" class="btn btn-primary btn-sm"
+        data-ssh-terminal
+        data-guest-id="{{ node_block.id or ('node:' ~ node_block.name) }}"
+        data-guest-name="{{ node_block.name }}"
+        data-guest-ip="{{ node_ips[0] }}"
+        title="SSH-Terminal auf den Proxmox-Node (gleicher Key wie Docker-Discovery)">
+        Terminal
+      </button>
+    </div>
+    {% endif %}
   </header>
 
   <div class="topo-detail-body topo-node-body">
@@ -449,20 +475,40 @@
 {% set summary = snapshot.summary if snapshot else {'nodes': 0, 'guests': 0, 'containers': 0, 'errors': 0} %}
 <div class="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
   <div class="surface animate-in animate-in-delay-1 p-4 sm:p-5">
-    <p class="text-sm text-[var(--muted)]">Nodes</p>
-    <p class="stat-value">{{ summary.nodes if summary is mapping else snapshot.nodes|length if snapshot else 0 }}</p>
+    <div class="stat-tile">
+      <span class="stat-tile-ico" aria-hidden="true">{{ ico('nodes') }}</span>
+      <div class="stat-tile-body">
+        <p class="text-sm text-[var(--muted)]">Nodes</p>
+        <p class="stat-value">{{ summary.nodes if summary is mapping else snapshot.nodes|length if snapshot else 0 }}</p>
+      </div>
+    </div>
   </div>
   <div class="surface animate-in animate-in-delay-1 p-4 sm:p-5">
-    <p class="text-sm text-[var(--muted)]">Guests</p>
-    <p class="stat-value">{% if snapshot %}{{ snapshot.guests|length }}{% else %}0{% endif %}</p>
+    <div class="stat-tile">
+      <span class="stat-tile-ico" aria-hidden="true">{{ ico('guests') }}</span>
+      <div class="stat-tile-body">
+        <p class="text-sm text-[var(--muted)]">Guests</p>
+        <p class="stat-value">{% if snapshot %}{{ snapshot.guests|length }}{% else %}0{% endif %}</p>
+      </div>
+    </div>
   </div>
   <div class="surface animate-in animate-in-delay-2 p-4 sm:p-5">
-    <p class="text-sm text-[var(--muted)]">Container</p>
-    <p class="stat-value">{% if snapshot %}{{ snapshot.containers|length }}{% else %}0{% endif %}</p>
+    <div class="stat-tile">
+      <span class="stat-tile-ico" aria-hidden="true">{{ ico('containers') }}</span>
+      <div class="stat-tile-body">
+        <p class="text-sm text-[var(--muted)]">Container</p>
+        <p class="stat-value">{% if snapshot %}{{ snapshot.containers|length }}{% else %}0{% endif %}</p>
+      </div>
+    </div>
   </div>
   <div class="surface animate-in animate-in-delay-2 p-4 sm:p-5">
-    <p class="text-sm text-[var(--muted)]">Module</p>
-    <p class="stat-value">{{ modules|length }}</p>
+    <div class="stat-tile">
+      <span class="stat-tile-ico" aria-hidden="true">{{ ico('modules') }}</span>
+      <div class="stat-tile-body">
+        <p class="text-sm text-[var(--muted)]">Module</p>
+        <p class="stat-value">{{ modules|length }}</p>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -627,7 +673,7 @@
       {% for node_block in topology.nodes %}
       {% for row in node_block.guests %}
       {% set g = row.guest %}
-      <article class="topo-detail-panel" data-guest-panel="{{ g.id }}" data-guest-detail data-guest-detail-key="{{ g.id }}" hidden>
+      <article class="topo-detail-panel status-{{ g.status.value }}" data-status="{{ g.status.value }}" data-guest-panel="{{ g.id }}" data-guest-detail data-guest-detail-key="{{ g.id }}" hidden>
         <header class="topo-detail-head row-status-{{ g.status.value }}"
           title="{{ g.name }} · {{ g.status.value }}"
           aria-label="{{ g.name }}, Status {{ g.status.value }}">
@@ -756,22 +802,24 @@
 <section class="mb-6" aria-labelledby="modules-heading">
   <h2 id="modules-heading" class="font-display mb-4 text-xl font-bold leading-snug">Module</h2>
   <div class="grid gap-3 sm:grid-cols-2">
-    <article class="entity-card" style="border-style: dashed; opacity: 0.85">
-      <h3 class="font-semibold break-words leading-snug">AI-Driven Patch-Management</h3>
-      <p class="mt-1 text-sm text-[var(--muted)]">Platzhalter <code>modules/patcher/</code> — registriert sich später über ModuleRegistry.</p>
-      <span class="chip chip-unknown mt-3">geplant</span>
-    </article>
     {% for m in modules %}
     <article class="entity-card">
-      <h3 class="font-semibold break-words leading-snug">{{ m.name }} <span class="text-sm font-normal text-[var(--muted)]">v{{ m.version }}</span></h3>
-      <p class="mt-1 text-sm text-[var(--muted)]">{{ m.description }}</p>
-      <div class="mt-3 flex flex-wrap items-center gap-2">
-        <span class="chip {% if m.enabled %}chip-running{% else %}chip-stopped{% endif %}">
-          {% if m.enabled %}aktiv{% else %}deaktiviert{% endif %}
-        </span>
-        {% if m.name == 'backup_verifier' %}
-        <a href="/modules/backup_verifier" class="btn btn-ghost btn-xs">Öffnen</a>
-        {% endif %}
+      <div class="module-card-head">
+        <span class="module-card-ico" aria-hidden="true">{% if m.name == 'backup_verifier' %}{{ ico('backup') }}{% elif m.name == 'patcher' %}{{ ico('patch') }}{% else %}{{ ico('modules') }}{% endif %}</span>
+        <div class="min-w-0 flex-1">
+          <h3 class="font-semibold break-words leading-snug">{{ m.name }} <span class="text-sm font-normal text-[var(--muted)]">v{{ m.version }}</span></h3>
+          <p class="mt-1 text-sm text-[var(--muted)]">{{ m.description }}</p>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <span class="chip {% if m.enabled %}chip-running{% else %}chip-stopped{% endif %}">
+              {% if m.enabled %}aktiv{% else %}deaktiviert{% endif %}
+            </span>
+            {% if m.name == 'backup_verifier' %}
+            <a href="/modules/backup_verifier" class="btn btn-ghost btn-xs">Öffnen</a>
+            {% elif m.name == 'patcher' %}
+            <a href="/modules/patcher" class="btn btn-ghost btn-xs">Öffnen</a>
+            {% endif %}
+          </div>
+        </div>
       </div>
     </article>
     {% endfor %}
@@ -788,6 +836,25 @@
     </header>
     <pre id="logs-dialog-body" class="logs-dialog-body" tabindex="0">Lade…</pre>
   </form>
+</dialog>
+
+<dialog id="compose-dialog" class="compose-dialog">
+  <div class="compose-dialog-inner">
+    <header class="logs-dialog-head">
+      <div class="min-w-0">
+        <h2 id="compose-dialog-title" class="logs-dialog-title">Compose-Datei</h2>
+        <p id="compose-dialog-path" class="compose-dialog-path"></p>
+      </div>
+      <button type="button" id="compose-dialog-close" class="btn btn-ghost btn-sm" aria-label="Schließen">Schließen</button>
+    </header>
+    <div class="compose-dialog-toolbar">
+      <label class="sr-only" for="compose-file-select">Datei</label>
+      <select id="compose-file-select" class="field compose-file-select" hidden></select>
+      <span id="compose-dialog-status" class="compose-dialog-status" role="status"></span>
+      <button type="button" id="compose-dialog-save" class="btn btn-primary btn-sm" disabled>Speichern</button>
+    </div>
+    <textarea id="compose-dialog-editor" class="compose-dialog-editor" spellcheck="false" wrap="off" aria-label="Compose YAML"></textarea>
+  </div>
 </dialog>
 
 <dialog id="ssh-dialog" class="ssh-dialog">
@@ -926,6 +993,129 @@
       if (btn) btn.disabled = false;
     }
   }
+
+  const composeEditorState = { parentId: null, project: null, path: null, original: '' };
+
+  function setComposeStatus(msg, isError) {
+    const el = document.getElementById('compose-dialog-status');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.classList.toggle('is-error', !!isError);
+  }
+
+  async function loadComposeFile(parentId, project, path) {
+    const editor = document.getElementById('compose-dialog-editor');
+    const saveBtn = document.getElementById('compose-dialog-save');
+    const title = document.getElementById('compose-dialog-title');
+    const pathEl = document.getElementById('compose-dialog-path');
+    const select = document.getElementById('compose-file-select');
+    if (saveBtn) saveBtn.disabled = true;
+    if (editor) {
+      editor.value = '';
+      editor.disabled = true;
+    }
+    setComposeStatus('Lade…');
+    const url = '/api/docker/compose/file?parent_id=' + encodeURIComponent(parentId)
+      + '&project=' + encodeURIComponent(project)
+      + (path ? '&path=' + encodeURIComponent(path) : '');
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(await parseError(res));
+    const data = await res.json();
+    composeEditorState.parentId = parentId;
+    composeEditorState.project = project;
+    composeEditorState.path = data.path;
+    composeEditorState.original = data.content || '';
+    if (title) title.textContent = project + ' · Compose';
+    if (pathEl) pathEl.textContent = data.path || '';
+    if (editor) {
+      editor.value = data.content || '';
+      editor.disabled = false;
+    }
+    if (select) {
+      const files = data.files || [];
+      if (files.length > 1) {
+        select.hidden = false;
+        select.innerHTML = files.map((f) =>
+          '<option value="' + f.replace(/"/g, '&quot;') + '"'
+            + (f === data.path ? ' selected' : '') + '>' + f + '</option>'
+        ).join('');
+      } else {
+        select.hidden = true;
+        select.innerHTML = '';
+      }
+    }
+    if (saveBtn) saveBtn.disabled = false;
+    setComposeStatus(data.message || 'Bereit');
+  }
+
+  async function openComposeFile(parentId, project) {
+    const dialog = document.getElementById('compose-dialog');
+    if (!dialog || !parentId || !project) return;
+    dialog.showModal();
+    try {
+      await loadComposeFile(parentId, project, null);
+    } catch (e) {
+      setComposeStatus(String(e.message || e), true);
+      showToast(String(e.message || e), true);
+    }
+  }
+
+  async function saveComposeFile() {
+    const editor = document.getElementById('compose-dialog-editor');
+    const saveBtn = document.getElementById('compose-dialog-save');
+    if (!composeEditorState.parentId || !composeEditorState.path || !editor) return;
+    if (editor.value === composeEditorState.original) {
+      setComposeStatus('Keine Änderungen');
+      return;
+    }
+    if (!confirm('Compose-Datei speichern?\n' + composeEditorState.path + '\n\nVorherige Version wird als .bak gesichert.')) {
+      return;
+    }
+    if (saveBtn) saveBtn.disabled = true;
+    setComposeStatus('Speichere…');
+    try {
+      const res = await fetch('/api/docker/compose/file', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parent_id: composeEditorState.parentId,
+          project: composeEditorState.project,
+          path: composeEditorState.path,
+          content: editor.value,
+        }),
+      });
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = await res.json();
+      composeEditorState.original = editor.value;
+      setComposeStatus(data.message || 'Gespeichert');
+      showToast(data.message || 'Compose gespeichert');
+    } catch (e) {
+      setComposeStatus(String(e.message || e), true);
+      showToast(String(e.message || e), true);
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
+    }
+  }
+
+  document.getElementById('compose-dialog-close')?.addEventListener('click', () => {
+    document.getElementById('compose-dialog')?.close();
+  });
+  document.getElementById('compose-dialog-save')?.addEventListener('click', saveComposeFile);
+  document.getElementById('compose-file-select')?.addEventListener('change', async (e) => {
+    const path = e.target.value;
+    if (!path || !composeEditorState.parentId) return;
+    if (document.getElementById('compose-dialog-editor')?.value !== composeEditorState.original) {
+      if (!confirm('Ungespeicherte Änderungen verwerfen?')) {
+        e.target.value = composeEditorState.path;
+        return;
+      }
+    }
+    try {
+      await loadComposeFile(composeEditorState.parentId, composeEditorState.project, path);
+    } catch (err) {
+      setComposeStatus(String(err.message || err), true);
+    }
+  });
 
   async function showLogs(parentId, name) {
     const dialog = document.getElementById('logs-dialog');
@@ -1893,6 +2083,15 @@
     if (logsBtn) {
       e.preventDefault();
       showLogs(logsBtn.getAttribute('data-parent-id'), logsBtn.getAttribute('data-name'));
+      return;
+    }
+    const composeFileBtn = e.target.closest('[data-compose-file]');
+    if (composeFileBtn) {
+      e.preventDefault();
+      openComposeFile(
+        composeFileBtn.getAttribute('data-parent-id'),
+        composeFileBtn.getAttribute('data-project')
+      );
       return;
     }
     const stackBtn = e.target.closest('[data-compose-restart]');

@@ -13,7 +13,12 @@ from app.core.docker_control import ssh_key_path
 
 
 class BackupSettings(BaseSettings):
-    """Module-local backup configuration."""
+    """Module-local backup configuration.
+
+    Runtime destinations (order, SFTP credentials, keep-N) live in SQLite via the
+    Ziele UI. Env values seed the DB on first start and still supply local paths
+    (BACKUP_COPILOT_DIR / BACKUP_LXC_DIR) and timeouts.
+    """
 
     model_config = SettingsConfigDict(
         env_file=".env",

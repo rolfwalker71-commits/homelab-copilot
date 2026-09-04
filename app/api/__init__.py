@@ -44,6 +44,13 @@ class DockerComposeRestartPayload(BaseModel):
     project: str = Field(..., min_length=1)
 
 
+class DockerComposeFileSavePayload(BaseModel):
+    parent_id: str = Field(..., min_length=1)
+    project: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    content: str = Field(..., max_length=524288)
+
+
 @router.get("/health")
 async def health() -> dict[str, Any]:
     settings = get_settings()
@@ -271,6 +278,49 @@ async def docker_compose_restart(
             settings,
             parent_id=payload.parent_id,
             project=payload.project,
+            snapshot=store.snapshot,
+        )
+    except docker_ctl.DockerControlError as exc:
+        raise _docker_http_error(exc) from exc
+
+
+@router.get("/docker/compose/file")
+async def docker_compose_file_get(
+    request: Request,
+    parent_id: str = Query(..., min_length=1),
+    project: str = Query(..., min_length=1),
+    path: str | None = Query(None),
+) -> dict[str, Any]:
+    """Read docker-compose.yml (or sibling compose file) for a stack."""
+    settings = get_settings()
+    store = request.app.state.topology_store
+    try:
+        return await docker_ctl.fetch_compose_file(
+            settings,
+            parent_id=parent_id,
+            project=project,
+            snapshot=store.snapshot,
+            path=path,
+        )
+    except docker_ctl.DockerControlError as exc:
+        raise _docker_http_error(exc) from exc
+
+
+@router.put("/docker/compose/file")
+async def docker_compose_file_put(
+    payload: DockerComposeFileSavePayload,
+    request: Request,
+) -> dict[str, Any]:
+    """Write compose file back to the guest (creates .bak first)."""
+    settings = get_settings()
+    store = request.app.state.topology_store
+    try:
+        return await docker_ctl.save_compose_file(
+            settings,
+            parent_id=payload.parent_id,
+            project=payload.project,
+            path=payload.path,
+            content=payload.content,
             snapshot=store.snapshot,
         )
     except docker_ctl.DockerControlError as exc:

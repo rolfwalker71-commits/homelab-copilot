@@ -1,18 +1,28 @@
-{# Backup Verifier — secondary nav (Backup | Zeitplan | Verlauf) #}
+{# Backup Verifier — secondary nav #}
+{% from "_icons.html" import ico %}
 <nav class="module-subnav mb-4 flex flex-wrap items-center gap-2 animate-in" aria-label="Backup-Bereiche">
   <a href="/modules/backup_verifier"
      class="btn btn-sm {% if active_view == 'backup' %}btn-primary{% else %}btn-ghost{% endif %}"
      {% if active_view == 'backup' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('backup', 15) }}</span>
     Backup
+  </a>
+  <a href="/modules/backup_verifier/destinations"
+     class="btn btn-sm {% if active_view == 'destinations' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'destinations' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('targets', 15) }}</span>
+    Ziele
   </a>
   <a href="/modules/backup_verifier/schedule"
      class="btn btn-sm {% if active_view == 'schedule' %}btn-primary{% else %}btn-ghost{% endif %}"
      {% if active_view == 'schedule' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('schedule', 15) }}</span>
     Zeitplan
   </a>
   <a href="/modules/backup_verifier/history"
      class="btn btn-sm {% if active_view == 'history' %}btn-primary{% else %}btn-ghost{% endif %}"
      {% if active_view == 'history' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('history', 15) }}</span>
     Verlauf
   </a>
   <a href="/" class="btn btn-ghost btn-sm">← Topologie</a>

@@ -1,4 +1,4 @@
-"""Compose-stack backup: LXC archive → Copilot → Synology + retention."""
+"""Compose-stack backup: host staging → ordered durable destinations."""
 
 from __future__ import annotations
 
@@ -17,6 +17,14 @@ from app.core.locale import format_de, iso_utc, now_berlin
 from app.core.models import TopologySnapshot
 
 from backup_verifier.config import BackupSettings, get_backup_settings
+from backup_verifier.destinations import (
+    KIND_COPILOT,
+    KIND_HOST,
+    KIND_SFTP,
+    get_pipeline,
+    legacy_role_for,
+    resolve_auth,
+)
 from backup_verifier.inventory import build_inventory
 from backup_verifier import sshutil
 from backup_verifier.store import BackupStore
@@ -58,6 +66,88 @@ def _stamp() -> str:
 def _archive_basename(project: str, stamp: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", project)
     return f"{safe}_{stamp}.tar.gz"
+
+
+def _hop_entry(
+    dest: dict[str, Any],
+    *,
+    status: str,
+    verify: str,
+    path: str = "",
+) -> dict[str, Any]:
+    return {
+        "id": dest.get("id"),
+        "kind": dest.get("kind"),
+        "label": dest.get("label") or dest.get("kind"),
+        "preset": dest.get("preset") or "custom",
+        "status": status,
+        "verify": verify,
+        "path": path,
+    }
+
+
+async def _apply_legacy_fields(
+    store: BackupStore,
+    run_id: int,
+    hop: dict[str, Any],
+) -> None:
+    role = legacy_role_for(str(hop.get("kind") or ""), str(hop.get("preset") or ""))
+    if not role:
+        return
+    fields: dict[str, Any] = {
+        f"{role}_status": hop.get("status"),
+        f"{role}_verify": hop.get("verify"),
+    }
+    if hop.get("path"):
+        fields[f"{role}_path"] = hop["path"]
+    await store.update_run(run_id, **fields)
+
+
+async def _purge_project_staging(
+    settings: Settings,
+    *,
+    ip: str | None,
+    local: bool,
+    project_dir: str,
+    timeout: float,
+    log: LogFn,
+) -> None:
+    """Remove leftover archives/work under the project staging dir before a new run."""
+    script = f"""
+set -e
+DIR={shlex.quote(project_dir)}
+[ -d "$DIR" ] || exit 0
+rm -rf -- "$DIR"/*
+"""
+    try:
+        if local:
+            await sshutil.local_run(script, timeout=timeout)
+        else:
+            if not ip:
+                return
+            await sshutil.ssh_run(settings, ip, script, timeout=timeout)
+        await log(f"Host-Staging bereinigt: {project_dir}")
+    except Exception as exc:
+        await log(f"Hinweis: Staging-Cleanup übersprungen ({exc})")
+
+
+async def _delete_paths(
+    settings: Settings,
+    *,
+    ip: str | None,
+    local: bool,
+    paths: list[str],
+    timeout: float,
+) -> None:
+    if not paths:
+        return
+    quoted = " ".join(shlex.quote(p) for p in paths)
+    cmd = f"rm -rf -- {quoted}"
+    if local:
+        await sshutil.local_run(cmd, timeout=timeout)
+    else:
+        assert ip is not None
+        await sshutil.ssh_run(settings, ip, cmd, timeout=timeout)
 
 
 async def run_backup(
@@ -185,24 +275,36 @@ async def _run_backup_locked(
         base = bsettings.backup_lxc_dir.rstrip("/")
     remote_work = f"{base}/{work_rel}"
     remote_archive = f"{base}/{project}/{archive_name}"
+    project_staging = f"{base}/{project}"
     timeout = bsettings.backup_ssh_timeout
     archive_timeout = bsettings.backup_archive_timeout
     transfer_timeout = bsettings.backup_transfer_timeout
     started = False
     stopped = False
 
-    lxc_status = "pending"
-    lxc_verify = "pending"
-    copilot_status = "pending"
-    copilot_verify = "pending"
-    synology_status = "pending"
-    synology_verify = "pending"
+    pipeline = await get_pipeline(store)
+    durable = [d for d in pipeline if d.get("kind") != KIND_HOST]
+    if not durable:
+        raise BackupError("Keine dauerhaften Backup-Ziele aktiv (Copilot/SFTP).")
+
+    hop_results: list[dict[str, Any]] = []
     archive_sha = ""
     size_bytes = 0
     copilot_path: Path | None = None
+    local_source: Path | None = None  # durable buffer for subsequent SFTP hops
     manifest: dict[str, Any] = {}
+    host_purged = False
 
     try:
+        await _purge_project_staging(
+            settings,
+            ip=ip,
+            local=local,
+            project_dir=project_staging,
+            timeout=timeout,
+            log=log,
+        )
+
         # --- Quiesce ---
         if quiesce:
             await _emit_progress(
@@ -218,7 +320,8 @@ async def _run_backup_locked(
         else:
             await log("Quiesce deaktiviert — Volumes werden live gesichert")
 
-        # --- Build archive on LXC / local ---
+        # --- Build archive on host staging ---
+        host_dest = next((d for d in pipeline if d.get("kind") == KIND_HOST), None)
         await _emit_progress(
             on_progress,
             phase="Config",
@@ -250,30 +353,19 @@ async def _run_backup_locked(
         )
         await _emit_progress(
             on_progress,
-            phase="Archive",
+            phase="Host-Staging",
             percent=55,
-            message="Archiv erstellt — LXC speichern…",
+            message="Archiv erstellt — Staging prüfen…",
             run_id=run_id,
         )
-        lxc_status = "ok"
         await store.update_run(
             run_id,
-            lxc_path=remote_archive,
-            lxc_status=lxc_status,
             archive_sha256=archive_sha,
             archive_name=archive_name,
             size_bytes=size_bytes,
             manifest_json=manifest,
         )
 
-        # Verify on source
-        await _emit_progress(
-            on_progress,
-            phase="LXC speichern",
-            percent=60,
-            message="Checksum auf LXC prüfen…",
-            run_id=run_id,
-        )
         if local:
             ok, msg = verify_local_file(Path(remote_archive), archive_sha)
         else:
@@ -283,23 +375,27 @@ async def _run_backup_locked(
             )
             ok = remote_digest == archive_sha.lower()
             msg = "Checksum OK" if ok else f"Mismatch {remote_digest[:12]}…"
-        lxc_verify = "ok" if ok else "failed"
-        await log(f"Verify LXC: {msg}")
-        await store.update_run(run_id, lxc_verify=lxc_verify)
+        await log(f"Verify Host-Staging: {msg}")
         if not ok:
-            raise BackupError(f"LXC-Verify fehlgeschlagen: {msg}")
+            hop = _hop_entry(
+                host_dest or {"kind": KIND_HOST, "label": "Host-Staging"},
+                status="failed",
+                verify="failed",
+                path=remote_archive,
+            )
+            hop_results.append(hop)
+            await _apply_legacy_fields(store, run_id, hop)
+            raise BackupError(f"Host-Staging-Verify fehlgeschlagen: {msg}")
 
-        # Retention LXC / staging
-        retain_dir = f"{base}/{project}"
-        await _retain_remote(
-            settings,
-            ip=ip,
-            local=local,
-            directory=retain_dir,
-            keep=bsettings.backup_lxc_keep,
-            timeout=timeout,
+        hop = _hop_entry(
+            host_dest or {"kind": KIND_HOST, "label": "Host-Staging (ephemer)"},
+            status="ok",
+            verify="ok",
+            path=remote_archive,
         )
-        await log(f"Retention LXC/Staging: max {bsettings.backup_lxc_keep}")
+        hop_results.append(hop)
+        await _apply_legacy_fields(store, run_id, hop)
+        await store.update_run(run_id, destinations_json=hop_results)
 
         # --- Restart stack before long copies if we stopped ---
         if stopped:
@@ -308,128 +404,174 @@ async def _run_backup_locked(
             started = True
             stopped = False
 
-        # --- Copilot hop ---
-        await _emit_progress(
-            on_progress,
-            phase="→ Copilot",
-            percent=72,
-            message="Kopiere Archiv nach Copilot…",
-            run_id=run_id,
-        )
-        bsettings.copilot_dir.mkdir(parents=True, exist_ok=True)
-        dest_dir = bsettings.copilot_dir / project
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        copilot_path = dest_dir / archive_name
-        await log(f"Kopiere nach Copilot: {copilot_path}")
-        if local:
-            await sshutil.local_run_ok(
-                f"cp -f -- {shlex.quote(remote_archive)} {shlex.quote(str(copilot_path))}",
-                timeout=transfer_timeout,
+        # --- Durable hops in order ---
+        n_dur = len(durable)
+        for idx, dest in enumerate(durable):
+            kind = dest.get("kind")
+            label = dest.get("label") or kind
+            pct = 65 + int(25 * (idx / max(n_dur, 1)))
+            await _emit_progress(
+                on_progress,
+                phase=f"→ {label}",
+                percent=pct,
+                message=f"Kopiere nach {label}…",
+                run_id=run_id,
             )
-        else:
-            assert ip is not None
-            await sshutil.scp_get(
-                settings, ip, remote_archive, copilot_path, timeout=transfer_timeout
-            )
-        ok, msg = verify_local_file(copilot_path, archive_sha)
-        copilot_status = "ok" if ok else "failed"
-        copilot_verify = "ok" if ok else "failed"
-        await log(f"Verify Copilot: {msg}")
-        await store.update_run(
-            run_id,
-            copilot_path=str(copilot_path),
-            copilot_status=copilot_status,
-            copilot_verify=copilot_verify,
-        )
-        if not ok:
-            raise BackupError(f"Copilot-Verify fehlgeschlagen: {msg}")
 
-        await _retain_local(dest_dir, keep=bsettings.backup_copilot_keep)
-        await log(f"Retention Copilot: max {bsettings.backup_copilot_keep}")
-
-        # --- Synology hop ---
-        if not bsettings.synology_configured:
-            synology_status = "skipped"
-            synology_verify = "skipped"
-            await log("Synology nicht konfiguriert — Hop übersprungen")
-            await store.update_run(
-                run_id,
-                synology_status=synology_status,
-                synology_verify=synology_verify,
-            )
-        else:
             try:
-                await _emit_progress(
-                    on_progress,
-                    phase="→ Synology",
-                    percent=85,
-                    message="Kopiere Archiv nach Synology…",
-                    run_id=run_id,
-                )
-                syn_path = (
-                    f"{bsettings.backup_synology_path.rstrip('/')}/{project}/{archive_name}"
-                )
-                await log(f"Kopiere nach Synology: {syn_path}")
-                key = bsettings.synology_key()
-                await sshutil.scp_put(
-                    settings,
-                    bsettings.backup_synology_host,
-                    copilot_path,
-                    syn_path,
-                    timeout=transfer_timeout,
-                    username=bsettings.backup_synology_user,
-                    key=key,
-                    port=bsettings.backup_synology_port,
-                )
-                remote_digest = await sshutil.remote_sha256(
-                    settings,
-                    bsettings.backup_synology_host,
-                    syn_path,
-                    timeout=min(600.0, transfer_timeout),
-                    username=bsettings.backup_synology_user,
-                    key=key,
-                    port=bsettings.backup_synology_port,
-                )
-                ok = remote_digest == archive_sha.lower()
-                synology_status = "ok" if ok else "failed"
-                synology_verify = "ok" if ok else "failed"
-                await log(
-                    f"Verify Synology: {'OK' if ok else 'Checksum-Mismatch'}"
-                )
-                await store.update_run(
-                    run_id,
-                    synology_path=syn_path,
-                    synology_status=synology_status,
-                    synology_verify=synology_verify,
-                )
-                if ok:
-                    await _retain_remote(
+                if kind == KIND_COPILOT:
+                    base_path = Path(dest.get("remote_path") or str(bsettings.copilot_dir))
+                    base_path.mkdir(parents=True, exist_ok=True)
+                    dest_dir = base_path / project
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    copilot_path = dest_dir / archive_name
+                    await log(f"Kopiere nach Copilot: {copilot_path}")
+                    if local_source and local_source.is_file():
+                        await sshutil.local_run_ok(
+                            f"cp -f -- {shlex.quote(str(local_source))} "
+                            f"{shlex.quote(str(copilot_path))}",
+                            timeout=transfer_timeout,
+                        )
+                    elif local:
+                        await sshutil.local_run_ok(
+                            f"cp -f -- {shlex.quote(remote_archive)} "
+                            f"{shlex.quote(str(copilot_path))}",
+                            timeout=transfer_timeout,
+                        )
+                    else:
+                        assert ip is not None
+                        await sshutil.scp_get(
+                            settings,
+                            ip,
+                            remote_archive,
+                            copilot_path,
+                            timeout=transfer_timeout,
+                        )
+                    ok, msg = verify_local_file(copilot_path, archive_sha)
+                    await log(f"Verify {label}: {msg}")
+                    hop = _hop_entry(
+                        dest,
+                        status="ok" if ok else "failed",
+                        verify="ok" if ok else "failed",
+                        path=str(copilot_path),
+                    )
+                    hop_results.append(hop)
+                    await _apply_legacy_fields(store, run_id, hop)
+                    await store.update_run(run_id, destinations_json=hop_results)
+                    if not ok:
+                        raise BackupError(f"{label}-Verify fehlgeschlagen: {msg}")
+                    local_source = copilot_path
+                    keep = int(dest.get("keep_count") or 5)
+                    if keep > 0:
+                        await _retain_local(dest_dir, keep=keep)
+                        await log(f"Retention {label}: max {keep}")
+
+                    if not host_purged:
+                        await _delete_paths(
+                            settings,
+                            ip=ip,
+                            local=local,
+                            paths=[remote_archive, remote_work],
+                            timeout=timeout,
+                        )
+                        host_purged = True
+                        await log("Host-Staging nach Copilot-Kopie gelöscht")
+                        # Mark host hop as ephemeral cleaned
+                        if hop_results and hop_results[0].get("kind") == KIND_HOST:
+                            hop_results[0]["status"] = "cleared"
+                            await _apply_legacy_fields(store, run_id, hop_results[0])
+                            await store.update_run(run_id, destinations_json=hop_results)
+
+                elif kind == KIND_SFTP:
+                    if local_source is None or not local_source.is_file():
+                        raise BackupError(
+                            f"{label}: keine lokale Copilot-Kopie als Quelle — "
+                            "Copilot-Ziel muss vor SFTP in der Pipeline stehen."
+                        )
+                    host = (dest.get("host") or "").strip()
+                    remote_base = (dest.get("remote_path") or "").rstrip("/")
+                    if not host or not remote_base:
+                        raise BackupError(f"{label}: Host/Pfad unvollständig.")
+                    syn_path = f"{remote_base}/{project}/{archive_name}"
+                    auth = resolve_auth(dest, settings)
+                    await log(f"Kopiere nach {label}: {syn_path}")
+                    await sshutil.scp_put(
                         settings,
-                        ip=bsettings.backup_synology_host,
-                        local=False,
-                        directory=(
-                            f"{bsettings.backup_synology_path.rstrip('/')}/{project}"
-                        ),
-                        keep=bsettings.backup_synology_keep,
-                        timeout=timeout,
-                        username=bsettings.backup_synology_user,
-                        key=key,
-                        port=bsettings.backup_synology_port,
+                        host,
+                        local_source,
+                        syn_path,
+                        timeout=transfer_timeout,
+                        username=auth["username"],
+                        key=auth.get("key"),
+                        key_pem=auth.get("key_pem"),
+                        password=auth.get("password"),
+                        port=auth["port"],
                     )
+                    remote_digest = await sshutil.remote_sha256(
+                        settings,
+                        host,
+                        syn_path,
+                        timeout=min(600.0, transfer_timeout),
+                        username=auth["username"],
+                        key=auth.get("key"),
+                        key_pem=auth.get("key_pem"),
+                        password=auth.get("password"),
+                        port=auth["port"],
+                    )
+                    ok = remote_digest == archive_sha.lower()
                     await log(
-                        f"Retention Synology: max {bsettings.backup_synology_keep}"
+                        f"Verify {label}: {'OK' if ok else 'Checksum-Mismatch'}"
                     )
+                    hop = _hop_entry(
+                        dest,
+                        status="ok" if ok else "failed",
+                        verify="ok" if ok else "failed",
+                        path=syn_path,
+                    )
+                    hop_results.append(hop)
+                    await _apply_legacy_fields(store, run_id, hop)
+                    await store.update_run(run_id, destinations_json=hop_results)
+                    if ok:
+                        keep = int(dest.get("keep_count") or 10)
+                        if keep > 0:
+                            await _retain_remote(
+                                settings,
+                                ip=host,
+                                local=False,
+                                directory=f"{remote_base}/{project}",
+                                keep=keep,
+                                timeout=timeout,
+                                username=auth["username"],
+                                key=auth.get("key"),
+                                key_pem=auth.get("key_pem"),
+                                password=auth.get("password"),
+                                port=auth["port"],
+                            )
+                            await log(f"Retention {label}: max {keep}")
+                    else:
+                        await log(f"{label}-Verify fehlgeschlagen — Run wird partial")
                 else:
-                    await log("Synology-Verify fehlgeschlagen — Run wird partial")
+                    await log(f"Unbekannter Zieltyp {kind} — übersprungen")
+                    hop = _hop_entry(dest, status="skipped", verify="skipped")
+                    hop_results.append(hop)
+                    await store.update_run(run_id, destinations_json=hop_results)
+            except BackupError:
+                raise
             except Exception as exc:
-                synology_status = "failed"
-                synology_verify = "failed"
-                await log(f"Synology fehlgeschlagen: {exc}")
-                await store.update_run(
-                    run_id,
-                    synology_status=synology_status,
-                    synology_verify=synology_verify,
-                )
+                # Durable remote failures after first durable OK → partial
+                if kind == KIND_COPILOT:
+                    hop = _hop_entry(
+                        dest, status="failed", verify="failed", path=""
+                    )
+                    hop_results.append(hop)
+                    await _apply_legacy_fields(store, run_id, hop)
+                    await store.update_run(run_id, destinations_json=hop_results)
+                    raise BackupError(f"{label} fehlgeschlagen: {exc}") from exc
+                await log(f"{label} fehlgeschlagen: {exc}")
+                hop = _hop_entry(dest, status="failed", verify="failed")
+                hop_results.append(hop)
+                await _apply_legacy_fields(store, run_id, hop)
+                await store.update_run(run_id, destinations_json=hop_results)
 
         await _emit_progress(
             on_progress,
@@ -438,14 +580,27 @@ async def _run_backup_locked(
             message="Gesamt-Verify…",
             run_id=run_id,
         )
-        verify_status, verify_detail = summarize_hop_verifies(
-            lxc=lxc_verify,
-            copilot=copilot_verify,
-            synology=synology_verify,
+        verify_status, verify_detail = summarize_hop_verifies(hop_results)
+        durable_statuses = [
+            h.get("status") for h in hop_results if h.get("kind") != KIND_HOST
+        ]
+        host_ok = any(
+            h.get("kind") == KIND_HOST and h.get("verify") == "ok"
+            for h in hop_results
         )
-        if synology_status == "failed":
+        copilot_ok = any(
+            h.get("kind") == KIND_COPILOT and h.get("status") == "ok"
+            for h in hop_results
+        )
+        remote_failed = any(
+            h.get("kind") == KIND_SFTP and h.get("status") == "failed"
+            for h in hop_results
+        )
+        if not copilot_ok:
+            final_status = "failed"
+        elif remote_failed:
             final_status = "partial"
-        elif lxc_status == "ok" and copilot_status == "ok":
+        elif host_ok and copilot_ok:
             final_status = "success"
         else:
             final_status = "failed"
@@ -458,6 +613,7 @@ async def _run_backup_locked(
             finished_at_iso=iso_utc(now),
             verify_status=verify_status,
             verify_detail=verify_detail,
+            destinations_json=hop_results,
         )
         await log(f"Fertig — Status: {final_status}")
         await _emit_progress(
@@ -473,21 +629,20 @@ async def _run_backup_locked(
         msg = getattr(exc, "message", None) or str(exc)
         await log(f"Fehler: {msg}")
         now = now_berlin()
-        verify_status, verify_detail = summarize_hop_verifies(
-            lxc=lxc_verify,
-            copilot=copilot_verify,
-            synology=synology_verify,
-        )
+        verify_status, verify_detail = summarize_hop_verifies(hop_results)
         await store.update_run(
             run_id,
             status="failed",
             finished_at=format_de(now),
             finished_at_iso=iso_utc(now),
             error_message=msg,
-            lxc_status=lxc_status if lxc_status != "pending" else "failed",
+            destinations_json=hop_results,
             verify_status=verify_status,
             verify_detail=verify_detail,
         )
+        # Ensure legacy lxc_status reflects failure if still pending
+        if not any(h.get("kind") == KIND_HOST for h in hop_results):
+            await store.update_run(run_id, lxc_status="failed")
         await _emit_progress(
             on_progress,
             phase="Fehler",
@@ -789,6 +944,8 @@ async def _retain_remote(
     timeout: float,
     username: str | None = None,
     key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
     port: int | None = None,
 ) -> None:
     # List tar.gz by mtime, delete oldest beyond keep
@@ -815,6 +972,8 @@ done
             timeout=timeout,
             username=username,
             key=key,
+            key_pem=key_pem,
+            password=password,
             port=port,
         )
 

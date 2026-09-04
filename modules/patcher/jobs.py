@@ -1,4 +1,4 @@
-"""In-memory backup job registry for UI progress polling."""
+"""In-memory patch job registry for UI progress polling."""
 
 from __future__ import annotations
 
@@ -10,109 +10,66 @@ from typing import Any
 
 
 @dataclass
-class BackupJob:
+class PatchJob:
     id: str
-    parent_id: str
-    project: str
-    status: str = "queued"  # queued | running | success | partial | failed
+    kind: str  # scan | apply | summarize
+    target_id: str
+    status: str = "queued"  # queued | running | success | failed
     phase: str = "Warteschlange"
     percent: int = 0
-    message: str = "Backup wird vorbereitet…"
+    message: str = ""
     log_lines: list[str] = field(default_factory=list)
-    run_id: int | None = None
+    scan_id: int | None = None
+    apply_id: int | None = None
     error: str | None = None
     result: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
-        dest: dict[str, str] = {}
-        dest_list: list[dict[str, Any]] = []
-        run = self.result or {}
-        hops = run.get("destinations")
-        if isinstance(hops, list) and hops:
-            dest_list = [
-                {
-                    "id": h.get("id"),
-                    "kind": h.get("kind"),
-                    "label": h.get("label") or h.get("kind"),
-                    "status": h.get("status") or "—",
-                    "verify": h.get("verify") or "—",
-                }
-                for h in hops
-            ]
-            for h in dest_list:
-                key = str(h.get("kind") or h.get("label") or "hop")
-                dest[key] = str(h.get("status") or "—")
-        elif run:
-            dest = {
-                "lxc": str(run.get("lxc_status") or "—"),
-                "copilot": str(run.get("copilot_status") or "—"),
-                "synology": str(run.get("synology_status") or "—"),
-            }
-            dest_list = [
-                {"kind": k, "label": k, "status": v, "verify": "—"}
-                for k, v in dest.items()
-            ]
-        hist = "/modules/backup_verifier/history"
         return {
             "job_id": self.id,
             "id": self.id,
-            "parent_id": self.parent_id,
-            "project": self.project,
+            "kind": self.kind,
+            "target_id": self.target_id,
             "status": self.status,
             "phase": self.phase,
             "percent": max(0, min(100, int(self.percent))),
             "message": self.message,
             "log_lines": self.log_lines[-40:],
-            "run_id": self.run_id,
+            "scan_id": self.scan_id,
+            "apply_id": self.apply_id,
             "error": self.error,
-            "destinations": dest,
-            "destination_hops": dest_list,
-            "history_url": hist,
-            "history_run_url": f"{hist}?run={self.run_id}" if self.run_id else hist,
-            "done": self.status in ("success", "partial", "failed"),
-            "ok": self.status in ("success", "partial"),
+            "result": self.result,
+            "done": self.status in ("success", "failed"),
+            "ok": self.status == "success",
         }
 
 
 class JobRegistry:
-    """Thread-safe in-process job store (cleared on process restart)."""
-
     def __init__(self, *, max_jobs: int = 200) -> None:
-        self._jobs: dict[str, BackupJob] = {}
+        self._jobs: dict[str, PatchJob] = {}
         self._lock = threading.Lock()
         self._max_jobs = max_jobs
 
-    def create(self, *, parent_id: str, project: str) -> BackupJob:
-        job = BackupJob(
+    def create(self, *, kind: str, target_id: str) -> PatchJob:
+        job = PatchJob(
             id=str(uuid.uuid4()),
-            parent_id=parent_id,
-            project=project,
+            kind=kind,
+            target_id=target_id,
             status="queued",
             phase="Warteschlange",
             percent=0,
-            message="Backup läuft…",
+            message="Auftrag in Warteschlange…",
         )
         with self._lock:
             self._jobs[job.id] = job
             self._prune_locked()
         return job
 
-    def get(self, job_id: str) -> BackupJob | None:
+    def get(self, job_id: str) -> PatchJob | None:
         with self._lock:
             return self._jobs.get(job_id)
-
-    def set_running(self, job_id: str) -> None:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if not job:
-                return
-            job.status = "running"
-            job.phase = "Preflight"
-            job.percent = 2
-            job.message = "Backup läuft…"
-            job.updated_at = time.time()
 
     def set_progress(
         self,
@@ -121,7 +78,8 @@ class JobRegistry:
         phase: str | None = None,
         percent: int | None = None,
         message: str | None = None,
-        run_id: int | None = None,
+        scan_id: int | None = None,
+        apply_id: int | None = None,
     ) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -133,8 +91,10 @@ class JobRegistry:
                 job.percent = max(0, min(100, int(percent)))
             if message is not None:
                 job.message = message
-            if run_id is not None:
-                job.run_id = run_id
+            if scan_id is not None:
+                job.scan_id = scan_id
+            if apply_id is not None:
+                job.apply_id = apply_id
             if job.status == "queued":
                 job.status = "running"
             job.updated_at = time.time()
@@ -168,38 +128,37 @@ class JobRegistry:
             job.status = status
             job.percent = 100
             job.result = result
-            if result and result.get("id") is not None:
-                try:
-                    job.run_id = int(result["id"])
-                except (TypeError, ValueError):
-                    pass
             job.error = error
-            job.phase = phase or (
-                "Fertig"
-                if status in ("success", "partial")
-                else "Fehler"
-            )
+            job.phase = phase or ("Fertig" if status == "success" else "Fehler")
             if message:
                 job.message = message
             elif status == "success":
-                job.message = "Backup erfolgreich abgeschlossen."
-            elif status == "partial":
-                job.message = "Backup teilweise erfolgreich (Ziele prüfen)."
+                job.message = "Erfolgreich abgeschlossen."
             elif error:
                 job.message = error
             else:
-                job.message = "Backup fehlgeschlagen."
+                job.message = "Fehlgeschlagen."
+            if result:
+                if result.get("scan_id") is not None:
+                    try:
+                        job.scan_id = int(result["scan_id"])
+                    except (TypeError, ValueError):
+                        pass
+                if result.get("apply_id") is not None:
+                    try:
+                        job.apply_id = int(result["apply_id"])
+                    except (TypeError, ValueError):
+                        pass
             job.updated_at = time.time()
 
     def _prune_locked(self) -> None:
         if len(self._jobs) <= self._max_jobs:
             return
-        # Drop oldest finished jobs first
         finished = sorted(
             (
                 j
                 for j in self._jobs.values()
-                if j.status in ("success", "partial", "failed")
+                if j.status in ("success", "failed")
             ),
             key=lambda j: j.updated_at,
         )

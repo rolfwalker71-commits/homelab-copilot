@@ -29,20 +29,34 @@ def _ssh_connect_kwargs(
     *,
     username: str | None = None,
     key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
     port: int | None = None,
 ) -> dict:
-    key_path = key or ssh_key_path(settings)
     connect_timeout = min(10.0, max(3.0, settings.docker_ssh_timeout + 2.0))
-    return {
+    kwargs: dict = {
         "port": port or settings.docker_ssh_port,
         "username": username or settings.docker_ssh_user,
-        "client_keys": [str(key_path)],
         "known_hosts": None,
         "connect_timeout": connect_timeout,
         "login_timeout": connect_timeout,
         "keepalive_interval": _SSH_KEEPALIVE_INTERVAL,
         "keepalive_count_max": _SSH_KEEPALIVE_COUNT_MAX,
     }
+    if password:
+        kwargs["password"] = password
+    if key_pem:
+        try:
+            kwargs["client_keys"] = [asyncssh.import_private_key(key_pem)]
+        except (ValueError, asyncssh.KeyImportError) as exc:
+            raise DockerControlError(
+                f"SSH-Key (PEM) ungültig: {exc}",
+                status_code=400,
+            ) from exc
+    elif key is not None or not password:
+        key_path = key or ssh_key_path(settings)
+        kwargs["client_keys"] = [str(key_path)]
+    return kwargs
 
 
 async def ssh_run(
@@ -53,11 +67,21 @@ async def ssh_run(
     timeout: float = 120.0,
     username: str | None = None,
     key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
     port: int | None = None,
 ) -> tuple[str, str, int]:
     try:
         async with asyncssh.connect(
-            ip, **_ssh_connect_kwargs(settings, username=username, key=key, port=port)
+            ip,
+            **_ssh_connect_kwargs(
+                settings,
+                username=username,
+                key=key,
+                key_pem=key_pem,
+                password=password,
+                port=port,
+            ),
         ) as conn:
             result = await conn.run(cmd, check=False, timeout=timeout)
     except asyncio.TimeoutError as exc:
@@ -89,10 +113,20 @@ async def ssh_run_ok(
     timeout: float = 120.0,
     username: str | None = None,
     key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
     port: int | None = None,
 ) -> str:
     stdout, stderr, code = await ssh_run(
-        settings, ip, cmd, timeout=timeout, username=username, key=key, port=port
+        settings,
+        ip,
+        cmd,
+        timeout=timeout,
+        username=username,
+        key=key,
+        key_pem=key_pem,
+        password=password,
+        port=port,
     )
     if code != 0:
         detail = (stderr or stdout or "").strip() or f"exit {code}"
@@ -112,13 +146,23 @@ async def scp_get(
     timeout: float = 600.0,
     username: str | None = None,
     key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
     port: int | None = None,
 ) -> None:
     """Copy remote → local via SFTP."""
     local_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         async with asyncssh.connect(
-            ip, **_ssh_connect_kwargs(settings, username=username, key=key, port=port)
+            ip,
+            **_ssh_connect_kwargs(
+                settings,
+                username=username,
+                key=key,
+                key_pem=key_pem,
+                password=password,
+                port=port,
+            ),
         ) as conn:
             async with conn.start_sftp_client() as sftp:
                 await asyncio.wait_for(
@@ -146,12 +190,22 @@ async def scp_put(
     timeout: float = 600.0,
     username: str | None = None,
     key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
     port: int | None = None,
 ) -> None:
     """Copy local → remote via SFTP."""
     try:
         async with asyncssh.connect(
-            ip, **_ssh_connect_kwargs(settings, username=username, key=key, port=port)
+            ip,
+            **_ssh_connect_kwargs(
+                settings,
+                username=username,
+                key=key,
+                key_pem=key_pem,
+                password=password,
+                port=port,
+            ),
         ) as conn:
             # Ensure remote parent exists
             parent = str(Path(remote_path).parent)
@@ -343,6 +397,8 @@ async def remote_sha256(
     timeout: float = 120.0,
     username: str | None = None,
     key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
     port: int | None = None,
 ) -> str:
     cmd = (
@@ -350,7 +406,15 @@ async def remote_sha256(
         f"|| shasum -a 256 -- {shlex.quote(remote_path)}) | awk '{{print $1}}'"
     )
     out = await ssh_run_ok(
-        settings, ip, cmd, timeout=timeout, username=username, key=key, port=port
+        settings,
+        ip,
+        cmd,
+        timeout=timeout,
+        username=username,
+        key=key,
+        key_pem=key_pem,
+        password=password,
+        port=port,
     )
     digest = out.strip().split()[0] if out.strip() else ""
     if len(digest) != 64:

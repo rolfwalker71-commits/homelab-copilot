@@ -1,4 +1,4 @@
-"""Restore a Compose stack from a Copilot (or Synology) backup archive."""
+"""Restore a Compose stack from a Copilot or SFTP backup archive."""
 
 from __future__ import annotations
 
@@ -8,11 +8,17 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings, get_settings
-from app.core.docker_control import DockerControlError, resolve_parent_ip, validate_docker_name
+from app.core.docker_control import DockerControlError, validate_docker_name
 from app.core.locale import format_de, iso_utc, now_berlin
 from app.core.models import TopologySnapshot
 
 from backup_verifier.config import BackupSettings, get_backup_settings
+from backup_verifier.destinations import (
+    KIND_COPILOT,
+    KIND_SFTP,
+    ensure_seeded,
+    resolve_auth,
+)
 from backup_verifier.inventory import build_inventory
 from backup_verifier import sshutil
 from backup_verifier.store import BackupStore
@@ -198,51 +204,100 @@ async def _resolve_archive(
 ) -> Path:
     archive_name = run["archive_name"]
     project = run["stack"]
-    expected = (run.get("archive_sha256") or "").lower()
+    hops = run.get("destinations") if isinstance(run.get("destinations"), list) else []
 
-    if source == "synology":
-        if not bsettings.synology_configured:
-            raise RestoreError("Synology nicht konfiguriert.")
-        syn_path = run.get("synology_path") or (
-            f"{bsettings.backup_synology_path.rstrip('/')}/{project}/{archive_name}"
+    await ensure_seeded(store)
+    dest_rows = await store.list_destinations()
+
+    dest: dict[str, Any] | None = None
+    if str(source).isdigit():
+        dest = await store.get_destination(int(source))
+    elif source in ("copilot", KIND_COPILOT):
+        dest = next((d for d in dest_rows if d.get("kind") == KIND_COPILOT), None)
+    elif source in ("synology",):
+        dest = next(
+            (
+                d
+                for d in dest_rows
+                if d.get("kind") == KIND_SFTP and d.get("preset") == "synology"
+            ),
+            None,
         )
-        dest = bsettings.copilot_dir / project / archive_name
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        await log(f"Hole Archiv von Synology: {syn_path}")
+        if dest is None:
+            dest = next((d for d in dest_rows if d.get("kind") == KIND_SFTP), None)
+    else:
+        dest = next(
+            (
+                d
+                for d in dest_rows
+                if str(d.get("kind")) == source or str(d.get("label")) == source
+            ),
+            None,
+        )
+
+    hop_match = None
+    if dest and hops:
+        hop_match = next(
+            (
+                h
+                for h in hops
+                if h.get("id") == dest.get("id")
+                or (
+                    h.get("kind") == dest.get("kind")
+                    and h.get("status") in ("ok", "cleared")
+                )
+            ),
+            None,
+        )
+    elif hops and source in ("copilot", KIND_COPILOT):
+        hop_match = next((h for h in hops if h.get("kind") == KIND_COPILOT), None)
+
+    if dest and dest.get("kind") == KIND_SFTP:
+        syn_path = (hop_match or {}).get("path") or ""
+        if not syn_path:
+            remote_base = (dest.get("remote_path") or "").rstrip("/")
+            syn_path = f"{remote_base}/{project}/{archive_name}"
+        dest_file = bsettings.copilot_dir / project / archive_name
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        await log(f"Hole Archiv von {dest.get('label')}: {syn_path}")
+        auth = resolve_auth(dest, settings)
         await sshutil.scp_get(
             settings,
-            bsettings.backup_synology_host,
+            dest["host"],
             syn_path,
-            dest,
+            dest_file,
             timeout=bsettings.backup_transfer_timeout,
-            username=bsettings.backup_synology_user,
-            key=bsettings.synology_key(),
-            port=bsettings.backup_synology_port,
+            username=auth["username"],
+            key=auth.get("key"),
+            key_pem=auth.get("key_pem"),
+            password=auth.get("password"),
+            port=auth["port"],
         )
-        return dest
+        return dest_file
 
-    # Default: copilot
-    path_str = run.get("copilot_path")
+    path_str = (hop_match or {}).get("path") or run.get("copilot_path")
     if path_str and Path(path_str).is_file():
         return Path(path_str)
     candidate = bsettings.copilot_dir / project / archive_name
     if candidate.is_file():
         return candidate
 
-    # Fallback: pull from Synology if Copilot copy missing
-    if bsettings.synology_configured and run.get("synology_status") == "ok":
-        await log("Copilot-Kopie fehlt — fallback Synology")
-        return await _resolve_archive(
-            store,
-            run=run,
-            source="synology",
-            bsettings=bsettings,
-            settings=settings,
-            log=log,
-        )
+    for h in hops:
+        if h.get("kind") == KIND_SFTP and h.get("status") == "ok" and h.get("path"):
+            await log("Copilot-Kopie fehlt — Fallback SFTP-Hop")
+            sid = h.get("id")
+            return await _resolve_archive(
+                store,
+                run=run,
+                source=str(sid) if sid is not None else "synology",
+                bsettings=bsettings,
+                settings=settings,
+                log=log,
+            )
+
     raise RestoreError(
         f"Archiv nicht gefunden unter Copilot ({candidate}). "
-        "Synology-Fallback nicht möglich."
+        "SFTP-Fallback nicht möglich."
     )
 
 

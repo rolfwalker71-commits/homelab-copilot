@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}Patch-Hosts — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Modul · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Manuelle Hosts</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)]">
+    Linux-Systeme außerhalb der Proxmox-Discovery (gleicher SSH-Key wie Docker-Scan, User/Port optional überschreibbar).
+  </p>
+</section>
+
+{% include "_subnav.html" %}
+
+<p id="host-msg" class="mb-3 text-sm text-[var(--muted)]" role="status"></p>
+
+<article class="surface p-4 sm:p-5 mb-6 animate-in">
+  <h2 class="font-display text-lg font-bold">Host hinzufügen / bearbeiten</h2>
+  <form id="host-form" class="mt-4 grid gap-3 sm:grid-cols-2">
+    <input type="hidden" id="host-id" />
+    <div class="sm:col-span-2">
+      <label class="label" for="host-name">Name</label>
+      <input id="host-name" class="field" required maxlength="128" placeholder="z. B. nas-backup" />
+    </div>
+    <div>
+      <label class="label" for="host-addr">IP / DNS</label>
+      <input id="host-addr" class="field" required maxlength="255" placeholder="192.168.5.50" />
+    </div>
+    <div>
+      <label class="label" for="host-port">SSH-Port</label>
+      <input id="host-port" class="field" type="number" min="1" max="65535" value="22" />
+    </div>
+    <div>
+      <label class="label" for="host-user">SSH-User (leer = Default)</label>
+      <input id="host-user" class="field" maxlength="64" placeholder="root" />
+    </div>
+    <div>
+      <label class="label" for="host-note">Notiz</label>
+      <input id="host-note" class="field" maxlength="500" />
+    </div>
+    <div class="sm:col-span-2 flex flex-wrap items-center gap-3">
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" id="host-enabled" class="h-4 w-4" checked />
+        Aktiv
+      </label>
+      <button type="button" id="btn-check" class="btn btn-ghost">Verbindung testen</button>
+      <button type="submit" class="btn btn-primary">Speichern</button>
+      <button type="button" id="btn-reset" class="btn btn-ghost">Zurücksetzen</button>
+    </div>
+  </form>
+</article>
+
+<div id="host-list" class="space-y-3 animate-in">
+  <p class="text-sm text-[var(--muted)]">Laden…</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/patcher';
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function msg(text, ok) {
+    const el = document.getElementById('host-msg');
+    el.textContent = text || '';
+    el.style.color = ok === false ? 'var(--danger, #c44)' : '';
+  }
+
+  function resetForm() {
+    document.getElementById('host-id').value = '';
+    document.getElementById('host-name').value = '';
+    document.getElementById('host-addr').value = '';
+    document.getElementById('host-port').value = '22';
+    document.getElementById('host-user').value = '';
+    document.getElementById('host-note').value = '';
+    document.getElementById('host-enabled').checked = true;
+  }
+
+  function fillForm(h) {
+    document.getElementById('host-id').value = h.id;
+    document.getElementById('host-name').value = h.name || '';
+    document.getElementById('host-addr').value = h.host || '';
+    document.getElementById('host-port').value = h.port || 22;
+    document.getElementById('host-user').value = h.ssh_user || '';
+    document.getElementById('host-note').value = h.note || '';
+    document.getElementById('host-enabled').checked = !!h.enabled;
+  }
+
+  function payloadFromForm() {
+    const idVal = document.getElementById('host-id').value;
+    return {
+      id: idVal ? Number(idVal) : null,
+      name: document.getElementById('host-name').value.trim(),
+      host: document.getElementById('host-addr').value.trim(),
+      port: Number(document.getElementById('host-port').value) || 22,
+      ssh_user: document.getElementById('host-user').value.trim() || null,
+      note: document.getElementById('host-note').value.trim(),
+      enabled: document.getElementById('host-enabled').checked,
+    };
+  }
+
+  async function loadHosts() {
+    const r = await fetch(API + '/hosts');
+    const d = await r.json();
+    const hosts = d.hosts || [];
+    const root = document.getElementById('host-list');
+    if (!hosts.length) {
+      root.innerHTML = '<p class="text-sm text-[var(--muted)]">Noch keine manuellen Hosts.</p>';
+      return;
+    }
+    root.innerHTML = hosts.map(function (h) {
+      return (
+        '<article class="entity-card">' +
+          '<div class="flex flex-wrap justify-between gap-2">' +
+            '<div><h3 class="font-semibold">' + esc(h.name) + '</h3>' +
+            '<p class="text-xs text-[var(--muted)]">' + esc(h.host) + ':' + esc(h.port) +
+            (h.ssh_user ? ' · ' + esc(h.ssh_user) : '') +
+            (h.enabled ? '' : ' · deaktiviert') + '</p>' +
+            (h.note ? '<p class="mt-1 text-sm text-[var(--muted)]">' + esc(h.note) + '</p>' : '') +
+            '</div>' +
+            '<div class="flex flex-wrap gap-2">' +
+              '<button type="button" class="btn btn-sm btn-ghost btn-edit">Bearbeiten</button>' +
+              '<button type="button" class="btn btn-sm btn-ghost btn-del">Löschen</button>' +
+            '</div>' +
+          '</div>' +
+        '</article>'
+      );
+    }).join('');
+
+    root.querySelectorAll('.entity-card').forEach(function (card, i) {
+      const h = hosts[i];
+      card.querySelector('.btn-edit').addEventListener('click', function () { fillForm(h); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+      card.querySelector('.btn-del').addEventListener('click', async function () {
+        if (!confirm('Host „' + h.name + '“ löschen?')) return;
+        const dr = await fetch(API + '/hosts/' + h.id, { method: 'DELETE' });
+        if (!dr.ok) { msg('Löschen fehlgeschlagen', false); return; }
+        msg('Gelöscht', true);
+        loadHosts();
+      });
+    });
+  }
+
+  document.getElementById('host-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    const body = payloadFromForm();
+    const r = await fetch(API + '/hosts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) { msg(d.detail || 'Speichern fehlgeschlagen', false); return; }
+    msg('Gespeichert', true);
+    resetForm();
+    loadHosts();
+  });
+
+  document.getElementById('btn-reset').addEventListener('click', resetForm);
+
+  document.getElementById('btn-check').addEventListener('click', async function () {
+    const body = payloadFromForm();
+    msg('Teste Verbindung…');
+    const r = await fetch(API + '/hosts/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: body.host, port: body.port, ssh_user: body.ssh_user }),
+    });
+    const d = await r.json();
+    if (!r.ok) { msg(d.detail || 'Test fehlgeschlagen', false); return; }
+    msg(d.ok ? ('OK: ' + (d.stdout || '').slice(0, 120)) : ('Fehlgeschlagen: ' + (d.stderr || d.stdout || '')), !!d.ok);
+  });
+
+  loadHosts().catch(function (e) { msg(String(e), false); });
+})();
+</script>
+{% endblock %}

@@ -56,7 +56,6 @@
       <label class="label" for="restore-source">Quelle</label>
       <select id="restore-source" class="field">
         <option value="copilot">Copilot</option>
-        <option value="synology">Synology</option>
       </select>
       <button type="button" id="restore-go" class="btn btn-primary">Restore starten</button>
       <p id="restore-msg" class="text-[var(--muted)]" role="status"></p>
@@ -79,7 +78,19 @@
 
   function destChip(label, status) {
     const s = status || '—';
-    return `<span class="chip chip-${s === 'ok' ? 'running' : s === 'failed' ? 'stopped' : 'unknown'}" title="${label}">${label}: ${s}</span>`;
+    let cls = 'unknown';
+    if (s === 'ok' || s === 'cleared') cls = 'running';
+    else if (s === 'failed') cls = 'stopped';
+    else if (s === 'partial') cls = 'partial';
+    return `<span class="chip chip-${cls}" title="${label}">${label}: ${s}</span>`;
+  }
+
+  function hopChips(r) {
+    const hops = r.destinations;
+    if (Array.isArray(hops) && hops.length) {
+      return hops.map((h) => destChip(h.label || h.kind || 'Hop', h.status)).join('');
+    }
+    return destChip('Host', r.lxc_status) + destChip('Copilot', r.copilot_status) + destChip('SFTP', r.synology_status);
   }
 
   async function loadHistory() {
@@ -97,8 +108,8 @@
       return `<tr class="border-b border-[var(--border)] align-middle">
         <td class="py-2 pr-2 whitespace-nowrap">${r.created_at || ''}</td>
         <td class="py-2 pr-2"><div class="font-medium break-words">${r.stack}</div><div class="text-[var(--muted)] text-xs">${r.guest_name || ''}</div></td>
-        <td class="py-2 pr-2"><span class="chip chip-${r.status === 'success' ? 'running' : r.status === 'failed' ? 'stopped' : 'unknown'}">${r.status}</span></td>
-        <td class="py-2 pr-2"><div class="flex flex-wrap items-center gap-1">${destChip('LXC', r.lxc_status)}${destChip('Copilot', r.copilot_status)}${destChip('Syno', r.synology_status)}</div></td>
+        <td class="py-2 pr-2"><span class="chip chip-${r.status === 'success' ? 'running' : r.status === 'failed' ? 'stopped' : r.status === 'partial' ? 'partial' : 'unknown'}">${r.status}</span></td>
+        <td class="py-2 pr-2"><div class="flex flex-wrap items-center gap-1">${hopChips(r)}</div></td>
         <td class="py-2 pr-2 whitespace-nowrap">${size}</td>
         <td class="py-2 pr-2">${r.verify_status || '—'}</td>
         <td class="py-2 whitespace-nowrap">
@@ -154,7 +165,28 @@
     toast(msg, data.message || 'OK');
   });
 
+  async function loadRestoreSources() {
+    const sel = document.getElementById('restore-source');
+    if (!sel) return;
+    try {
+      const res = await fetch(API + '/destinations');
+      const data = await res.json();
+      const durable = (data.destinations || []).filter(
+        (d) => d.enabled && d.kind !== 'host_staging'
+      );
+      if (!durable.length) return;
+      const prev = sel.value;
+      sel.innerHTML = durable.map((d) => {
+        const val = d.kind === 'copilot' ? 'copilot' : (d.id || d.kind);
+        const label = d.label || d.kind;
+        return `<option value="${val}">${label}</option>`;
+      }).join('');
+      if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    } catch (_) { /* keep defaults */ }
+  }
+
   document.getElementById('btn-refresh-all')?.addEventListener('click', loadHistory);
+  loadRestoreSources();
   loadHistory();
   setInterval(loadHistory, 12000);
 })();

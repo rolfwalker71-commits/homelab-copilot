@@ -1,6 +1,7 @@
 /*! Homelab Operations Copilot — dual chrome:
  *  android  → Material You 3 Expressive (mobile / <lg)
  *  desktop  → Fluent 2 (lg+)
+ *  Seed: Homelab-Teal (#0D9488)
  */
 
 html {
@@ -18,28 +19,35 @@ html {
   --muted: var(--on-surface-variant);
   --accent: var(--primary);
   --accent-soft: var(--primary-container);
+  --success: #4ade80;
+  --partial: #fbbf24;
   --warn: #e6b422;
   --danger: #f2b8b5;
-  --info: #a8c8ff;
-  --on-primary: #fff;
+  --info: #5eead4;
+  --on-primary: #003730;
   --motion: cubic-bezier(0.2, 0, 0, 1);
 }
 
 /* ═══════════════════════════════════════════
    Material You 3 Expressive (mobile)
-   Seed: #6750A4 — tonal, large shapes, flush nav
+   Seed: Homelab-Teal — tonal, large shapes
    ═══════════════════════════════════════════ */
 html[data-chrome="android"] {
-  --background: #141218;
-  --surface-container: #211f26;
-  --card: #2b2930;
-  --outline: #49454f;
-  --on-surface: #e6e1e5;
-  --on-surface-variant: #cac4d0;
-  --primary: #d0bcff;
-  --primary-container: #4f378b;
-  --secondary: #4a4458;
-  --on-secondary: #e8def8;
+  --background: #0e1514;
+  --surface-container: #1a2422;
+  --card: #24302d;
+  --outline: #3d4a47;
+  --on-surface: #e0e5e3;
+  --on-surface-variant: #b8c4c0;
+  --primary: #2dd4bf;
+  --primary-container: #0f766e;
+  --secondary: #2a3834;
+  --on-secondary: #c5e6df;
+  --on-primary: #003730;
+  --success: #4ade80;
+  --partial: #fbbf24;
+  --danger: #f2b8b5;
+  --info: #5eead4;
   --radius: 1.75rem;          /* 28dp */
   --radius-ctrl: 1.25rem;
   --shadow: none;
@@ -50,19 +58,24 @@ html[data-chrome="android"] {
 
 /* ═══════════════════════════════════════════
    Fluent 2 (desktop / Windows)
-   Mica-ish chrome, compact radius, blue accent
+   Mica-ish chrome, compact radius, teal accent
    ═══════════════════════════════════════════ */
 html[data-chrome="desktop"] {
-  --background: #202020;
-  --surface-container: rgb(44 44 44 / 0.8);
-  --card: #2c2c2c;
-  --outline: #3f3f3f;
-  --on-surface: #ffffff;
-  --on-surface-variant: #c8c8c8;
-  --primary: #60cdff;
-  --primary-container: #005fb8;
-  --secondary: #2c2c2c;
-  --on-secondary: #ffffff;
+  --background: #1a1f1e;
+  --surface-container: rgb(36 44 42 / 0.85);
+  --card: #252c2a;
+  --outline: #3a4340;
+  --on-surface: #f2f5f4;
+  --on-surface-variant: #c0cbc7;
+  --primary: #2dd4bf;
+  --primary-container: #0f766e;
+  --secondary: #2a3230;
+  --on-secondary: #e8f5f2;
+  --on-primary: #003730;
+  --success: #4ade80;
+  --partial: #fbbf24;
+  --danger: #f2b8b5;
+  --info: #5eead4;
   --radius: 0.5rem;           /* 8px */
   --radius-ctrl: 0.25rem;     /* 4px */
   --shadow: none;
@@ -74,36 +87,42 @@ html[data-chrome="desktop"] {
 @media (prefers-color-scheme: light) {
   html[data-chrome="android"] {
     color-scheme: light;
-    --background: #fffbfe;
-    --surface-container: #f3edf7;
-    --card: #ece6f0;
-    --outline: #79747e;
-    --on-surface: #1c1b1f;
-    --on-surface-variant: #49454f;
-    --primary: #6750a4;
-    --primary-container: #eaddff;
-    --secondary: #e8def8;
-    --on-secondary: #1d192b;
+    --background: #f4faf8;
+    --surface-container: #e6f2ef;
+    --card: #ffffff;
+    --outline: #6b7c78;
+    --on-surface: #0f1a18;
+    --on-surface-variant: #3d4f4b;
+    --primary: #0d9488;
+    --primary-container: #99f6e4;
+    --secondary: #cce8e2;
+    --on-secondary: #0f1a18;
+    --on-primary: #ffffff;
+    --success: #15803d;
+    --partial: #b45309;
     --danger: #b3261e;
     --warn: #7d5700;
-    --info: #1e5bb8;
+    --info: #0f766e;
   }
 
   html[data-chrome="desktop"] {
     color-scheme: light;
-    --background: #f3f3f3;
-    --surface-container: rgb(255 255 255 / 0.7);
+    --background: #f0f5f3;
+    --surface-container: rgb(255 255 255 / 0.78);
     --card: #ffffff;
-    --outline: #e5e5e5;
-    --on-surface: #1a1a1a;
-    --on-surface-variant: #5d5d5d;
-    --primary: #005fb8;
-    --primary-container: #60cdff;
-    --secondary: #f9f9f9;
-    --on-secondary: #1a1a1a;
+    --outline: #d5e0dc;
+    --on-surface: #121a18;
+    --on-surface-variant: #4a5c57;
+    --primary: #0f766e;
+    --primary-container: #5eead4;
+    --secondary: #f3faf8;
+    --on-secondary: #121a18;
+    --on-primary: #ffffff;
+    --success: #15803d;
+    --partial: #b45309;
     --danger: #c42b1c;
     --warn: #9a6700;
-    --info: #005fb8;
+    --info: #0f766e;
   }
 }
 
@@ -125,7 +144,10 @@ html[data-chrome="android"] body {
 }
 
 html[data-chrome="desktop"] body {
-  background: var(--background);
+  background:
+    radial-gradient(ellipse 80% 50% at 8% -8%, color-mix(in srgb, var(--primary) 14%, transparent), transparent 55%),
+    radial-gradient(ellipse 55% 40% at 100% 0%, color-mix(in srgb, var(--primary-container) 26%, transparent), transparent 50%),
+    var(--background);
 }
 
 .font-display {
@@ -187,8 +209,8 @@ html[data-chrome="desktop"] .entity-card:hover {
 }
 
 .chip-running {
-  background: color-mix(in srgb, #4caf50 22%, transparent);
-  color: #a5d6a7;
+  background: color-mix(in srgb, var(--success) 22%, transparent);
+  color: var(--success);
 }
 .chip-stopped {
   background: color-mix(in srgb, var(--danger) 22%, transparent);
@@ -202,12 +224,20 @@ html[data-chrome="desktop"] .entity-card:hover {
   background: color-mix(in srgb, var(--warn) 22%, transparent);
   color: var(--warn);
 }
+.chip-partial {
+  background: color-mix(in srgb, var(--partial) 22%, transparent);
+  color: var(--partial);
+}
+.chip-info {
+  background: color-mix(in srgb, var(--info) 20%, transparent);
+  color: var(--info);
+}
 
 /* Soft tonal row fills by status (Docker + Proxmox detail panels).
    Rail uses status dots instead — see .topo-rail-status-*.
    Soft mixes keep WCAG contrast on var(--text) / var(--muted). */
 .row-status-running {
-  background: color-mix(in srgb, #43a047 15%, var(--card));
+  background: color-mix(in srgb, var(--success) 15%, var(--card));
 }
 
 .row-status-stopped,
@@ -225,10 +255,10 @@ html[data-chrome="desktop"] .entity-card:hover {
 }
 
 @media (prefers-color-scheme: light) {
-  .chip-running { color: #1b5e20; }
+  .chip-running { color: var(--success); }
 
   .row-status-running {
-    background: color-mix(in srgb, #2e7d32 11%, var(--card));
+    background: color-mix(in srgb, var(--success) 11%, var(--card));
   }
 
   .row-status-stopped,
@@ -279,7 +309,7 @@ html[data-chrome="desktop"] .btn {
 }
 
 html[data-chrome="android"] .btn-primary {
-  color: #381e72;
+  color: var(--on-primary);
   border-radius: 999px;
 }
 
@@ -289,13 +319,8 @@ html[data-chrome="android"] .btn-primary:hover {
 
 html[data-chrome="desktop"] .btn-primary {
   background: var(--primary);
-  color: #002b4d;
+  color: var(--on-primary);
   border-radius: var(--radius-ctrl);
-}
-
-@media (prefers-color-scheme: light) {
-  html[data-chrome="android"] .btn-primary { color: #fff; }
-  html[data-chrome="desktop"] .btn-primary { color: #fff; }
 }
 
 html[data-chrome="desktop"] .btn-primary:hover {
@@ -333,7 +358,7 @@ html[data-chrome="android"] .fab {
   align-items: center;
   justify-content: center;
   background: var(--primary);
-  color: #381e72;
+  color: var(--on-primary);
   border: none;
   z-index: 45;
   box-shadow: none;
@@ -343,10 +368,6 @@ html[data-chrome="android"] .fab {
 
 html[data-chrome="android"] .fab:active {
   transform: scale(0.94);
-}
-
-@media (prefers-color-scheme: light) {
-  html[data-chrome="android"] .fab { color: #fff; }
 }
 
 html[data-chrome="desktop"] .fab {
@@ -433,6 +454,9 @@ html[data-chrome="desktop"] .app-header-inner {
 }
 
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
   font-family: var(--font-display);
   font-weight: 700;
   font-size: 1.125rem;
@@ -441,8 +465,44 @@ html[data-chrome="desktop"] .app-header-inner {
   text-decoration: none;
 }
 
+.brand-mark {
+  display: inline-flex;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex-shrink: 0;
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--primary-container) 55%, var(--card));
+  color: var(--primary);
+  align-items: center;
+  justify-content: center;
+}
+
+.brand-mark svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
 .brand span {
   color: var(--primary);
+}
+
+.nav-desktop .nav-ico,
+.module-subnav .nav-ico {
+  display: inline-flex;
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+}
+
+.nav-desktop .nav-ico svg,
+.module-subnav .nav-ico svg {
+  width: 100%;
+  height: 100%;
+}
+
+.nav-android a .nav-icon svg {
+  width: 1.35rem;
+  height: 1.35rem;
 }
 
 /* Desktop Fluent nav — accent underline, not pill */
@@ -460,6 +520,7 @@ html[data-chrome="desktop"] .nav-desktop {
   position: relative;
   display: inline-flex;
   align-items: center;
+  gap: 0.4rem;
   padding: 0.65rem 0.9rem;
   font-size: 0.875rem;
   font-weight: 500;
@@ -610,6 +671,148 @@ html[data-chrome="desktop"] .alert-tonal {
   border: 1px solid var(--outline);
   border-left: 3px solid var(--warn);
   border-radius: var(--radius);
+}
+
+.setup-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  border-radius: var(--radius);
+  padding: 1rem 1.15rem;
+  background: color-mix(in srgb, var(--primary-container) 28%, var(--surface-container));
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, transparent);
+  color: var(--on-surface);
+}
+
+.setup-banner-ico {
+  flex-shrink: 0;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: 0.1rem;
+  color: var(--primary);
+}
+
+.setup-banner-ico svg {
+  width: 100%;
+  height: 100%;
+}
+
+.setup-banner a {
+  color: var(--primary);
+}
+
+.stat-tile {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.stat-tile-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex-shrink: 0;
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, var(--primary-container) 40%, var(--card));
+  color: var(--primary);
+}
+
+html[data-chrome="desktop"] .stat-tile-ico {
+  border-radius: var(--radius-ctrl);
+  width: 2.25rem;
+  height: 2.25rem;
+}
+
+.stat-tile-ico svg {
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
+.stat-tile-body {
+  min-width: 0;
+}
+
+.module-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.module-card-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex-shrink: 0;
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, var(--primary-container) 42%, var(--card));
+  color: var(--primary);
+}
+
+html[data-chrome="desktop"] .module-card-ico {
+  border-radius: var(--radius-ctrl);
+}
+
+.module-card-ico svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.dest-tile {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.dest-tile-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex-shrink: 0;
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--primary-container) 38%, var(--card));
+  color: var(--primary);
+}
+
+.dest-tile-ico.is-ephemeral {
+  background: color-mix(in srgb, var(--warn) 18%, var(--card));
+  color: var(--warn);
+}
+
+.dest-tile-ico.is-sftp {
+  background: color-mix(in srgb, var(--info) 18%, var(--card));
+  color: var(--info);
+}
+
+.dest-tile-ico svg {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.dest-keep-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+}
+
+.btn-icon svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  display: block;
+}
+
+.module-subnav .btn {
+  gap: 0.4rem;
 }
 
 /* Desktop: command-row actions visible; Android uses FAB */
@@ -905,7 +1108,7 @@ html[data-chrome="android"] .topo-rail-item.is-selected {
 }
 
 .topo-rail-status-running {
-  background: #43a047;
+  background: var(--success);
 }
 
 .topo-rail-status-stopped,
@@ -924,7 +1127,7 @@ html[data-chrome="android"] .topo-rail-item.is-selected {
 
 @media (prefers-color-scheme: light) {
   .topo-rail-status-running {
-    background: #2e7d32;
+    background: var(--success);
   }
 }
 
@@ -1067,7 +1270,7 @@ html[data-chrome="android"] .topo-detail {
 
 /* Guest detail header: status via background (no chip) */
 .topo-detail-head.row-status-running {
-  background: color-mix(in srgb, #43a047 15%, var(--card));
+  background: color-mix(in srgb, var(--success) 15%, var(--card));
 }
 
 .topo-detail-head.row-status-stopped,
@@ -1086,7 +1289,7 @@ html[data-chrome="android"] .topo-detail {
 
 @media (prefers-color-scheme: light) {
   .topo-detail-head.row-status-running {
-    background: color-mix(in srgb, #2e7d32 12%, var(--card));
+    background: color-mix(in srgb, var(--success) 12%, var(--card));
   }
 
   .topo-detail-head.row-status-stopped,
@@ -1180,6 +1383,50 @@ html[data-chrome="android"] .topo-tag-chip {
   grid-column: 2;
   grid-row: 1;
   justify-self: end;
+}
+
+/*
+ * Guest header actions: one fixed height for power icons + Terminal.
+ * Must beat html[data-chrome="desktop"] .btn (min-height: 2.75rem) and .btn-sm.
+ */
+.topo-detail-actions .btn-icon,
+.topo-detail-actions .btn,
+.topo-detail-actions .btn.btn-sm,
+.topo-detail-actions .btn.btn-primary,
+html[data-chrome="desktop"] .topo-detail-actions .btn-icon,
+html[data-chrome="desktop"] .topo-detail-actions .btn,
+html[data-chrome="desktop"] .topo-detail-actions .btn.btn-sm,
+html[data-chrome="desktop"] .topo-detail-actions .btn.btn-primary {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 2rem;
+  min-height: 2rem;
+  max-height: 2rem;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: 0.8125rem;
+  line-height: 1;
+}
+
+.topo-detail-actions .btn-icon,
+html[data-chrome="desktop"] .topo-detail-actions .btn-icon {
+  width: 2rem;
+  min-width: 2rem;
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
+}
+
+.topo-detail-actions .btn,
+.topo-detail-actions .btn.btn-sm,
+.topo-detail-actions .btn.btn-primary,
+html[data-chrome="desktop"] .topo-detail-actions .btn,
+html[data-chrome="desktop"] .topo-detail-actions .btn.btn-sm,
+html[data-chrome="desktop"] .topo-detail-actions .btn.btn-primary {
+  min-width: unset;
+  padding-left: 0.7rem;
+  padding-right: 0.7rem;
 }
 
 .topo-detail-facts {
@@ -1313,7 +1560,7 @@ html[data-chrome="android"] .topo-detail-metrics {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: #2e7d32;
+  background: var(--success);
   min-width: 0;
   transition: width 0.35s var(--motion);
 }
@@ -1331,7 +1578,7 @@ html[data-chrome="android"] .topo-detail-metrics {
 }
 
 .topo-metric.level-ok .topo-metric-icon {
-  color: #2e7d32;
+  color: var(--success);
 }
 
 .topo-metric.level-warn .topo-metric-icon {
@@ -1344,11 +1591,11 @@ html[data-chrome="android"] .topo-detail-metrics {
 
 @media (prefers-color-scheme: dark) {
   .topo-metric.level-ok .topo-metric-icon {
-    color: #81c784;
+    color: var(--success);
   }
 
   .topo-metric.level-ok .topo-metric-bar-fill {
-    background: #81c784;
+    background: var(--success);
   }
 }
 
@@ -1403,7 +1650,7 @@ html[data-chrome="android"] .topo-detail-metrics {
 }
 
 .topo-spark[data-spark="net"] .topo-spark-line {
-  stroke: color-mix(in srgb, var(--primary) 40%, #2e7d32);
+  stroke: color-mix(in srgb, var(--primary) 40%, var(--success));
 }
 
 .topo-spark.is-empty .topo-spark-line {
@@ -1437,8 +1684,8 @@ html[data-chrome="desktop"] .topo-node-status-pill {
 }
 
 .topo-node-status-pill.status-running {
-  background: color-mix(in srgb, #2e7d32 18%, var(--card));
-  color: #2e7d32;
+  background: color-mix(in srgb, var(--success) 18%, var(--card));
+  color: var(--success);
 }
 
 .topo-node-status-pill.status-stopped {
@@ -1448,8 +1695,8 @@ html[data-chrome="desktop"] .topo-node-status-pill {
 
 @media (prefers-color-scheme: dark) {
   .topo-node-status-pill.status-running {
-    color: #81c784;
-    background: color-mix(in srgb, #81c784 16%, var(--card));
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 16%, var(--card));
   }
 }
 
@@ -1554,11 +1801,11 @@ html[data-chrome="android"] .topo-chart-card {
 }
 
 .topo-chart-line-mem {
-  stroke: #2e7d32;
+  stroke: var(--success);
 }
 
 .topo-chart-line-net {
-  stroke: color-mix(in srgb, var(--primary) 40%, #2e7d32);
+  stroke: color-mix(in srgb, var(--primary) 40%, var(--success));
 }
 
 .topo-chart-card.is-empty .topo-chart-line,
@@ -1634,11 +1881,11 @@ html[data-chrome="android"] .topo-storage-row {
 
 .topo-storage-row.level-ok .topo-storage-pct,
 .topo-storage-row.level-ok .topo-metric-bar-fill {
-  color: #2e7d32;
+  color: var(--success);
 }
 
 .topo-storage-row.level-ok .topo-metric-bar-fill {
-  background: #2e7d32;
+  background: var(--success);
 }
 
 .topo-storage-row.level-warn .topo-storage-pct {
@@ -1689,15 +1936,15 @@ html[data-chrome="android"] .topo-storage-row {
 
 @media (prefers-color-scheme: dark) {
   .topo-chart-line-mem {
-    stroke: #81c784;
+    stroke: var(--success);
   }
 
   .topo-storage-row.level-ok .topo-metric-bar-fill {
-    background: #81c784;
+    background: var(--success);
   }
 
   .topo-storage-row.level-ok .topo-storage-pct {
-    color: #81c784;
+    color: var(--success);
   }
 }
 
@@ -2001,7 +2248,7 @@ html[data-chrome="desktop"] .topo-docker-panel-orphan {
 
 /* Status tint wins over default docker-row surface */
 .topo-docker-chip.row-status-running {
-  background: color-mix(in srgb, #43a047 15%, color-mix(in srgb, var(--background) 45%, var(--card)));
+  background: color-mix(in srgb, var(--success) 15%, color-mix(in srgb, var(--background) 45%, var(--card)));
 }
 
 .topo-docker-chip.row-status-stopped,
@@ -2020,7 +2267,7 @@ html[data-chrome="desktop"] .topo-docker-panel-orphan {
 
 @media (prefers-color-scheme: light) {
   .topo-docker-chip.row-status-running {
-    background: color-mix(in srgb, #2e7d32 11%, color-mix(in srgb, var(--background) 40%, var(--card)));
+    background: color-mix(in srgb, var(--success) 11%, color-mix(in srgb, var(--background) 40%, var(--card)));
   }
 
   .topo-docker-chip.row-status-stopped,
@@ -2178,6 +2425,100 @@ html[data-chrome="desktop"] .topo-stack-card {
   opacity: 0.9;
 }
 
+.topo-stack-badge-btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+  opacity: 1;
+  transition: background 0.15s var(--motion), border-color 0.15s var(--motion);
+}
+
+.topo-stack-badge-btn:hover {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 55%, transparent);
+}
+
+.compose-dialog {
+  width: min(52rem, calc(100vw - 1.5rem));
+  max-height: min(88vh, 44rem);
+  padding: 0;
+  border: 1px solid var(--outline);
+  border-radius: calc(var(--radius) * 0.85);
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 16px 48px color-mix(in srgb, #000 35%, transparent);
+}
+
+.compose-dialog::backdrop {
+  background: color-mix(in srgb, #000 45%, transparent);
+}
+
+.compose-dialog-inner {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+  min-height: 0;
+}
+
+.compose-dialog-path {
+  margin: 0.15rem 0 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.compose-dialog-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
+}
+
+.compose-file-select {
+  flex: 1 1 12rem;
+  min-height: 2.25rem;
+  font-size: 0.8125rem;
+}
+
+.compose-dialog-status {
+  flex: 1 1 auto;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  min-width: 0;
+}
+
+.compose-dialog-status.is-error {
+  color: var(--danger);
+}
+
+.compose-dialog-editor {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: min(58vh, 28rem);
+  margin: 0;
+  padding: 0.85rem 0.9rem 1rem;
+  border: none;
+  resize: vertical;
+  background: color-mix(in srgb, var(--background) 55%, var(--card));
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  tab-size: 2;
+}
+
+.compose-dialog-editor:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
 .topo-stack-dots {
   display: inline-flex;
   align-items: center;
@@ -2193,7 +2534,7 @@ html[data-chrome="desktop"] .topo-stack-card {
 }
 
 .topo-stack-dot-running {
-  background: #2e7d32;
+  background: var(--success);
 }
 
 .topo-stack-dot-exited,

@@ -26,6 +26,7 @@ from app.core.topology import TopologyStore
 from backup_verifier.backup import BackupError, list_backup_stacks, run_backup
 from backup_verifier.config import get_backup_settings
 from backup_verifier import cron as cron_mod
+from backup_verifier import destinations as dest_mod
 from backup_verifier.inventory import build_inventory
 from backup_verifier.jobs import JOBS
 from backup_verifier.restore import RestoreError, run_restore
@@ -76,7 +77,16 @@ class RunPayload(BaseModel):
 
 class RestorePayload(BaseModel):
     confirm: bool = False
-    source: str = Field(default="copilot", pattern="^(copilot|synology)$")
+    # Destination id (int as string), "copilot", "synology", or kind/label
+    source: str = Field(default="copilot", min_length=1, max_length=64)
+
+
+class DestinationsPayload(BaseModel):
+    destinations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class DestinationCheckPayload(BaseModel):
+    destination: dict[str, Any] = Field(default_factory=dict)
 
 
 class SchedulePayload(BaseModel):
@@ -95,9 +105,15 @@ class SchedulePayload(BaseModel):
 async def module_status() -> dict[str, Any]:
     bs = get_backup_settings()
     s = get_settings()
+    store = _store
+    pipeline: list[dict[str, Any]] = []
+    if store is not None:
+        await dest_mod.ensure_seeded(store, bs)
+        rows = await store.list_destinations()
+        pipeline = [dest_mod.public_destination(r) for r in rows]
     return {
         "module": "backup_verifier",
-        "version": "0.1.2",
+        "version": "0.2.0",
         "time": format_de(now_berlin()),
         "copilot_dir": str(bs.copilot_dir),
         "lxc_dir": bs.backup_lxc_dir,
@@ -107,8 +123,13 @@ async def module_status() -> dict[str, Any]:
             "synology": bs.backup_synology_keep,
         },
         "quiesce_default": bs.backup_quiesce,
+        "pipeline": pipeline,
         "synology": {
-            "configured": bs.synology_configured,
+            "configured": any(
+                p.get("kind") == "sftp" and p.get("enabled") and p.get("preset") == "synology"
+                for p in pipeline
+            )
+            or bs.synology_configured,
             "host": bs.backup_synology_host or None,
             "user": bs.backup_synology_user or None,
             "path": bs.backup_synology_path or None,
@@ -123,6 +144,51 @@ async def module_status() -> dict[str, Any]:
             "Kein Ersatz für Proxmox vzdump (volle LXC-DR)."
         ),
     }
+
+
+@router.get("/destinations")
+async def list_destinations() -> dict[str, Any]:
+    store = _get_store()
+    await dest_mod.ensure_seeded(store)
+    rows = await store.list_destinations()
+    return {
+        "destinations": [dest_mod.public_destination(r) for r in rows],
+        "time": format_de(now_berlin()),
+    }
+
+
+@router.put("/destinations")
+async def save_destinations(payload: DestinationsPayload) -> dict[str, Any]:
+    store = _get_store()
+    await dest_mod.ensure_seeded(store)
+    existing = await store.list_destinations()
+    try:
+        normalized = dest_mod.normalize_incoming(
+            payload.destinations, existing=existing
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    rows = await store.replace_destinations(normalized)
+    return {
+        "ok": True,
+        "destinations": [dest_mod.public_destination(r) for r in rows],
+        "message": "Ziele gespeichert.",
+        "time": format_de(now_berlin()),
+    }
+
+
+@router.post("/destinations/check")
+async def check_destination(payload: DestinationCheckPayload) -> dict[str, Any]:
+    store = _get_store()
+    raw = dict(payload.destination or {})
+    # If id given and secret blank, merge stored secret
+    rid = raw.get("id")
+    if rid is not None and not raw.get("secret_ref"):
+        existing = await store.get_destination(int(rid))
+        if existing:
+            raw["secret_ref"] = existing.get("secret_ref") or ""
+    result = await dest_mod.check_destination(raw)
+    return result
 
 
 @router.get("/stacks")
@@ -369,10 +435,10 @@ async def sync_schedules() -> dict[str, Any]:
 
 class BackupVerifierModule:
     name = "backup_verifier"
-    version = "0.1.2"
+    version = "0.2.0"
     description = (
-        "Compose-Stack-Backups (LXC → Copilot → Synology) mit Checksum-Verify, "
-        "Verlauf und Zeitplan."
+        "Compose-Stack-Backups mit flexiblen Zielen (Host-Staging → Copilot → SFTP), "
+        "Checksum-Verify, Verlauf und Zeitplan."
     )
     enabled = True
     meta = {
@@ -391,6 +457,7 @@ class BackupVerifierModule:
         bs.copilot_dir.mkdir(parents=True, exist_ok=True)
         _store = BackupStore(bs.db_path)
         await _store.connect()
+        await dest_mod.ensure_seeded(_store, bs)
         app.state.backup_store = _store
 
         templates = _make_templates()
@@ -427,6 +494,14 @@ class BackupVerifierModule:
                 request,
                 "history.html",
                 _page_ctx("history"),
+            )
+
+        @app.get("/modules/backup_verifier/destinations", response_class=HTMLResponse)
+        async def backup_destinations_page(request: Request) -> HTMLResponse:
+            return templates.TemplateResponse(
+                request,
+                "destinations.html",
+                _page_ctx("destinations"),
             )
 
         logger.info(

@@ -204,6 +204,8 @@ def build_topology_tree(snapshot: TopologySnapshot | None) -> dict[str, Any]:
         nodes_out.append(
             {
                 "name": name,
+                "id": node_ent.id if node_ent else f"node:{name}",
+                "ip_addresses": list(node_ent.ip_addresses) if node_ent else [],
                 "node": node_ent,
                 "status": node_ent.status.value if node_ent else "unknown",
                 "meta": meta,

@@ -52,12 +52,55 @@ def verify_manifest_file(path: Path) -> tuple[bool, str, dict[str, Any] | None]:
 
 
 def summarize_hop_verifies(
+    hops: list[dict[str, Any]] | None = None,
     *,
-    lxc: str | None,
-    copilot: str | None,
-    synology: str | None,
+    lxc: str | None = None,
+    copilot: str | None = None,
+    synology: str | None = None,
 ) -> tuple[str, str]:
-    """Return overall verify_status + detail string."""
+    """Return overall verify_status + detail string.
+
+    Prefers generic ``hops`` list; falls back to legacy lxc/copilot/synology kwargs.
+    """
+    if hops is not None:
+        parts: dict[str, str] = {}
+        for h in hops:
+            key = str(h.get("label") or h.get("kind") or "hop")
+            parts[key] = str(h.get("verify") or h.get("status") or "pending")
+        detail = ", ".join(f"{k}={v}" for k, v in parts.items()) or "keine Hops"
+        values = list(parts.values())
+        if any(v == "failed" for v in values):
+            return "failed", detail
+        host_ok = any(
+            h.get("kind") == "host_staging"
+            and h.get("verify") in ("ok", "cleared")
+            for h in hops
+        ) or any(
+            # cleared host still counts as verified earlier
+            h.get("kind") == "host_staging" and h.get("status") in ("ok", "cleared")
+            for h in hops
+        )
+        # Treat verify=ok OR status=cleared for host
+        for h in hops:
+            if h.get("kind") == "host_staging" and h.get("status") == "cleared":
+                host_ok = True
+        copilot_ok = any(
+            h.get("kind") == "copilot" and h.get("verify") == "ok" for h in hops
+        )
+        sftp_failed = any(
+            h.get("kind") == "sftp" and h.get("verify") == "failed" for h in hops
+        )
+        sftp_pending = any(
+            h.get("kind") == "sftp" and h.get("verify") == "pending" for h in hops
+        )
+        if host_ok and copilot_ok and not sftp_failed:
+            return "ok", detail
+        if host_ok and copilot_ok and sftp_failed:
+            return "partial", detail
+        if any(v == "pending" for v in values) or sftp_pending:
+            return "pending", detail
+        return "partial", detail
+
     parts = {
         "lxc": lxc or "pending",
         "copilot": copilot or "pending",
@@ -67,7 +110,6 @@ def summarize_hop_verifies(
     values = list(parts.values())
     if any(v == "failed" for v in values):
         return "failed", detail
-    # skipped synology is OK for partial/success
     critical = [parts["lxc"], parts["copilot"]]
     if all(v == "ok" for v in critical):
         if parts["synology"] in ("ok", "skipped"):

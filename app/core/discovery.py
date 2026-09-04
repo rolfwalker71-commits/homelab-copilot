@@ -297,6 +297,8 @@ class DiscoveryEngine:
                 )
                 nodes.append(node_entity)
 
+            await self._enrich_node_ips(client, headers, nodes)
+
             # Prefer cluster/resources — covers all nodes in one call when ACL allows
             seen_vmids: set[tuple[str, int]] = set()
             try:
@@ -377,6 +379,49 @@ class DiscoveryEngine:
                 )
 
         return nodes, guests, errors
+
+    async def _enrich_node_ips(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        nodes: list[TopologyEntity],
+    ) -> None:
+        """Attach SSH-reachable IPs to Proxmox nodes (cluster/status + PROXMOX_HOST)."""
+        if not nodes:
+            return
+        s = self.settings
+        by_name: dict[str, str] = {}
+
+        try:
+            status_rows = await self._proxmox_get(client, "/cluster/status", headers)
+            for row in status_rows or []:
+                if not isinstance(row, dict):
+                    continue
+                if (row.get("type") or "").lower() != "node":
+                    continue
+                name = (row.get("name") or row.get("node") or "").strip()
+                ip = (row.get("ip") or "").strip()
+                if name and ip:
+                    by_name[name] = ip
+        except Exception as exc:
+            logger.debug("cluster/status for node IPs: %s", exc)
+
+        mgmt = (s.proxmox_host or "").strip()
+        for node in nodes:
+            if node.ip_addresses:
+                continue
+            ip = by_name.get(node.name or "")
+            if not ip and mgmt:
+                if (
+                    not s.proxmox_node
+                    or s.proxmox_node == node.name
+                    or len(nodes) == 1
+                ):
+                    ip = mgmt
+            if ip:
+                node.ip_addresses = [ip]
+                node.meta = dict(node.meta or {})
+                node.meta["ssh_ip"] = ip
 
     async def _enrich_guest(
         self,
