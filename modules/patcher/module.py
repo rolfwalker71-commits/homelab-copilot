@@ -264,6 +264,33 @@ async def _run_scan_job(
         return {"status": "failed", "scan_id": scan_id, "summary": {}, "error": str(exc)}
 
 
+def _join_truncated(items: list[str], *, max_len: int = 100, sep: str = ", ") -> str:
+    """Join names until max_len; append ``+N`` for leftovers."""
+    if not items:
+        return ""
+    parts: list[str] = []
+    for i, item in enumerate(items):
+        leftover = len(items) - i - 1
+        suffix = f" +{leftover}" if leftover else ""
+        candidate = sep.join(parts + [item])
+        if len(candidate) + len(suffix) <= max_len:
+            parts.append(item)
+            continue
+        if not parts:
+            room = max_len - 1
+            return (item[:room] + "…") if len(item) > room else item
+        omitted = len(items) - len(parts)
+        return sep.join(parts) + (f" +{omitted}" if omitted else "")
+    return sep.join(parts)
+
+
+def _truncate_push(text: str, max_len: int = 200) -> str:
+    text = text.strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
+
+
 async def _notify_scan_findings(summary: dict[str, Any]) -> None:
     """Push when daily/manual all-host scan finds updates or errors."""
     hosts_u = int(summary.get("hosts_with_updates") or 0)
@@ -275,7 +302,6 @@ async def _notify_scan_findings(summary: dict[str, Any]) -> None:
     try:
         from app.core.push import send_push_to_all
 
-        # app.state is set on the FastAPI app; pull store via a soft global if needed
         store = None
         try:
             from app.main import app as fastapi_app
@@ -285,14 +311,33 @@ async def _notify_scan_findings(summary: dict[str, Any]) -> None:
             store = None
         if store is None:
             return
-        parts = []
+
+        lines: list[str] = []
         if hosts_u:
-            parts.append(
-                f"{hosts_u} Host(s) mit {total} Update(s) ({security} Security)"
+            lines.append(
+                f"{hosts_u} Host(s) · {total} Update(s) ({security} Security)"
             )
+            raw_updates = summary.get("update_hosts") or []
+            name_bits: list[str] = []
+            for h in raw_updates:
+                if isinstance(h, dict):
+                    name = str(h.get("name") or "").strip()
+                    if not name:
+                        continue
+                    n_upd = h.get("updates")
+                    name_bits.append(f"{name} ({n_upd})" if n_upd is not None else name)
+                else:
+                    name_bits.append(str(h))
+            if name_bits:
+                lines.append("Updates: " + _join_truncated(name_bits, max_len=110))
         if hosts_e:
-            parts.append(f"{hosts_e} Host(s) mit Fehlern")
-        body = " · ".join(parts)
+            err_names = [str(x) for x in (summary.get("error_hosts") or []) if x]
+            if err_names:
+                lines.append("Fehler: " + _join_truncated(err_names, max_len=90))
+            else:
+                lines.append(f"{hosts_e} Host(s) mit Fehlern")
+
+        body = _truncate_push("\n".join(lines), 200)
         await send_push_to_all(
             store,
             title="HomelabOps — Patch-Check",

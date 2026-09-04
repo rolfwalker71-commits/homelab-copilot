@@ -148,6 +148,8 @@ async def run_scan_all_hosts(
     hosts_with_errors = 0
     total_updates = 0
     total_security = 0
+    update_host_details: list[dict[str, Any]] = []
+    error_host_names: list[str] = []
 
     try:
         if not targets:
@@ -180,14 +182,23 @@ async def run_scan_all_hosts(
                 SCAN_ALL.results.append(entry)
                 if status == "failed":
                     hosts_with_errors += 1
+                    error_host_names.append(str(tname))
                 else:
                     total_updates += pending
                     total_security += security
                     if pending > 0:
                         hosts_with_updates += 1
+                        update_host_details.append(
+                            {
+                                "name": str(tname),
+                                "updates": pending,
+                                "security": security,
+                            }
+                        )
             except Exception as exc:
                 logger.exception("scan-all failed for %s", tid)
                 hosts_with_errors += 1
+                error_host_names.append(str(tname))
                 SCAN_ALL.results.append(
                     {
                         "target_id": tid,
@@ -204,6 +215,8 @@ async def run_scan_all_hosts(
             "hosts_with_errors": hosts_with_errors,
             "total_updates": total_updates,
             "total_security": total_security,
+            "update_hosts": update_host_details,
+            "error_hosts": error_host_names,
             "trigger": trigger,
             "finished_at": format_de(now_berlin()),
             "finished_at_iso": iso_utc(),

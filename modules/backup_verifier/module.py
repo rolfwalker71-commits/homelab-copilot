@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,140 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _store: BackupStore | None = None
+
+_PUSH_BODY_MAX = 200
+
+
+def _truncate_push(text: str, max_len: int = _PUSH_BODY_MAX) -> str:
+    text = " ".join(text.split())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def _format_duration_s(seconds: float | None) -> str | None:
+    if seconds is None or seconds < 0:
+        return None
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    minutes, sec = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {sec}s" if sec else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m"
+
+
+def _dest_summary(run: dict[str, Any] | None) -> str | None:
+    if not run:
+        return None
+    hops = run.get("destinations")
+    parts: list[str] = []
+    if isinstance(hops, list) and hops:
+        for h in hops:
+            if not isinstance(h, dict):
+                continue
+            label = str(h.get("label") or h.get("kind") or "Ziel").strip()
+            status = str(h.get("status") or "—").strip()
+            verify = str(h.get("verify") or "").strip()
+            bit = f"{label}:{status}"
+            if verify and verify not in ("—", status, "pending"):
+                bit += f"/{verify}"
+            parts.append(bit)
+    else:
+        for key, label in (
+            ("lxc_status", "Host"),
+            ("copilot_status", "Copilot"),
+            ("synology_status", "SFTP"),
+        ):
+            val = run.get(key)
+            if val and str(val) not in ("pending", "—"):
+                parts.append(f"{label}:{val}")
+    return ", ".join(parts) if parts else None
+
+
+async def _notify_backup_finished(
+    *,
+    status: str,
+    project: str,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+    duration_s: float | None = None,
+) -> None:
+    """One Web Push per completed backup job (success / partial / failed)."""
+    try:
+        from app.core.push import send_push_to_all
+
+        store = None
+        try:
+            from app.main import app as fastapi_app
+
+            store = getattr(fastapi_app.state, "app_store", None)
+        except Exception:
+            store = None
+        if store is None:
+            return
+
+        run = result or {}
+        stack = str(run.get("stack") or project or "Stack").strip()
+        guest = str(run.get("guest_name") or "").strip()
+        subject = f"{stack} @ {guest}" if guest else stack
+
+        if status == "success":
+            title = "HomelabOps — Backup OK"
+        elif status == "partial":
+            title = "HomelabOps — Backup teilweise"
+        else:
+            title = "HomelabOps — Backup fehlgeschlagen"
+
+        bits: list[str] = [subject]
+        dest = _dest_summary(run)
+        if dest:
+            bits.append(dest)
+        size_raw = run.get("size_bytes")
+        if size_raw is not None:
+            bits.append(format_bytes(size_raw))
+        dur = _format_duration_s(duration_s)
+        if dur:
+            bits.append(dur)
+        verify = str(run.get("verify_status") or "").strip()
+        if verify and verify not in ("pending", "—"):
+            bits.append(f"Verify:{verify}")
+        if status == "failed" or (status == "partial" and error):
+            err = (error or run.get("error_message") or "").strip()
+            if err:
+                # Keep error short; never include credential-looking fragments.
+                err = err.replace("\n", " ")
+                if len(err) > 80:
+                    err = err[:79].rstrip() + "…"
+                bits.append(f"Fehler: {err}")
+
+        body = _truncate_push(" · ".join(bits))
+        run_id = run.get("id")
+        url = (
+            f"/modules/backup_verifier/history?run={run_id}"
+            if run_id is not None
+            else "/modules/backup_verifier/history"
+        )
+        await send_push_to_all(
+            store,
+            title=title,
+            body=body,
+            url=url,
+            tag="backup-finished",
+        )
+    except Exception:
+        logger.exception("Push-Benachrichtigung (Backup) fehlgeschlagen")
+
+
+async def _maybe_load_run(run_id: int | None) -> dict[str, Any] | None:
+    if run_id is None or _store is None:
+        return None
+    try:
+        return await _store.get_run(int(run_id))
+    except Exception:
+        logger.exception("Backup-Lauf für Push nicht ladbar")
+        return None
 
 
 def _make_templates() -> Jinja2Templates:
@@ -228,6 +363,7 @@ async def run_backup_endpoint(
     snap = _snapshot(request)
 
     if wait:
+        t0 = time.time()
         try:
             result = await run_backup(
                 store,
@@ -236,16 +372,37 @@ async def run_backup_endpoint(
                 snapshot=snap,
                 quiesce=payload.quiesce,
             )
+            status = str((result or {}).get("status") or "success")
+            await _notify_backup_finished(
+                status=status if status in ("success", "partial", "failed") else "success",
+                project=payload.project,
+                result=result,
+                error=(result or {}).get("error_message"),
+                duration_s=time.time() - t0,
+            )
             return {"ok": True, "run": result}
         except BackupError as exc:
+            await _notify_backup_finished(
+                status="failed",
+                project=payload.project,
+                error=exc.message,
+                duration_s=time.time() - t0,
+            )
             raise HTTPException(status_code=409, detail=exc.message) from exc
         except DockerControlError as exc:
+            await _notify_backup_finished(
+                status="failed",
+                project=payload.project,
+                error=exc.message,
+                duration_s=time.time() - t0,
+            )
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
     job = JOBS.create(parent_id=payload.parent_id, project=payload.project)
 
     async def _bg() -> None:
         JOBS.set_running(job.id)
+        t0 = job.created_at
 
         async def on_progress(
             *,
@@ -276,36 +433,67 @@ async def run_backup_endpoint(
                 on_log=on_log,
             )
             status = str((result or {}).get("status") or "success")
-            JOBS.finish(
-                job.id,
-                status=status if status in ("success", "partial", "failed") else "success",
+            norm = status if status in ("success", "partial", "failed") else "success"
+            JOBS.finish(job.id, status=norm, result=result)
+            await _notify_backup_finished(
+                status=norm,
+                project=payload.project,
                 result=result,
+                error=(result or {}).get("error_message"),
+                duration_s=time.time() - t0,
             )
         except BackupError as exc:
+            run = await _maybe_load_run(job.run_id)
             JOBS.finish(
                 job.id,
                 status="failed",
                 error=exc.message,
                 phase="Fehler",
                 message=exc.message,
+                result=run,
+            )
+            await _notify_backup_finished(
+                status="failed",
+                project=payload.project,
+                result=run,
+                error=exc.message,
+                duration_s=time.time() - t0,
             )
         except DockerControlError as exc:
+            run = await _maybe_load_run(job.run_id)
             JOBS.finish(
                 job.id,
                 status="failed",
                 error=exc.message,
                 phase="Fehler",
                 message=exc.message,
+                result=run,
+            )
+            await _notify_backup_finished(
+                status="failed",
+                project=payload.project,
+                result=run,
+                error=exc.message,
+                duration_s=time.time() - t0,
             )
         except Exception as exc:
             logger.exception("Background backup failed")
             msg = str(exc) or "Unbekannter Fehler beim Backup."
+            run = await _maybe_load_run(job.run_id)
             JOBS.finish(
                 job.id,
                 status="failed",
                 error=msg,
                 phase="Fehler",
                 message=msg,
+                result=run,
+            )
+            await _notify_backup_finished(
+                status="failed",
+                project=payload.project,
+                result=run,
+                error=msg,
+                duration_s=time.time() - t0,
             )
 
     background.add_task(_bg)
