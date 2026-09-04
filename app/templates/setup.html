@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Setup — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-8 animate-in">
+  <p class="eyebrow">Konfiguration</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Setup-Assistent</h1>
+  <p class="mt-2 max-w-xl text-[var(--muted)]">
+    Proxmox einmal verbinden. Hostnames und IPs werden danach automatisch erkannt.
+    Für dauerhafte Konfiguration Umgebungsvariablen im Container setzen.
+  </p>
+  <p class="mt-2 text-sm text-[var(--muted)]">Aktuelle Zeit: {{ now }}</p>
+</section>
+
+<form id="setup-form" class="surface animate-in animate-in-delay-1 max-w-xl space-y-5 p-5 sm:p-6" novalidate>
+  <div>
+    <label class="label" for="proxmox_host">Proxmox Host / IP</label>
+    <input class="field" id="proxmox_host" name="proxmox_host" type="text"
+           value="{{ settings.proxmox_host }}" placeholder="192.168.1.10" autocomplete="off" required />
+  </div>
+  <div class="grid grid-cols-2 gap-4">
+    <div>
+      <label class="label" for="proxmox_port">Port</label>
+      <input class="field" id="proxmox_port" name="proxmox_port" type="number" value="{{ settings.proxmox_port }}" />
+    </div>
+    <div>
+      <label class="label" for="proxmox_user">Benutzer</label>
+      <input class="field" id="proxmox_user" name="proxmox_user" type="text" value="{{ settings.proxmox_user }}" />
+    </div>
+  </div>
+  <div>
+    <label class="label" for="proxmox_token_id">API-Token ID</label>
+    <input class="field" id="proxmox_token_id" name="proxmox_token_id" type="text"
+           value="{{ settings.proxmox_token_id }}" placeholder="copilot oder root@pam!copilot" />
+  </div>
+  <div>
+    <label class="label" for="proxmox_token_secret">API-Token Secret</label>
+    <input class="field" id="proxmox_token_secret" name="proxmox_token_secret" type="password"
+           value="" placeholder="{% if settings.proxmox_token_secret %}•••••••• (gesetzt){% else %}Secret{% endif %}"
+           autocomplete="new-password" />
+  </div>
+  <div>
+    <label class="label" for="proxmox_password">Oder Passwort (Fallback)</label>
+    <input class="field" id="proxmox_password" name="proxmox_password" type="password"
+           value="" autocomplete="new-password" />
+  </div>
+  <div class="flex items-center gap-3">
+    <input id="proxmox_verify_ssl" name="proxmox_verify_ssl" type="checkbox"
+           class="h-5 w-5 rounded border-[var(--border)]"
+           {% if settings.proxmox_verify_ssl %}checked{% endif %} />
+    <label for="proxmox_verify_ssl" class="text-sm">SSL-Zertifikat prüfen</label>
+  </div>
+  <div class="flex items-center gap-3">
+    <input id="docker_use_local_socket" name="docker_use_local_socket" type="checkbox"
+           class="h-5 w-5 rounded border-[var(--border)]"
+           {% if settings.docker_use_local_socket %}checked{% endif %} />
+    <label for="docker_use_local_socket" class="text-sm">Lokalen Docker-Socket scannen</label>
+  </div>
+  <div>
+    <label class="label" for="docker_ssh_user">SSH-User für Remote-Docker</label>
+    <input class="field" id="docker_ssh_user" name="docker_ssh_user" type="text" value="{{ settings.docker_ssh_user }}" />
+  </div>
+
+  <div class="flex flex-wrap gap-3 pt-2">
+    <button type="submit" class="btn btn-primary">Speichern &amp; Discovery starten</button>
+    <a href="/" class="btn btn-ghost">Abbrechen</a>
+  </div>
+  <p id="setup-msg" class="text-sm text-[var(--muted)]" role="status"></p>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.getElementById('setup-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const msg = document.getElementById('setup-msg');
+    const data = {
+      proxmox_host: form.proxmox_host.value.trim(),
+      proxmox_port: Number(form.proxmox_port.value) || 8006,
+      proxmox_user: form.proxmox_user.value.trim(),
+      proxmox_token_id: form.proxmox_token_id.value.trim(),
+      proxmox_token_secret: form.proxmox_token_secret.value,
+      proxmox_password: form.proxmox_password.value,
+      proxmox_verify_ssl: form.proxmox_verify_ssl.checked,
+      docker_use_local_socket: form.docker_use_local_socket.checked,
+      docker_ssh_user: form.docker_ssh_user.value.trim() || 'root',
+    };
+    // Keep existing secrets if fields left blank
+    if (!data.proxmox_token_secret) delete data.proxmox_token_secret;
+    if (!data.proxmox_password) delete data.proxmox_password;
+
+    msg.textContent = 'Speichere…';
+    try {
+      const res = await fetch('/api/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || 'Fehler');
+      msg.textContent = body.message + ' · ' + body.time;
+      await fetch('/api/discovery/refresh', { method: 'POST' });
+      window.location.href = '/';
+    } catch (err) {
+      msg.textContent = 'Fehler: ' + err.message;
+    }
+  });
+</script>
+{% endblock %}

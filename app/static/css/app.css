@@ -1,0 +1,583 @@
+/*! Homelab Operations Copilot — dual chrome:
+ *  android  → Material You 3 Expressive (mobile / <lg)
+ *  desktop  → Fluent 2 (lg+)
+ */
+
+html {
+  font-size: calc(100% * var(--app-font-scale, 1.125));
+  color-scheme: dark;
+}
+
+/* Shared semantic aliases used by templates */
+:root {
+  --bg: var(--background);
+  --surface: var(--surface-container);
+  --surface-2: var(--card);
+  --border: var(--outline);
+  --text: var(--on-surface);
+  --muted: var(--on-surface-variant);
+  --accent: var(--primary);
+  --accent-soft: var(--primary-container);
+  --warn: #e6b422;
+  --danger: #f2b8b5;
+  --info: #a8c8ff;
+  --on-primary: #fff;
+  --motion: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* ═══════════════════════════════════════════
+   Material You 3 Expressive (mobile)
+   Seed: #6750A4 — tonal, large shapes, flush nav
+   ═══════════════════════════════════════════ */
+html[data-chrome="android"] {
+  --background: #141218;
+  --surface-container: #211f26;
+  --card: #2b2930;
+  --outline: #49454f;
+  --on-surface: #e6e1e5;
+  --on-surface-variant: #cac4d0;
+  --primary: #d0bcff;
+  --primary-container: #4f378b;
+  --secondary: #4a4458;
+  --on-secondary: #e8def8;
+  --radius: 1.75rem;          /* 28dp */
+  --radius-ctrl: 1.25rem;
+  --shadow: none;
+  --font: "Roboto Flex", Roboto, system-ui, sans-serif;
+  --font-display: "Roboto Flex", Roboto, system-ui, sans-serif;
+  --nav-h: 4.5rem;
+}
+
+/* ═══════════════════════════════════════════
+   Fluent 2 (desktop / Windows)
+   Mica-ish chrome, compact radius, blue accent
+   ═══════════════════════════════════════════ */
+html[data-chrome="desktop"] {
+  --background: #202020;
+  --surface-container: rgb(44 44 44 / 0.8);
+  --card: #2c2c2c;
+  --outline: #3f3f3f;
+  --on-surface: #ffffff;
+  --on-surface-variant: #c8c8c8;
+  --primary: #60cdff;
+  --primary-container: #005fb8;
+  --secondary: #2c2c2c;
+  --on-secondary: #ffffff;
+  --radius: 0.5rem;           /* 8px */
+  --radius-ctrl: 0.25rem;     /* 4px */
+  --shadow: none;
+  --font: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --nav-h: 0;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-chrome="android"] {
+    color-scheme: light;
+    --background: #fffbfe;
+    --surface-container: #f3edf7;
+    --card: #ece6f0;
+    --outline: #79747e;
+    --on-surface: #1c1b1f;
+    --on-surface-variant: #49454f;
+    --primary: #6750a4;
+    --primary-container: #eaddff;
+    --secondary: #e8def8;
+    --on-secondary: #1d192b;
+    --danger: #b3261e;
+    --warn: #7d5700;
+    --info: #1e5bb8;
+  }
+
+  html[data-chrome="desktop"] {
+    color-scheme: light;
+    --background: #f3f3f3;
+    --surface-container: rgb(255 255 255 / 0.7);
+    --card: #ffffff;
+    --outline: #e5e5e5;
+    --on-surface: #1a1a1a;
+    --on-surface-variant: #5d5d5d;
+    --primary: #005fb8;
+    --primary-container: #60cdff;
+    --secondary: #f9f9f9;
+    --on-secondary: #1a1a1a;
+    --danger: #c42b1c;
+    --warn: #9a6700;
+    --info: #005fb8;
+  }
+}
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  background: var(--background);
+  color: var(--on-surface);
+  min-height: 100dvh;
+  -webkit-font-smoothing: antialiased;
+}
+
+html[data-chrome="android"] body {
+  background:
+    radial-gradient(ellipse 90% 55% at 0% -5%, color-mix(in srgb, var(--primary) 22%, transparent), transparent 55%),
+    radial-gradient(ellipse 70% 45% at 100% 0%, color-mix(in srgb, var(--primary-container) 35%, transparent), transparent 50%),
+    var(--background);
+  padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom));
+}
+
+html[data-chrome="desktop"] body {
+  background: var(--background);
+}
+
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+/* ── Surfaces / cards ─────────────────────── */
+.surface {
+  background: var(--surface-container);
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+}
+
+html[data-chrome="desktop"] .surface {
+  background: var(--card);
+  border-color: var(--outline);
+  border-radius: var(--radius);
+  backdrop-filter: none;
+}
+
+.entity-card {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 1rem 1.15rem;
+  border: 1px solid transparent;
+  transition: background 0.2s var(--motion), transform 0.2s var(--motion);
+}
+
+html[data-chrome="android"] .entity-card {
+  /* tonal elevation — no drop shadow */
+  box-shadow: none;
+}
+
+html[data-chrome="android"] .entity-card:active {
+  background: color-mix(in srgb, var(--primary) 12%, var(--card));
+  transform: scale(0.985);
+}
+
+html[data-chrome="desktop"] .entity-card {
+  border-color: var(--outline);
+  border-radius: var(--radius);
+}
+
+html[data-chrome="desktop"] .entity-card:hover {
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+}
+
+/* ── Chips ────────────────────────────────── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.chip-running {
+  background: color-mix(in srgb, #4caf50 22%, transparent);
+  color: #a5d6a7;
+}
+.chip-stopped {
+  background: color-mix(in srgb, var(--danger) 22%, transparent);
+  color: var(--danger);
+}
+.chip-unknown {
+  background: color-mix(in srgb, var(--on-surface-variant) 18%, transparent);
+  color: var(--muted);
+}
+.chip-paused {
+  background: color-mix(in srgb, var(--warn) 22%, transparent);
+  color: var(--warn);
+}
+
+@media (prefers-color-scheme: light) {
+  .chip-running { color: #1b5e20; }
+}
+
+/* ── Buttons ──────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 3rem; /* 48dp android */
+  padding: 0 1.25rem;
+  border-radius: var(--radius-ctrl);
+  font-weight: 600;
+  font-size: 0.9375rem;
+  font-family: inherit;
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.18s var(--motion), transform 0.15s var(--motion);
+}
+
+html[data-chrome="desktop"] .btn {
+  min-height: 2.75rem;
+  border-radius: var(--radius-ctrl);
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+html[data-chrome="android"] .btn-primary {
+  color: #381e72;
+  border-radius: 999px;
+}
+
+html[data-chrome="android"] .btn-primary:hover {
+  filter: brightness(1.06);
+}
+
+html[data-chrome="desktop"] .btn-primary {
+  background: var(--primary);
+  color: #002b4d;
+  border-radius: var(--radius-ctrl);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-chrome="android"] .btn-primary { color: #fff; }
+  html[data-chrome="desktop"] .btn-primary { color: #fff; }
+}
+
+html[data-chrome="desktop"] .btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--outline);
+  color: var(--on-surface);
+}
+
+html[data-chrome="android"] .btn-ghost {
+  border-radius: 999px;
+  border-color: var(--outline);
+}
+
+.btn-ghost:hover {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+/* FAB — Material only (mobile primary action) */
+.fab {
+  display: none;
+}
+
+html[data-chrome="android"] .fab {
+  display: inline-flex;
+  position: fixed;
+  right: max(1rem, env(safe-area-inset-right));
+  bottom: calc(var(--nav-h) + 0.75rem + env(safe-area-inset-bottom));
+  width: 4rem;
+  height: 4rem;
+  border-radius: 1.75rem; /* squircle */
+  align-items: center;
+  justify-content: center;
+  background: var(--primary);
+  color: #381e72;
+  border: none;
+  z-index: 45;
+  box-shadow: none;
+  cursor: pointer;
+  transition: transform 0.2s var(--motion), background 0.2s var(--motion);
+}
+
+html[data-chrome="android"] .fab:active {
+  transform: scale(0.94);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-chrome="android"] .fab { color: #fff; }
+}
+
+html[data-chrome="desktop"] .fab {
+  display: none !important;
+}
+
+/* ── Fields ───────────────────────────────── */
+.field {
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: var(--radius-ctrl);
+  border: 1px solid var(--outline);
+  background: var(--background);
+  color: var(--on-surface);
+  font-size: 1rem;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+html[data-chrome="android"] .field {
+  border-radius: 0.75rem;
+  min-height: 3.5rem;
+  background: var(--surface-container);
+}
+
+html[data-chrome="desktop"] .field {
+  min-height: 2.75rem;
+  border-radius: var(--radius-ctrl);
+}
+
+.field:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.label {
+  display: block;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+  font-weight: 500;
+}
+
+.stat-value {
+  font-family: var(--font-display);
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--primary);
+}
+
+/* ── App bar ──────────────────────────────── */
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  padding-top: env(safe-area-inset-top);
+}
+
+html[data-chrome="android"] .app-header {
+  background: var(--surface-container);
+  border-bottom: none;
+}
+
+html[data-chrome="desktop"] .app-header {
+  background: color-mix(in srgb, var(--card) 80%, transparent);
+  backdrop-filter: blur(1.25rem) saturate(1.4);
+  border-bottom: 1px solid var(--outline);
+}
+
+.app-header-inner {
+  margin-inline: auto;
+  max-width: 72rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+}
+
+html[data-chrome="desktop"] .app-header-inner {
+  padding: 0.5rem 1.5rem;
+}
+
+.brand {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.125rem;
+  letter-spacing: -0.02em;
+  color: var(--on-surface);
+  text-decoration: none;
+}
+
+.brand span {
+  color: var(--primary);
+}
+
+/* Desktop Fluent nav — accent underline, not pill */
+.nav-desktop {
+  display: none;
+  align-items: stretch;
+  gap: 0.15rem;
+}
+
+html[data-chrome="desktop"] .nav-desktop {
+  display: flex;
+}
+
+.nav-desktop a {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.65rem 0.9rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+  border-radius: var(--radius-ctrl);
+}
+
+.nav-desktop a:hover {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--on-surface);
+}
+
+.nav-desktop a.active {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.nav-desktop a.active::after {
+  content: "";
+  position: absolute;
+  left: 0.5rem;
+  right: 0.5rem;
+  bottom: 0;
+  height: 2px;
+  background: var(--primary);
+  border-radius: 1px;
+}
+
+/* ── Material flush NavigationBar ─────────── */
+.nav-android {
+  display: none;
+}
+
+html[data-chrome="android"] .nav-android {
+  display: flex;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  height: calc(var(--nav-h) + env(safe-area-inset-bottom));
+  padding: 0.35rem 0.5rem env(safe-area-inset-bottom);
+  background: var(--surface-container);
+  border-top: 1px solid color-mix(in srgb, var(--outline) 40%, transparent);
+  gap: 0;
+}
+
+.nav-android a {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  min-height: 4rem;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 500;
+  border-radius: 0;
+}
+
+.nav-android a .nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 4rem;
+  height: 2rem;
+  border-radius: 999px;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.nav-android a.active {
+  color: var(--primary);
+}
+
+.nav-android a.active .nav-icon {
+  background: var(--secondary);
+  color: var(--primary);
+}
+
+html[data-chrome="desktop"] .nav-android {
+  display: none !important;
+}
+
+/* ── Motion ───────────────────────────────── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(0.6rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: fade-up 0.4s var(--motion) both;
+}
+
+.animate-in-delay-1 { animation-delay: 0.06s; }
+.animate-in-delay-2 { animation-delay: 0.12s; }
+.animate-in-delay-3 { animation-delay: 0.18s; }
+
+@media (display-mode: standalone) {
+  body { min-height: 100dvh; }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.main-shell {
+  margin-inline: auto;
+  max-width: 72rem;
+  padding: 1.25rem 1rem 2rem;
+}
+
+html[data-chrome="desktop"] .main-shell {
+  padding: 1.5rem 1.5rem 2.5rem;
+}
+
+html[data-chrome="android"] .main-shell {
+  padding-bottom: 1.5rem;
+}
+
+.eyebrow {
+  margin-bottom: 0.25rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+
+.alert-tonal {
+  border-radius: var(--radius);
+  padding: 1rem 1.15rem;
+  background: color-mix(in srgb, var(--warn) 14%, var(--surface-container));
+}
+
+html[data-chrome="desktop"] .alert-tonal {
+  border: 1px solid var(--outline);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius);
+}
+
+/* Desktop: command-row actions visible; Android uses FAB */
+html[data-chrome="android"] .actions-desktop .btn-primary {
+  display: none;
+}
+
+html[data-chrome="desktop"] .actions-desktop {
+  display: flex;
+}

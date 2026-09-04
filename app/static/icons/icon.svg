@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="HomelabOps">
+  <rect width="512" height="512" rx="112" fill="#141218"/>
+  <rect x="56" y="56" width="400" height="400" rx="96" fill="#211f26"/>
+  <circle cx="256" cy="200" r="58" fill="#d0bcff"/>
+  <rect x="160" y="282" width="192" height="32" rx="16" fill="#d0bcff" opacity="0.95"/>
+  <rect x="188" y="334" width="136" height="24" rx="12" fill="#4f378b"/>
+  <rect x="214" y="378" width="84" height="18" rx="9" fill="#cac4d0" opacity="0.75"/>
+</svg>

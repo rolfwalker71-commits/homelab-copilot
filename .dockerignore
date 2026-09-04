@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+data/
+__pycache__
+*.py[cod]
+.venv
+venv
+*.md
+!README.md
+ssh/
+.dockerignore
+docker-compose*.yml

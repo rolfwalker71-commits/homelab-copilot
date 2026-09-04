@@ -1,0 +1,11 @@
+# Local image build overlay (not used on remote/production).
+# Usage: docker compose -f docker-compose.yml -f docker-compose.build.yml build
+
+services:
+  homelab-copilot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+    image: ghcr.io/rolfwalker71-commits/homelab-copilot:${TAG:-latest}

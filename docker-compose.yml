@@ -1,0 +1,35 @@
+# Production / remote: always pull from GHCR — never build on the server.
+# Local build: docker compose -f docker-compose.yml -f docker-compose.build.yml build
+
+services:
+  homelab-copilot:
+    image: ghcr.io/rolfwalker71-commits/homelab-copilot:${TAG:-latest}
+    container_name: homelab-copilot
+    ports:
+      - "6655:6655"
+    environment:
+      TZ: Europe/Berlin
+      PORT: "6655"
+      DATA_DIR: /data
+      MODULES_DIR: /app/modules
+      DISCOVERY_INTERVAL_SECONDS: ${DISCOVERY_INTERVAL_SECONDS:-300}
+      PROXMOX_HOST: ${PROXMOX_HOST:-}
+      PROXMOX_PORT: ${PROXMOX_PORT:-8006}
+      PROXMOX_USER: ${PROXMOX_USER:-root@pam}
+      PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID:-}
+      PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET:-}
+      PROXMOX_PASSWORD: ${PROXMOX_PASSWORD:-}
+      PROXMOX_VERIFY_SSL: ${PROXMOX_VERIFY_SSL:-false}
+      DOCKER_USE_LOCAL_SOCKET: ${DOCKER_USE_LOCAL_SOCKET:-true}
+      DOCKER_SSH_USER: ${DOCKER_SSH_USER:-root}
+      DOCKER_SSH_KEY_PATH: /data/ssh/id_ed25519
+    volumes:
+      - copilot-data:/data
+      # Optional: mount host Docker socket for local container discovery
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Optional: mount SSH private key for remote LXC Docker scans
+      # - ./ssh/id_ed25519:/data/ssh/id_ed25519:ro
+    restart: unless-stopped
+
+volumes:
+  copilot-data:
