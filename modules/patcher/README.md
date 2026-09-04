@@ -34,8 +34,9 @@ Scannt und spielt Linux-Updates auf **Proxmox-Guests (LXC/QEMU)** und **manuell 
 ```bash
 PATCHER_LLM_API_KEY=
 PATCHER_LLM_BASE_URL=https://api.openai.com/v1
-PATCHER_LLM_MODEL=gpt-4o-mini
+PATCHER_LLM_MODEL=gpt-4o-mini   # z.B. gpt-4.1-mini — nicht gpt-41-mini
 # PATCHER_API_BASE=http://127.0.0.1:6655   # für Cron-curl
 ```
 
+Unter Docker müssen `PATCHER_LLM_*` in `docker-compose.yml` → `environment:` stehen (sonst bleibt der Key nur in der Host-`.env` und die UI meldet „Kein LLM-Key“). Nach Änderung: `docker compose up -d` (Container neu erzeugen).
 SSH nutzt denselben Key/User wie Docker-Discovery (`DOCKER_SSH_*`).

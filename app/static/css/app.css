@@ -1044,7 +1044,8 @@ html[data-chrome="android"] .topo-rail-node-select.is-selected {
 .topo-rail-list {
   list-style: none;
   margin: 0;
-  padding: 0 0 0 0.35rem;
+  /* Nest under host: past chevron (1.75rem) so guest status sits under node icon/name */
+  padding: 0 0 0 2.5rem;
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
@@ -1154,7 +1155,7 @@ html[data-chrome="android"] .topo-rail-item.is-selected {
 
 .topo-rail-empty {
   margin: 0;
-  padding: 0.35rem 0.5rem 0.35rem 1.6rem;
+  padding: 0.35rem 0.5rem 0.35rem 2.5rem;
   font-size: 0.75rem;
   color: var(--muted);
 }

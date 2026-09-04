@@ -42,6 +42,11 @@ services:
       PATCHER_DAILY_ENABLED: ${PATCHER_DAILY_ENABLED:-true}
       PATCHER_DAILY_HOUR: ${PATCHER_DAILY_HOUR:-4}
       PATCHER_CRON: ${PATCHER_CRON:-}
+      # LLM summary (OpenAI-compatible). Host .env alone is not enough — must be listed here.
+      PATCHER_LLM_API_KEY: ${PATCHER_LLM_API_KEY:-}
+      PATCHER_LLM_BASE_URL: ${PATCHER_LLM_BASE_URL:-https://api.openai.com/v1}
+      PATCHER_LLM_MODEL: ${PATCHER_LLM_MODEL:-gpt-4o-mini}
+      PATCHER_LLM_TIMEOUT: ${PATCHER_LLM_TIMEOUT:-60}
       TOTP_COOKIE_DAYS: ${TOTP_COOKIE_DAYS:-30}
       TOTP_ISSUER: ${TOTP_ISSUER:-HomelabOps}
       TOTP_COOKIE_SECURE: ${TOTP_COOKIE_SECURE:-auto}
