@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import asyncssh
@@ -108,6 +109,99 @@ async def ssh_run(
         "utf-8", errors="replace"
     )
     return stdout, stderr, int(result.exit_status or 0)
+
+
+LineFn = Callable[[str], Awaitable[None] | None]
+
+
+async def ssh_run_stream(
+    ip: str,
+    cmd: str,
+    *,
+    timeout: float = 180.0,
+    username: str | None = None,
+    port: int | None = None,
+    connect_timeout: float = 15.0,
+    settings: Settings | None = None,
+    on_line: LineFn | None = None,
+) -> tuple[str, str, int]:
+    """Run a remote command and emit stdout/stderr lines as they arrive."""
+    settings = settings or get_settings()
+
+    async def _emit_line(text: str) -> None:
+        if not on_line:
+            return
+        result = on_line(text)
+        if asyncio.iscoroutine(result):
+            await result
+
+    try:
+        async with asyncssh.connect(
+            ip,
+            **_connect_kwargs(
+                settings,
+                username=username,
+                port=port,
+                connect_timeout=connect_timeout,
+                host=ip,
+            ),
+        ) as conn:
+            try:
+                process = await conn.create_process(
+                    cmd,
+                    stderr=asyncssh.STDOUT,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except TypeError:
+                process = await conn.create_process(cmd, stderr=asyncssh.STDOUT)
+
+            chunks: list[str] = []
+
+            async def _read() -> None:
+                reader = process.stdout
+                while True:
+                    raw = await reader.readline()
+                    if not raw:
+                        break
+                    if isinstance(raw, bytes):
+                        line = raw.decode("utf-8", errors="replace")
+                    else:
+                        line = raw
+                    chunks.append(line)
+                    text = line.rstrip("\r\n")
+                    if text:
+                        await _emit_line(text)
+                await process.wait()
+
+            try:
+                await asyncio.wait_for(_read(), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                try:
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except Exception:
+                    pass
+                raise DockerControlError(
+                    f"SSH-Befehl-Timeout zu {ip} ({timeout:.0f}s) — "
+                    f"Remote-Befehl hängt (apt-Sperre oder Spiegel-Server?).",
+                    status_code=504,
+                ) from exc
+            return "".join(chunks), "", int(process.exit_status or 0)
+    except DockerControlError:
+        raise
+    except asyncio.TimeoutError as exc:
+        raise DockerControlError(
+            f"SSH-Verbindungs-Timeout zu {ip} ({connect_timeout:.0f}s) — "
+            f"Host nicht erreichbar?",
+            status_code=504,
+        ) from exc
+    except (OSError, asyncssh.Error) as exc:
+        logger.warning("Patcher SSH stream %s: %s", ip, exc)
+        raise DockerControlError(
+            f"SSH zu {ip} fehlgeschlagen: {exc}",
+            status_code=502,
+        ) from exc
 
 
 async def ssh_run_ok(

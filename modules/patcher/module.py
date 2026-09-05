@@ -91,6 +91,13 @@ class ApplyPayload(BaseModel):
     wait: bool = False
 
 
+class ApplyBatchPayload(BaseModel):
+    target_ids: list[str] = Field(..., min_length=1)
+    confirm: bool = False
+    package_filter: str = Field(default="all", pattern="^(security|all)$")
+    wait: bool = False
+
+
 class RebootPayload(BaseModel):
     target_id: str = Field(..., min_length=1)
     confirm: bool = False
@@ -127,14 +134,21 @@ class SummarizePayload(BaseModel):
     scan_id: int
 
 
+class MonitorPayload(BaseModel):
+    target_id: str = Field(..., min_length=1)
+    monitored: bool
+
+
 # --- helpers ---
 
 
 async def _enrich_targets(store: PatcherStore, snapshot) -> list[dict[str, Any]]:
     targets = await list_targets(store, snapshot)
+    unmonitored = await store.list_unmonitored_ids()
     out: list[dict[str, Any]] = []
     for t in targets:
         d = t.to_dict()
+        d["monitored"] = t.id not in unmonitored
         latest = await store.latest_scan_for_target(t.id)
         if latest and latest.get("status") == "success":
             d["last_scan"] = {
@@ -377,7 +391,17 @@ async def _run_scan_all(
     if store is None:
         SCAN_ALL.running = False
         return {"ok": False, "error": "Store nicht bereit."}
-    targets = await list_targets(store, snapshot)
+    all_targets = await list_targets(store, snapshot)
+    excluded = await store.list_unmonitored_ids()
+    targets = [t for t in all_targets if t.id not in excluded]
+    skipped = len(all_targets) - len(targets)
+    if skipped:
+        logger.info(
+            "scan-all: %d Host(s) nicht überwacht — übersprungen", skipped
+        )
+        SCAN_ALL.message = (
+            f"Starte Prüfung ({skipped} nicht überwacht übersprungen)…"
+        )
 
     async def scan_one(target):
         return await _scan_one_target_sync(
@@ -406,6 +430,48 @@ async def _run_scan_all(
     )
 
 
+async def _apply_one_target(
+    *,
+    target,
+    store: PatcherStore,
+    package_filter: str,
+    packages: list[str],
+    on_progress,
+    on_log,
+) -> dict[str, Any]:
+    apply_id = await store.create_apply_run(
+        target_id=target.id,
+        target_name=target.name,
+        package_filter=package_filter,
+        packages=packages,
+    )
+    try:
+        result = await apply_updates(
+            target,
+            package_filter=package_filter,
+            packages=packages,
+            progress=on_progress,
+            on_log=on_log,
+        )
+        await store.finish_apply_run(
+            apply_id,
+            status="success",
+            log_text=result.get("log"),
+            reboot_required=bool(result.get("reboot_required")),
+            pm=result.get("pm"),
+        )
+        return {"ok": True, "apply_id": apply_id, **result}
+    except Exception as exc:
+        msg = getattr(exc, "message", None) or str(exc)
+        try:
+            await store.finish_apply_run(
+                apply_id, status="failed", error_message=msg
+            )
+        except Exception:
+            logger.exception("finish_apply_run failed")
+        raise
+
+
 async def _run_apply_job(
     job_id: str,
     *,
@@ -427,61 +493,170 @@ async def _run_apply_job(
             percent=5,
             message=f"Apply für {target.name} wird vorbereitet…",
         )
-        apply_id = await store.create_apply_run(
-            target_id=target.id,
-            target_name=target.name,
-            package_filter=package_filter,
-            packages=packages,
-        )
-        JOBS.set_progress(
-            job_id,
-            apply_id=apply_id,
-            phase="SSH",
-            percent=20,
-            message=f"Verbinde zu {target.ip} und spiele Updates ein ({package_filter})…",
-        )
         JOBS.append_log(
             job_id,
             f"Apply {package_filter} auf {target.name} ({target.ip})",
         )
-        result = await apply_updates(
-            target, package_filter=package_filter, packages=packages
+
+        async def on_progress(phase: str, percent: int, message: str) -> None:
+            JOBS.set_progress(job_id, phase=phase, percent=percent, message=message)
+
+        async def on_log(line: str) -> None:
+            JOBS.append_log(job_id, line)
+
+        result = await _apply_one_target(
+            target=target,
+            store=store,
+            package_filter=package_filter,
+            packages=packages,
+            on_progress=on_progress,
+            on_log=on_log,
         )
-        JOBS.set_progress(
-            job_id,
-            phase="Abschluss",
-            percent=90,
-            message="Ergebnis speichern…",
-        )
-        await store.finish_apply_run(
-            apply_id,
-            status="success",
-            log_text=result.get("log"),
-            reboot_required=bool(result.get("reboot_required")),
-            pm=result.get("pm"),
-        )
+        apply_id = result.get("apply_id")
+        if apply_id is not None:
+            try:
+                JOBS.set_progress(job_id, apply_id=int(apply_id))
+            except (TypeError, ValueError):
+                pass
         msg = "Updates eingespielt."
         if result.get("reboot_required"):
-            msg += " Reboot empfohlen."
+            msg += " Reboot empfohlen — bitte manuell bestätigen."
         JOBS.finish(
             job_id,
             status="success",
-            result={"apply_id": apply_id, **result},
+            result=result,
             message=msg,
         )
     except (ApplyError, DockerControlError) as exc:
         msg = getattr(exc, "message", None) or str(exc)
-        if apply_id is not None:
-            await store.finish_apply_run(
-                apply_id, status="failed", error_message=msg
-            )
         JOBS.finish(job_id, status="failed", error=msg)
     except Exception as exc:
         logger.exception("apply job failed")
-        if apply_id is not None:
-            await store.finish_apply_run(
-                apply_id, status="failed", error_message=str(exc)
+        JOBS.finish(job_id, status="failed", error=str(exc))
+
+
+async def _run_apply_batch_job(
+    job_id: str,
+    *,
+    target_ids: list[str],
+    snapshot,
+    package_filter: str,
+) -> None:
+    store = _store
+    if store is None:
+        JOBS.finish(job_id, status="failed", error="Store nicht bereit")
+        return
+    results: list[dict[str, Any]] = []
+    total = len(target_ids)
+    JOBS.append_log(
+        job_id,
+        f"Stapel: {total} Host(s), Filter {package_filter} — kein automatischer Reboot.",
+    )
+    try:
+        for idx, tid in enumerate(target_ids, start=1):
+            target = await resolve_target(store, snapshot, tid)
+            base = int(((idx - 1) / total) * 100)
+            span = max(1, int(100 / total))
+            JOBS.set_progress(
+                job_id,
+                phase=f"{target.name} ({idx}/{total})",
+                percent=base,
+                message=f"Einspielen {idx}/{total}: {target.name}…",
             )
+            JOBS.append_log(job_id, f"=== {target.name} ({idx}/{total}) ===")
+
+            async def on_progress(
+                phase: str,
+                percent: int,
+                message: str,
+                *,
+                _base=base,
+                _span=span,
+                _name=target.name,
+                _idx=idx,
+            ) -> None:
+                mapped = _base + int((max(0, min(100, percent)) / 100) * _span)
+                JOBS.set_progress(
+                    job_id,
+                    phase=f"{_name} · {phase} ({_idx}/{total})",
+                    percent=min(99, mapped),
+                    message=message,
+                )
+
+            async def on_log(line: str) -> None:
+                JOBS.append_log(job_id, line)
+
+            try:
+                result = await _apply_one_target(
+                    target=target,
+                    store=store,
+                    package_filter=package_filter,
+                    packages=[],
+                    on_progress=on_progress,
+                    on_log=on_log,
+                )
+                entry = {
+                    "ok": True,
+                    "target_id": target.id,
+                    "target_name": target.name,
+                    "apply_id": result.get("apply_id"),
+                    "reboot_required": bool(result.get("reboot_required")),
+                    "error": None,
+                }
+                results.append(entry)
+                if entry["reboot_required"]:
+                    JOBS.append_log(
+                        job_id,
+                        f"{target.name}: Reboot empfohlen (nicht automatisch).",
+                    )
+            except (ApplyError, DockerControlError) as exc:
+                msg = getattr(exc, "message", None) or str(exc)
+                JOBS.append_log(job_id, f"{target.name}: Fehler — {msg}")
+                results.append(
+                    {
+                        "ok": False,
+                        "target_id": target.id,
+                        "target_name": target.name,
+                        "apply_id": None,
+                        "reboot_required": False,
+                        "error": msg,
+                    }
+                )
+            except Exception as exc:
+                logger.exception("batch apply failed for %s", tid)
+                JOBS.append_log(job_id, f"{target.name}: Fehler — {exc}")
+                results.append(
+                    {
+                        "ok": False,
+                        "target_id": getattr(target, "id", tid),
+                        "target_name": getattr(target, "name", tid),
+                        "apply_id": None,
+                        "reboot_required": False,
+                        "error": str(exc),
+                    }
+                )
+
+        ok_n = sum(1 for r in results if r.get("ok"))
+        fail_n = len(results) - ok_n
+        reboot_names = [
+            str(r.get("target_name"))
+            for r in results
+            if r.get("ok") and r.get("reboot_required")
+        ]
+        msg = f"{ok_n}/{len(results)} Host(s) eingespielt."
+        if fail_n:
+            msg += f" {fail_n} Fehler."
+        if reboot_names:
+            msg += " Reboot empfohlen: " + ", ".join(reboot_names)
+        JOBS.finish(
+            job_id,
+            status="success" if fail_n == 0 else "failed",
+            result={"hosts": results, "reboot_hosts": reboot_names},
+            message=msg,
+            phase="Fertig" if fail_n == 0 else "Teilweise fehlgeschlagen",
+        )
+    except Exception as exc:
+        logger.exception("apply-batch job failed")
         JOBS.finish(job_id, status="failed", error=str(exc))
 
 
@@ -495,6 +670,8 @@ async def module_status(request: Request) -> dict[str, Any]:
     store = _get_store()
     snap = _snapshot(request)
     targets = await list_targets(store, snap)
+    excluded = await store.list_unmonitored_ids()
+    unmon = sum(1 for t in targets if t.id in excluded)
     return {
         "module": "patcher",
         "version": "0.1.0",
@@ -503,6 +680,8 @@ async def module_status(request: Request) -> dict[str, Any]:
         "llm_configured": ps.llm_configured,
         "llm_model": ps.patcher_llm_model if ps.llm_configured else None,
         "target_count": len(targets),
+        "monitored_count": len(targets) - unmon,
+        "unmonitored_count": unmon,
         "crontab": cron_mod.crontab_available(),
     }
 
@@ -511,7 +690,25 @@ async def module_status(request: Request) -> dict[str, Any]:
 async def api_targets(request: Request) -> dict[str, Any]:
     store = _get_store()
     items = await _enrich_targets(store, _snapshot(request))
-    return {"targets": items, "count": len(items)}
+    unmon = sum(1 for t in items if not t.get("monitored", True))
+    return {
+        "targets": items,
+        "count": len(items),
+        "monitored_count": len(items) - unmon,
+        "unmonitored_count": unmon,
+    }
+
+
+@router.post("/targets/monitor")
+async def api_set_monitor(payload: MonitorPayload, request: Request) -> dict[str, Any]:
+    store = _get_store()
+    snap = _snapshot(request)
+    known = {t.id for t in await list_targets(store, snap)}
+    tid = payload.target_id.strip()
+    if tid not in known:
+        raise HTTPException(status_code=404, detail="Ziel nicht gefunden.")
+    await store.set_monitored(tid, payload.monitored)
+    return {"ok": True, "target_id": tid, "monitored": payload.monitored}
 
 
 @router.get("/scans/{scan_id}")
@@ -641,6 +838,59 @@ async def api_apply(
         snapshot=snap,
         package_filter=payload.package_filter,
         packages=payload.packages,
+    )
+    return job.to_dict()
+
+
+@router.post("/apply-batch")
+async def api_apply_batch(
+    payload: ApplyBatchPayload,
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, Any]:
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Apply erfordert confirm=true.",
+        )
+    ids: list[str] = []
+    seen: set[str] = set()
+    for raw in payload.target_ids:
+        tid = (raw or "").strip()
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        ids.append(tid)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Keine Hosts ausgewählt.")
+    if len(ids) > 50:
+        raise HTTPException(status_code=400, detail="Maximal 50 Hosts pro Stapel.")
+
+    store = _get_store()
+    snap = _snapshot(request)
+    for tid in ids:
+        try:
+            await resolve_target(store, snap, tid)
+        except DockerControlError as exc:
+            raise _http_docker(exc) from exc
+
+    job = JOBS.create(kind="apply-batch", target_id="")
+    if payload.wait:
+        await _run_apply_batch_job(
+            job.id,
+            target_ids=ids,
+            snapshot=snap,
+            package_filter=payload.package_filter,
+        )
+        done = JOBS.get(job.id)
+        return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
+
+    background.add_task(
+        _run_apply_batch_job,
+        job.id,
+        target_ids=ids,
+        snapshot=snap,
+        package_filter=payload.package_filter,
     )
     return job.to_dict()
 

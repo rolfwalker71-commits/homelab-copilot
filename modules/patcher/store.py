@@ -90,6 +90,13 @@ CREATE TABLE IF NOT EXISTS schedules (
     updated_at TEXT,
     updated_at_iso TEXT
 );
+
+CREATE TABLE IF NOT EXISTS target_prefs (
+    target_id TEXT PRIMARY KEY,
+    monitored INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT,
+    updated_at_iso TEXT
+);
 """
 
 
@@ -209,6 +216,39 @@ class PatcherStore:
     async def delete_host(self, host_id: int) -> None:
         db = self._require()
         await db.execute("DELETE FROM hosts WHERE id = ?", (host_id,))
+        await db.commit()
+
+    # --- per-target monitor prefs (topology guests + manual) ---
+
+    async def list_unmonitored_ids(self) -> set[str]:
+        db = self._require()
+        async with db.execute(
+            "SELECT target_id FROM target_prefs WHERE monitored = 0"
+        ) as cur:
+            rows = await cur.fetchall()
+        return {str(r[0]) for r in rows if r[0]}
+
+    async def set_monitored(self, target_id: str, monitored: bool) -> None:
+        db = self._require()
+        tid = (target_id or "").strip()
+        if not tid:
+            return
+        stamp, stamp_iso = self._stamp()
+        if monitored:
+            await db.execute(
+                "DELETE FROM target_prefs WHERE target_id = ?", (tid,)
+            )
+        else:
+            await db.execute(
+                """
+                INSERT INTO target_prefs (target_id, monitored, updated_at, updated_at_iso)
+                VALUES (?, 0, ?, ?)
+                ON CONFLICT(target_id) DO UPDATE SET
+                    monitored=0, updated_at=excluded.updated_at,
+                    updated_at_iso=excluded.updated_at_iso
+                """,
+                (tid, stamp, stamp_iso),
+            )
         await db.commit()
 
     # --- scans ---

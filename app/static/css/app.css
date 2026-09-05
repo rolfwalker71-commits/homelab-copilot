@@ -198,6 +198,100 @@ html[data-chrome="desktop"] .entity-card:hover {
   background: color-mix(in srgb, var(--primary) 8%, var(--card));
 }
 
+.entity-card[data-monitored="0"] {
+  opacity: 0.88;
+}
+
+.host-monitor {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  cursor: pointer;
+  user-select: none;
+  min-height: 2.75rem;
+  padding: 0.15rem 0.15rem 0.15rem 0;
+}
+
+.host-monitor-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.host-monitor-track {
+  position: relative;
+  display: block;
+  width: 2.75rem;
+  height: 1.55rem;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 28%, transparent);
+  border: 1px solid var(--outline);
+  transition: background 0.2s var(--motion), border-color 0.2s var(--motion);
+}
+
+.host-monitor-track::after {
+  content: "";
+  position: absolute;
+  top: 0.12rem;
+  left: 0.12rem;
+  width: 1.22rem;
+  height: 1.22rem;
+  border-radius: 999px;
+  background: var(--on-surface);
+  transition: transform 0.2s var(--motion), background 0.2s var(--motion);
+}
+
+.host-monitor-input:checked + .host-monitor-track {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.host-monitor-input:checked + .host-monitor-track::after {
+  transform: translateX(1.18rem);
+  background: var(--on-primary);
+}
+
+.host-monitor-input:focus-visible + .host-monitor-track {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.host-monitor-input:disabled + .host-monitor-track,
+.host-monitor-input:disabled ~ .host-monitor-copy {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+.host-monitor-copy {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 4.5rem;
+}
+
+.host-monitor-title {
+  font-size: 0.8125rem;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.host-monitor-state {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.host-monitor-input:checked ~ .host-monitor-copy .host-monitor-state {
+  color: var(--primary);
+}
+
 /* ── Chips ────────────────────────────────── */
 .chip {
   display: inline-flex;
@@ -1273,7 +1367,8 @@ html[data-chrome="android"] .topo-detail {
   align-items: center;
   gap: 0.35rem;
   width: fit-content;
-  margin: 0;
+  flex-shrink: 0;
+  margin: 0.2rem 0 0;
   padding: 0.05rem 0.15rem;
   text-align: left;
   font: inherit;
@@ -1309,16 +1404,20 @@ html[data-chrome="android"] .topo-detail {
   grid-column: 1;
   grid-row: 1;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: flex-start;
-  gap: 0;
+  gap: 0.4rem;
   min-width: 0;
 }
 
 .topo-detail-heading {
   min-width: 0;
+  flex: 1 1 auto;
   margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
 }
 
 .topo-detail-panel.is-collapsed .topo-detail-body,
@@ -1378,12 +1477,12 @@ html[data-theme="light"] .topo-detail-head.row-status-restarting {
 }
 
 .topo-tag-list {
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.3rem;
   list-style: none;
-  margin: 0;
+  margin: 0.3rem 0 0;
   padding: 0;
 }
 
@@ -1434,6 +1533,10 @@ html[data-chrome="android"] .topo-tag-chip {
   margin: 0.1rem 0 0;
   font-size: 0.8125rem;
   color: var(--muted);
+}
+
+.topo-tag-list + .topo-detail-meta {
+  margin-top: 0.28rem;
 }
 
 .topo-detail-actions {

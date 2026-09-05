@@ -12,7 +12,7 @@ from typing import Any
 @dataclass
 class PatchJob:
     id: str
-    kind: str  # scan | apply | summarize
+    kind: str  # scan | apply | apply-batch | summarize
     target_id: str
     status: str = "queued"  # queued | running | success | failed
     phase: str = "Warteschlange"

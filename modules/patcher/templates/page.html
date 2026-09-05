@@ -13,6 +13,9 @@
       </p>
     </div>
     <div class="flex flex-wrap items-center gap-2 shrink-0 pt-1">
+      <button type="button" id="btn-apply-selected" class="btn btn-ghost" disabled>
+        Ausgewählte einspielen
+      </button>
       <button type="button" id="btn-scan-all" class="btn btn-primary" disabled>
         Alle Hosts prüfen
       </button>
@@ -50,9 +53,10 @@
 
 <dialog id="apply-dialog" class="rounded-xl border border-[var(--border)] bg-[var(--card)] p-0 text-[var(--text)] shadow-xl max-w-lg w-[calc(100%-2rem)]">
   <form method="dialog" id="apply-form" class="p-4 sm:p-5 space-y-3">
-    <h2 class="font-display text-lg font-bold">Updates einspielen</h2>
+    <h2 id="apply-dialog-title" class="font-display text-lg font-bold">Updates einspielen</h2>
     <p id="apply-target-label" class="text-sm text-[var(--muted)]"></p>
     <input type="hidden" id="apply-target-id" />
+    <input type="hidden" id="apply-mode" value="single" />
     <div>
       <label class="label" for="apply-filter">Umfang</label>
       <select id="apply-filter" class="field">
@@ -62,7 +66,7 @@
     </div>
     <label class="flex items-start gap-2 text-sm">
       <input type="checkbox" id="apply-confirm" class="mt-1 h-4 w-4" />
-      <span>Ich bestätige das Einspielen der Updates auf diesem Host.</span>
+      <span id="apply-confirm-label">Ich bestätige das Einspielen der Updates auf diesem Host. Es erfolgt kein automatischer Neustart.</span>
     </label>
     <div class="flex flex-wrap gap-2 pt-1">
       <button type="submit" value="apply" class="btn btn-primary" id="btn-apply-go">Einspielen</button>
@@ -92,6 +96,15 @@
   let progressScope = 'global';
   let lastCardJob = null;
   let cardJobMeta = { kind: 'scan', targetName: '' };
+  const CONFIRM_SINGLE = 'Ich bestätige das Einspielen der Updates auf diesem Host. Es erfolgt kein automatischer Neustart.';
+  const CONFIRM_BATCH = 'Ich bestätige das Einspielen der Updates auf den ausgewählten Hosts (nacheinander). Es erfolgt kein automatischer Neustart.';
+
+  function jobTitle(kind, targetName) {
+    let head = 'Scan läuft';
+    if (kind === 'apply-batch') head = 'Ausgewählte Hosts einspielen';
+    else if (kind === 'apply') head = 'Updates werden eingespielt';
+    return head + (targetName ? ': ' + targetName : '…');
+  }
 
   function esc(s) {
     return String(s == null ? '' : s)
@@ -184,11 +197,7 @@
     const spinner = jp('spinner');
     if (spinner) spinner.classList.remove('hidden');
     const title = jp('title');
-    if (title) {
-      title.textContent =
-        (kind === 'apply' ? 'Updates werden eingespielt' : 'Scan läuft') +
-        (targetName ? ': ' + targetName : '…');
-    }
+    if (title) title.textContent = jobTitle(kind, targetName);
     const phase = jp('phase');
     if (phase) phase.textContent = 'Warteschlange';
     const message = jp('message');
@@ -327,21 +336,34 @@
     const box = ensureCardJobPanel(saved.targetId);
     if (!box) return;
     const title = box.querySelector('[data-jp="title"]');
-    if (title) {
-      title.textContent =
-        (saved.kind === 'apply' ? 'Updates werden eingespielt' : 'Scan läuft') +
-        (saved.targetName ? ': ' + saved.targetName : '');
-    }
+    if (title) title.textContent = jobTitle(saved.kind, saved.targetName);
     finishProgress(saved.job);
+  }
+
+  function selectedHosts() {
+    return Array.from(document.querySelectorAll('.host-select:checked')).map(function (el) {
+      return { id: el.dataset.id, name: el.dataset.name || el.dataset.id };
+    }).filter(function (h) { return h.id; });
+  }
+
+  function syncBatchButton() {
+    const btn = document.getElementById('btn-apply-selected');
+    if (!btn) return;
+    const n = selectedHosts().length;
+    btn.disabled = busy || n < 1;
+    btn.textContent = n > 1
+      ? ('Ausgewählte einspielen (' + n + ')')
+      : 'Ausgewählte einspielen';
   }
 
   function setBusy(on) {
     busy = on;
-    document.querySelectorAll('.btn-scan, .btn-apply, .btn-reboot').forEach(function (b) {
+    document.querySelectorAll('.btn-scan, .btn-apply, .btn-reboot, .host-select, .host-monitor-input').forEach(function (b) {
       if (on) b.disabled = true;
     });
     const scanAllBtn = document.getElementById('btn-scan-all');
     if (scanAllBtn) scanAllBtn.disabled = on;
+    syncBatchButton();
   }
 
   let scanAllPoll = null;
@@ -506,14 +528,23 @@
       }
       const jr = await (await fetch(API + '/jobs?active=1')).json();
       const jobs = (jr.jobs || []).filter(function (j) {
-        return !j.done && (j.kind === 'scan' || j.kind === 'apply');
+        return !j.done && (j.kind === 'scan' || j.kind === 'apply' || j.kind === 'apply-batch');
       });
       if (!jobs.length || busy) return;
       const job = jobs[0];
+      setBusy(true);
+      if (job.kind === 'apply-batch') {
+        showProgress('apply-batch', 'ausgewählte Hosts');
+        await pollJob(job.job_id || job.id);
+        setBusy(false);
+        await loadTargets();
+        activeTargetId = null;
+        progressScope = 'global';
+        return;
+      }
       const card = document.querySelector('.entity-card[data-id="' + job.target_id + '"]');
       const nameEl = card && card.querySelector('h3');
       const name = (nameEl && nameEl.textContent) || job.target_id;
-      setBusy(true);
       showProgress(job.kind, name, job.target_id);
       await pollJob(job.job_id || job.id);
       setBusy(false);
@@ -527,66 +558,152 @@
     }
   }
 
-  function renderTargets(targets) {
-    const root = document.getElementById('target-list');
-    if (!targets.length) {
-      root.innerHTML = '<p class="text-sm text-[var(--muted)]">Keine Ziele. Starte Discovery oder lege unter Hosts manuelle Linux-Systeme an.</p>';
-      return;
+  function renderHostCard(t) {
+    const monitored = t.monitored !== false;
+    const pending = t.pending;
+    const sec = t.security;
+    let statusHtml = '<span class="text-sm text-[var(--muted)]">Noch nicht gescannt</span>';
+    const sum = (t.last_scan && t.last_scan.summary) || {};
+    if (!monitored) {
+      statusHtml = chip('Nicht überwacht', 'chip-unknown');
+    } else if (pending != null) {
+      statusHtml =
+        chip(pending + ' Updates', pending ? 'chip-unknown' : 'chip-running') +
+        (sec ? ' ' + chip(sec + ' Security', 'chip-stopped') : '') +
+        (t.last_scan && t.last_scan.reboot_required ? ' ' + chip('Reboot', 'chip-stopped') : '') +
+        (sum.apt_lock ? ' ' + chip('APT-Sperre', 'chip-unknown') : '') +
+        (!sum.apt_lock && sum.index_stale ? ' ' + chip('Cache', 'chip-unknown') : '');
+    } else if (t.last_scan_error) {
+      statusHtml = '<span class="text-sm" style="color:var(--danger,#c44)">' + esc(t.last_scan_error) + '</span>';
     }
-    root.innerHTML = targets.map(function (t) {
-      const pending = t.pending;
-      const sec = t.security;
-      let statusHtml = '<span class="text-sm text-[var(--muted)]">Noch nicht gescannt</span>';
-      const sum = (t.last_scan && t.last_scan.summary) || {};
-      if (pending != null) {
-        statusHtml =
-          chip(pending + ' Updates', pending ? 'chip-unknown' : 'chip-running') +
-          (sec ? ' ' + chip(sec + ' Security', 'chip-stopped') : '') +
-          (t.last_scan && t.last_scan.reboot_required ? ' ' + chip('Reboot', 'chip-stopped') : '') +
-          (sum.apt_lock ? ' ' + chip('APT-Sperre', 'chip-unknown') : '') +
-          (!sum.apt_lock && sum.index_stale ? ' ' + chip('Cache', 'chip-unknown') : '');
-      } else if (t.last_scan_error) {
-        statusHtml = '<span class="text-sm" style="color:var(--danger,#c44)">' + esc(t.last_scan_error) + '</span>';
-      }
-      const meta = [t.kind, t.ip, t.last_scan && t.last_scan.pm, t.last_scan && t.last_scan.distro]
-        .filter(Boolean).map(esc).join(' · ');
-      const llm = t.last_scan && t.last_scan.llm_summary
-        ? '<p class="mt-2 text-sm text-[var(--muted)] line-clamp-3">' + esc(t.last_scan.llm_summary) + '</p>'
-        : '';
-      const lastAt = t.last_scan && t.last_scan.created_at
-        ? '<p class="mt-1 text-xs text-[var(--muted)]">Letzter Scan: ' + esc(t.last_scan.created_at) + '</p>'
-        : '';
-      const scanNote = sum.note
-        ? '<p class="mt-1 text-xs text-[var(--muted)]">' + esc(sum.note) + '</p>'
-        : '';
-      return (
-        '<article class="entity-card" data-id="' + esc(t.id) + '">' +
-          '<div class="flex flex-wrap items-start justify-between gap-2">' +
+    const meta = [t.kind, t.ip, t.last_scan && t.last_scan.pm, t.last_scan && t.last_scan.distro]
+      .filter(Boolean).map(esc).join(' · ');
+    const llm = monitored && t.last_scan && t.last_scan.llm_summary
+      ? '<p class="mt-2 text-sm text-[var(--muted)] line-clamp-3">' + esc(t.last_scan.llm_summary) + '</p>'
+      : '';
+    const lastAt = t.last_scan && t.last_scan.created_at
+      ? '<p class="mt-1 text-xs text-[var(--muted)]">Letzter Scan: ' + esc(t.last_scan.created_at) + '</p>'
+      : '';
+    const scanNote = sum.note
+      ? '<p class="mt-1 text-xs text-[var(--muted)]">' + esc(sum.note) + '</p>'
+      : '';
+    const checkbox = monitored
+      ? ('<label class="mt-1 inline-flex shrink-0 items-center">' +
+          '<input type="checkbox" class="host-select h-4 w-4" data-id="' + esc(t.id) +
+            '" data-name="' + esc(t.name) + '" aria-label="Host auswählen: ' + esc(t.name) + '" />' +
+        '</label>')
+      : '';
+    const monitorSwitch =
+      '<label class="host-monitor shrink-0">' +
+        '<input type="checkbox" class="host-monitor-input" role="switch"' +
+          ' data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '"' +
+          (monitored ? ' checked' : '') +
+          ' aria-checked="' + (monitored ? 'true' : 'false') + '"' +
+          ' aria-label="Überwachen: ' + esc(t.name) + '" />' +
+        '<span class="host-monitor-track" aria-hidden="true"></span>' +
+        '<span class="host-monitor-copy">' +
+          '<span class="host-monitor-title">Überwachen</span>' +
+          '<span class="host-monitor-state">' + (monitored ? 'Ein' : 'Aus') + '</span>' +
+        '</span>' +
+      '</label>';
+    return (
+      '<article class="entity-card" data-id="' + esc(t.id) + '" data-monitored="' + (monitored ? '1' : '0') + '">' +
+        '<div class="flex flex-wrap items-start justify-between gap-2">' +
+          '<div class="min-w-0 flex-1 flex items-start gap-3">' +
+            checkbox +
             '<div class="min-w-0">' +
-              '<h3 class="font-semibold break-words leading-snug">' + esc(t.name) + '</h3>' +
-              '<p class="mt-0.5 text-xs text-[var(--muted)]">' + meta + '</p>' +
-              lastAt +
-              scanNote +
+            '<h3 class="font-semibold break-words leading-snug">' + esc(t.name) + '</h3>' +
+            '<p class="mt-0.5 text-xs text-[var(--muted)]">' + meta + '</p>' +
+            lastAt +
+            scanNote +
             '</div>' +
+          '</div>' +
+          '<div class="flex flex-col items-end gap-2">' +
+            monitorSwitch +
             '<div class="target-status flex flex-wrap gap-1 justify-end">' + statusHtml + '</div>' +
           '</div>' +
-          llm +
-          '<div class="mt-3 flex flex-wrap gap-2">' +
-            '<button type="button" class="btn btn-sm btn-primary btn-scan" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">Scannen</button>' +
-            '<button type="button" class="btn btn-sm btn-ghost btn-images" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">Images</button>' +
-            '<button type="button" class="btn btn-sm btn-ghost btn-apply" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '"' +
-              (pending ? '' : ' disabled') + '>Einspielen</button>' +
-            (t.last_scan && t.last_scan.id
-              ? '<button type="button" class="btn btn-sm btn-ghost btn-detail" data-scan="' + t.last_scan.id + '">Details</button>'
-              : '') +
-            (t.last_scan && t.last_scan.reboot_required
-              ? '<button type="button" class="btn btn-sm btn-ghost btn-reboot" data-id="' + esc(t.id) + '">Reboot</button>'
-              : '') +
+        '</div>' +
+        llm +
+        '<div class="mt-3 flex flex-wrap gap-2">' +
+          '<button type="button" class="btn btn-sm btn-primary btn-scan" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">Scannen</button>' +
+          '<button type="button" class="btn btn-sm btn-ghost btn-images" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">Images</button>' +
+          '<button type="button" class="btn btn-sm btn-ghost btn-apply" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '"' +
+            (pending ? '' : ' disabled') + '>Einspielen</button>' +
+          (t.last_scan && t.last_scan.id
+            ? '<button type="button" class="btn btn-sm btn-ghost btn-detail" data-scan="' + t.last_scan.id + '">Details</button>'
+            : '') +
+          (t.last_scan && t.last_scan.reboot_required
+            ? '<button type="button" class="btn btn-sm btn-ghost btn-reboot" data-id="' + esc(t.id) + '">Reboot</button>'
+            : '') +
+        '</div>' +
+        '<div data-host-job-slot></div>' +
+      '</article>'
+    );
+  }
+
+  function renderTargets(targets) {
+    const root = document.getElementById('target-list');
+    const monitored = targets.filter(function (t) { return t.monitored !== false; });
+    const excluded = targets.filter(function (t) { return t.monitored === false; });
+    if (!targets.length) {
+      root.innerHTML = '<p class="text-sm text-[var(--muted)]">Keine Ziele. Starte Discovery oder lege unter Hosts manuelle Linux-Systeme an.</p>';
+      syncBatchButton();
+      return;
+    }
+    let html = '';
+    if (monitored.length) {
+      html += monitored.map(renderHostCard).join('');
+    } else {
+      html += '<p class="text-sm text-[var(--muted)]">Keine überwachten Hosts. Ausgeschlossene Ziele stehen unten unter „Nicht überwacht“.</p>';
+    }
+    if (excluded.length) {
+      html +=
+        '<details class="mt-8 pt-4" open>' +
+          '<summary class="cursor-pointer font-display text-lg font-bold leading-snug">' +
+            'Nicht überwacht (' + excluded.length + ')' +
+          '</summary>' +
+          '<p class="mt-1 mb-3 text-sm text-[var(--muted)]">' +
+            'Kein täglicher Scan und nicht in „Alle Hosts prüfen“. „Scannen“ auf der Karte bleibt möglich.' +
+          '</p>' +
+          '<div class="space-y-3">' +
+            excluded.map(renderHostCard).join('') +
           '</div>' +
-          '<div data-host-job-slot></div>' +
-        '</article>'
-      );
-    }).join('');
+        '</details>';
+    }
+    root.innerHTML = html;
+    syncBatchButton();
+  }
+
+  async function setMonitored(targetId, name, monitored, inputEl) {
+    if (busy) {
+      if (inputEl) inputEl.checked = !monitored;
+      return;
+    }
+    if (!monitored) {
+      if (!confirm(
+        name + ' nicht mehr überwachen?\n\nTäglicher Scan und „Alle Hosts prüfen“ überspringen diesen Host.\n„Scannen“ auf der Karte bleibt möglich.'
+      )) {
+        if (inputEl) inputEl.checked = true;
+        return;
+      }
+    }
+    try {
+      const r = await fetch(API + '/targets/monitor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: targetId, monitored: monitored }),
+      });
+      const d = await r.json().catch(function () { return {}; });
+      if (!r.ok) {
+        if (inputEl) inputEl.checked = !monitored;
+        alert(d.detail || 'Speichern fehlgeschlagen');
+        return;
+      }
+      await loadTargets();
+    } catch (e) {
+      if (inputEl) inputEl.checked = !monitored;
+      alert(String(e));
+    }
   }
 
   async function loadStatus() {
@@ -680,11 +797,34 @@
 
   function openApply(id, name) {
     if (busy) return;
+    document.getElementById('apply-mode').value = 'single';
     document.getElementById('apply-target-id').value = id;
+    document.getElementById('apply-dialog-title').textContent = 'Updates einspielen';
     document.getElementById('apply-target-label').textContent = name + ' (' + id + ')';
+    document.getElementById('apply-confirm-label').textContent = CONFIRM_SINGLE;
+    document.getElementById('apply-confirm-label').style.color = '';
     document.getElementById('apply-confirm').checked = false;
     document.getElementById('apply-dialog').showModal();
   }
+
+  function openBatchApply(items) {
+    if (busy || !items.length) return;
+    document.getElementById('apply-mode').value = 'batch';
+    document.getElementById('apply-target-id').value = items.map(function (h) { return h.id; }).join(',');
+    document.getElementById('apply-dialog-title').textContent = 'Ausgewählte Hosts einspielen';
+    document.getElementById('apply-target-label').textContent =
+      items.length + ' Host(s) nacheinander: ' + items.map(function (h) { return h.name; }).join(', ');
+    document.getElementById('apply-confirm-label').textContent = CONFIRM_BATCH;
+    document.getElementById('apply-confirm-label').style.color = '';
+    document.getElementById('apply-confirm').checked = false;
+    document.getElementById('apply-dialog').showModal();
+  }
+
+  document.getElementById('btn-apply-selected')?.addEventListener('click', function () {
+    const items = selectedHosts();
+    if (!items.length) return;
+    openBatchApply(items);
+  });
 
   document.getElementById('apply-form').addEventListener('submit', async function (ev) {
     const submitter = ev.submitter;
@@ -692,20 +832,43 @@
     ev.preventDefault();
     const confirm = document.getElementById('apply-confirm').checked;
     if (!confirm) {
-      finishProgress({
-        ok: false,
-        phase: 'Hinweis',
-        percent: 0,
-        message: 'Bitte Bestätigung setzen.',
-        error: 'Bitte Bestätigung setzen.',
-      });
-      progressRoot().classList.remove('hidden');
+      const label = document.getElementById('apply-confirm-label');
+      if (label) label.style.color = 'var(--danger, #c44)';
       return;
     }
+    document.getElementById('apply-confirm-label').style.color = '';
+    const mode = document.getElementById('apply-mode').value || 'single';
     const targetId = document.getElementById('apply-target-id').value;
     const filter = document.getElementById('apply-filter').value;
     const name = document.getElementById('apply-target-label').textContent || targetId;
     document.getElementById('apply-dialog').close();
+    if (mode === 'batch') {
+      const ids = targetId.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      await runJob('apply-batch', null, ids.length + ' Hosts', async function () {
+        const r = await fetch(API + '/apply-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            target_ids: ids,
+            confirm: true,
+            package_filter: filter,
+          }),
+        });
+        const j = await r.json();
+        if (!r.ok) {
+          finishProgress({
+            ok: false,
+            phase: 'Fehler',
+            percent: 100,
+            message: j.detail || 'Stapel-Apply fehlgeschlagen',
+            error: j.detail || 'Stapel-Apply fehlgeschlagen',
+          });
+          return null;
+        }
+        return j;
+      });
+      return;
+    }
     await runJob('apply', targetId, name, async function () {
       const r = await fetch(API + '/apply', {
         method: 'POST',
@@ -796,12 +959,16 @@
       const data = await r.json().catch(function () { return {}; });
       if (!r.ok) throw new Error(data.detail || 'Image-Scan fehlgeschlagen');
       const updates = data.updates || [];
+      const logLines = (data.containers || []).filter(function (c) { return c.error; }).map(function (c) {
+        return (c.stack ? c.stack + '/' : '') + c.name + ' · ' + (c.image || '') + ': ' + c.error;
+      });
       if (!updates.length) {
         finishProgress({
           ok: true,
           phase: 'Images',
           percent: 100,
           message: data.message || ('Keine neueren Images auf ' + (hostName || parentId)),
+          log_lines: logLines,
         });
         progressRoot().classList.remove('hidden');
         return;
@@ -833,12 +1000,20 @@
       });
       progressRoot().classList.remove('hidden');
     } catch (e) {
+      const raw = String(e.message || e);
+      const unique = [];
+      raw.split('\n').forEach(function (line) {
+        const t = line.trim();
+        if (t && unique.indexOf(t) < 0) unique.push(t);
+      });
+      const msg = unique.join('\n') || raw;
       finishProgress({
         ok: false,
         phase: 'Images',
         percent: 100,
-        message: String(e.message || e),
-        error: String(e.message || e),
+        message: msg,
+        error: msg,
+        log_lines: unique.length > 1 ? unique : [],
       });
       progressRoot().classList.remove('hidden');
     } finally {
@@ -848,6 +1023,19 @@
 
   document.getElementById('detail-close').addEventListener('click', function () {
     document.getElementById('detail-dialog').close();
+  });
+
+  document.getElementById('target-list').addEventListener('change', function (ev) {
+    const el = ev.target;
+    if (!el) return;
+    if (el.classList.contains('host-select')) {
+      syncBatchButton();
+      return;
+    }
+    if (el.classList.contains('host-monitor-input')) {
+      el.setAttribute('aria-checked', el.checked ? 'true' : 'false');
+      setMonitored(el.dataset.id, el.dataset.name, el.checked, el);
+    }
   });
 
   document.getElementById('target-list').addEventListener('click', function (ev) {

@@ -795,8 +795,8 @@
             <div class="topo-detail-heading">
               <div class="topo-detail-title-row">
                 <h3 class="topo-detail-name break-words">{{ g.name }}</h3>
-                {{ guest_tag_chips(g) }}
               </div>
+              {{ guest_tag_chips(g) }}
               <p class="topo-detail-meta">
                 {{ g.kind.value }}{% if g.vmid %} · {{ g.vmid }}{% endif %}
                 {% if g.ip_addresses %} · {{ g.ip_addresses | join(', ') }}{% endif %}
@@ -875,6 +875,7 @@
               <div class="topo-detail-title-row">
                 <h3 class="topo-detail-name break-words">{{ g.name }}</h3>
               </div>
+              {{ guest_tag_chips(g) }}
               <p class="topo-detail-meta">
                 Linux-Host
                 {% if g.ip_addresses %} · {{ g.ip_addresses | join(', ') }}{% endif %}

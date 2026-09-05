@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shlex
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from patcher.config import get_patcher_settings
 from patcher.detect import check_reboot_required, detect_host
-from patcher.sshutil import ssh_run
+from patcher.sshutil import ssh_run, ssh_run_stream
 from patcher.targets import PatchTarget
 
 logger = logging.getLogger(__name__)
+
+ProgressFn = Callable[[str, int, str], Awaitable[None] | None]
+LogFn = Callable[[str], Awaitable[None] | None]
 
 
 class ApplyError(Exception):
@@ -33,17 +39,55 @@ def _safe_pkg_list(names: list[str]) -> list[str]:
     return out
 
 
+async def _emit(
+    progress: ProgressFn | None,
+    phase: str,
+    percent: int,
+    message: str,
+) -> None:
+    if not progress:
+        return
+    result = progress(phase, percent, message)
+    if asyncio.iscoroutine(result):
+        await result
+
+
+async def _emit_log(on_log: LogFn | None, line: str) -> None:
+    if not on_log:
+        return
+    result = on_log(line)
+    if asyncio.iscoroutine(result):
+        await result
+
+
+def _line_buffered(cmd: str) -> str:
+    quoted = shlex.quote(cmd)
+    return (
+        "if command -v stdbuf >/dev/null 2>&1; then "
+        f"stdbuf -oL -eL sh -c {quoted}; "
+        f"else {cmd}; fi"
+    )
+
+
 async def apply_updates(
     target: PatchTarget,
     *,
     package_filter: str = "all",
     packages: list[str] | None = None,
+    progress: ProgressFn | None = None,
+    on_log: LogFn | None = None,
 ) -> dict[str, Any]:
     """Install updates. package_filter: security | all | selected."""
     ps = get_patcher_settings()
     timeout = ps.patcher_apply_timeout
     connect_timeout = ps.patcher_connect_timeout
 
+    await _emit(
+        progress,
+        "Verbinden",
+        8,
+        f"SSH zu {target.name} ({target.ip})…",
+    )
     detect = await detect_host(
         target, timeout=min(60.0, timeout), connect_timeout=connect_timeout
     )
@@ -63,14 +107,71 @@ async def apply_updates(
     else:
         raise ApplyError(f"Nicht unterstützter Paketmanager: {pm}")
 
-    stdout, stderr, code = await ssh_run(
-        target.ip,
-        cmd,
-        timeout=timeout,
-        username=target.ssh_user,
-        port=target.port,
-        connect_timeout=connect_timeout,
+    await _emit(
+        progress,
+        "Erkannt",
+        18,
+        f"{detect.pretty_name} · Paketmanager {pm}",
     )
+    await _emit_log(on_log, f"Installiere Updates ({filt}) auf {target.name}…")
+    await _emit(
+        progress,
+        "Einspielen",
+        25,
+        f"Updates werden installiert ({filt}) — das kann einige Minuten dauern…",
+    )
+
+    line_n = 0
+    stop_beat = asyncio.Event()
+    started = time.monotonic()
+
+    async def handle_line(line: str) -> None:
+        nonlocal line_n
+        line_n += 1
+        await _emit_log(on_log, line)
+        if line_n == 1 or line_n % 3 == 0:
+            await _emit(
+                progress,
+                "Einspielen",
+                min(82, 28 + min(50, line_n)),
+                line[:200],
+            )
+
+    async def beat() -> None:
+        while not stop_beat.is_set():
+            try:
+                await asyncio.wait_for(stop_beat.wait(), timeout=10.0)
+                return
+            except asyncio.TimeoutError:
+                elapsed = int(time.monotonic() - started)
+                if line_n:
+                    continue
+                await _emit(
+                    progress,
+                    "Einspielen",
+                    min(80, 25 + elapsed // 8),
+                    f"Installation läuft seit {elapsed}s — bitte warten…",
+                )
+
+    beat_task = asyncio.create_task(beat())
+    try:
+        stdout, stderr, code = await ssh_run_stream(
+            target.ip,
+            _line_buffered(cmd),
+            timeout=timeout,
+            username=target.ssh_user,
+            port=target.port,
+            connect_timeout=connect_timeout,
+            on_line=handle_line,
+        )
+    finally:
+        stop_beat.set()
+        beat_task.cancel()
+        try:
+            await beat_task
+        except asyncio.CancelledError:
+            pass
+
     log = ((stdout or "") + ("\n" + stderr if stderr else "")).strip()
     if code != 0:
         raise ApplyError(
@@ -78,9 +179,19 @@ async def apply_updates(
             + (stderr or stdout or "")[:800]
         )
 
+    await _emit(
+        progress,
+        "Reboot-Check",
+        90,
+        "Prüfe, ob ein Neustart nötig ist (kein automatischer Reboot)…",
+    )
     reboot = await check_reboot_required(
         target, timeout=30.0, connect_timeout=connect_timeout
     )
+    done_msg = "Updates eingespielt."
+    if reboot:
+        done_msg += " Reboot empfohlen — bitte manuell bestätigen."
+    await _emit(progress, "Abschluss", 95, done_msg)
     return {
         "pm": pm,
         "distro": detect.pretty_name,
