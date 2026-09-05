@@ -925,6 +925,102 @@ async def _write_text_file(
         )
 
 
+_LOCAL_ONLY_STATUS = "Nur lokal — Remote-Vergleich nicht möglich."
+
+
+def _unique_cmd_detail(text: str, *, fallback: str) -> str:
+    """Collapse identical stderr lines (docker --format repeats per object)."""
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        unique.append(line)
+    return "\n".join(unique) if unique else fallback
+
+
+def _parse_inspect_payload(raw: str) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(raw or "")
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
+def _repo_digests_from_image(image: dict[str, Any]) -> list[str]:
+    raw = image.get("RepoDigests")
+    if not isinstance(raw, list):
+        return []
+    return [str(x) for x in raw if x]
+
+
+def _local_sha_from_digests(digests: list[str]) -> str:
+    for digest in digests:
+        if "@sha256:" in digest:
+            return digest.split("@", 1)[-1]
+    return ""
+
+
+def _index_image_digests(dest: dict[str, list[str]], image: dict[str, Any]) -> None:
+    digests = _repo_digests_from_image(image)
+    keys: list[str] = []
+    image_id = str(image.get("Id") or "").strip()
+    if image_id:
+        keys.append(image_id)
+    tags = image.get("RepoTags")
+    if isinstance(tags, list):
+        keys.extend(str(tag) for tag in tags if tag)
+    for key in keys:
+        dest[key] = digests
+
+
+async def _inspect_image_repo_digests(
+    settings: Settings,
+    ip: str,
+    image_refs: list[str],
+    *,
+    port: int | None,
+    username: str | None,
+) -> dict[str, list[str]]:
+    """Map image id/tag → RepoDigests. Missing key/empty list stays empty."""
+    dest: dict[str, list[str]] = {}
+    refs = list(dict.fromkeys(r for r in image_refs if r))
+    if not refs:
+        return dest
+
+    async def _load(quoted: str) -> list[dict[str, Any]] | None:
+        stdout, _stderr, code = await _ssh_run(
+            settings,
+            ip,
+            "docker inspect --type image -- " + quoted,
+            port=port,
+            username=username,
+        )
+        if code != 0:
+            return None
+        return _parse_inspect_payload(stdout)
+
+    batch = await _load(" ".join(shlex.quote(r) for r in refs))
+    if batch is not None:
+        for image in batch:
+            _index_image_digests(dest, image)
+        return dest
+
+    for ref in refs:
+        one = await _load(shlex.quote(ref))
+        if not one:
+            continue
+        for image in one:
+            _index_image_digests(dest, image)
+    return dest
+
+
 async def scan_image_updates(
     settings: Settings,
     *,
@@ -972,44 +1068,53 @@ async def scan_image_updates(
         }
 
     quoted = " ".join(shlex.quote(n) for n in names)
-    inspect_cmd = (
-        "docker inspect --format "
-        "'{{.Name}}|{{.Config.Image}}|{{json .RepoDigests}}' -- " + quoted
-    )
     stdout, stderr, code = await _ssh_run(
-        settings, ip, inspect_cmd, port=port, username=user
+        settings, ip, "docker inspect -- " + quoted, port=port, username=user
     )
     if code != 0:
-        detail = (stderr or stdout or "").strip() or f"exit {code}"
+        raw = (stderr or stdout or "").strip() or f"exit {code}"
         raise DockerControlError(
-            f"docker inspect fehlgeschlagen: {detail}",
+            f"docker inspect fehlgeschlagen: {_unique_cmd_detail(raw, fallback=raw)}",
             status_code=502,
         )
 
-    rows: list[dict[str, Any]] = []
-    for line in (stdout or "").splitlines():
-        line = line.strip().lstrip("/")
-        parts = line.split("|", 2)
-        if len(parts) < 3:
+    inspected = _parse_inspect_payload(stdout)
+    if not inspected:
+        raise DockerControlError(
+            "docker inspect JSON ungültig.",
+            status_code=502,
+        )
+
+    specs: list[tuple[str, str, str]] = []
+    image_refs: list[str] = []
+    for item in inspected:
+        cname = str(item.get("Name") or "").strip().lstrip("/")
+        config = item.get("Config") if isinstance(item.get("Config"), dict) else {}
+        image = str(config.get("Image") or "").strip()
+        image_id = str(item.get("Image") or "").strip()
+        if not cname:
             continue
-        cname, image, digests_raw = parts[0].strip(), parts[1].strip(), parts[2].strip()
-        local_digests: list[str] = []
-        try:
-            parsed = json.loads(digests_raw)
-            if isinstance(parsed, list):
-                local_digests = [str(x) for x in parsed if x]
-        except json.JSONDecodeError:
-            local_digests = []
-        local_sha = ""
-        for d in local_digests:
-            if "@sha256:" in d:
-                local_sha = d.split("@", 1)[-1]
-                break
+        specs.append((cname, image, image_id))
+        if image_id:
+            image_refs.append(image_id)
+        if image and not image.startswith("sha256:"):
+            image_refs.append(image)
+
+    digest_by_ref = await _inspect_image_repo_digests(
+        settings, ip, image_refs, port=port, username=user
+    )
+
+    rows: list[dict[str, Any]] = []
+    for cname, image, image_id in specs:
+        local_digests = digest_by_ref.get(image_id) or digest_by_ref.get(image) or []
+        local_sha = _local_sha_from_digests(local_digests)
         remote_sha = ""
         newer = False
         err = ""
         if not image or image.startswith("sha256:"):
             err = "Kein Tag — Vergleich nicht möglich."
+        elif not local_sha:
+            err = _LOCAL_ONLY_STATUS
         else:
             remote_cmd = (
                 "docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "
@@ -1028,12 +1133,8 @@ async def scan_image_updates(
                         remote_sha = token.split(",", 1)[0]
                         break
             if not remote_sha:
-                err = (
-                    (r_err or text or "Remote-Manifest nicht lesbar").strip()[:180]
-                )
-            elif local_sha and remote_sha and local_sha != remote_sha:
-                newer = True
-            elif not local_sha and remote_sha:
+                err = (r_err or text or "Remote-Manifest nicht lesbar").strip()[:180]
+            elif local_sha != remote_sha:
                 newer = True
         stack = ""
         for c in containers:
@@ -1053,6 +1154,18 @@ async def scan_image_updates(
         )
 
     updates = [r for r in rows if r["update_available"]]
+    local_only = [r for r in rows if r["error"] == _LOCAL_ONLY_STATUS]
+    if updates:
+        message = f"{len(updates)} Image-Update(s) verfügbar."
+    elif local_only and len(local_only) == len(rows):
+        message = "Keine neueren Images — alle nur lokal (Remote-Vergleich nicht möglich)."
+    elif local_only:
+        message = (
+            f"Keine neueren Images gefunden. {len(local_only)} Image(s) nur lokal "
+            "— Remote-Vergleich nicht möglich."
+        )
+    else:
+        message = "Keine neueren Images gefunden."
     return {
         "ok": True,
         "parent_id": parent_id,
@@ -1060,11 +1173,7 @@ async def scan_image_updates(
         "containers": rows,
         "updates": updates,
         "count": len(updates),
-        "message": (
-            f"{len(updates)} Image-Update(s) verfügbar."
-            if updates
-            else "Keine neueren Images gefunden."
-        ),
+        "message": message,
     }
 
 
