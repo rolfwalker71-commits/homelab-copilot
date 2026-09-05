@@ -115,6 +115,17 @@ async def _notify_backup_finished(
         if store is None:
             return
 
+        from app.core.push import push_allowed
+
+        if status == "success" and not await push_allowed(store, "backup_success"):
+            return
+        if status == "partial" and not await push_allowed(store, "backup_partial"):
+            return
+        if status not in ("success", "partial") and not await push_allowed(
+            store, "backup_failure"
+        ):
+            return
+
         run = result or {}
         stack = str(run.get("stack") or project or "Stack").strip()
         guest = str(run.get("guest_name") or "").strip()
@@ -456,6 +467,7 @@ async def module_status() -> dict[str, Any]:
         },
         "quiesce_default": bs.backup_quiesce,
         "restic_install": bs.restic_install,
+        "restic_install_timeout": bs.restic_install_timeout,
         "pipeline": pipeline,
         "synology": {
             "configured": any(
@@ -626,6 +638,12 @@ async def run_backup_endpoint(
         "history_url": "/modules/backup_verifier/history",
         "job_url": f"/api/modules/backup_verifier/jobs/{job.id}",
     }
+
+
+@router.get("/jobs")
+async def list_backup_jobs(active: bool = True) -> dict[str, Any]:
+    jobs = JOBS.list_active() if active else []
+    return {"ok": True, "jobs": [j.to_dict() for j in jobs]}
 
 
 @router.get("/jobs/{job_id}")

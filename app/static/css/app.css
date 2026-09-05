@@ -1907,6 +1907,35 @@ html[data-chrome="android"] .topo-storage-row {
   margin-bottom: 1rem;
 }
 
+.topo-inventory,
+.topo-snapshots {
+  margin-bottom: 1.1rem;
+}
+
+.topo-inventory-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.topo-inventory-notes {
+  min-height: 5.5rem;
+  resize: vertical;
+}
+
+.topo-inv-link-row {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr auto;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+@media (max-width: 40rem) {
+  .topo-inv-link-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .topo-node-loading {
   margin: 0;
 }

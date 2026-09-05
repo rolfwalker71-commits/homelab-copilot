@@ -70,6 +70,19 @@ async def ensure_vapid_keys(
     return {"private_key": private, "public_key": public, "subject": subject}
 
 
+async def push_allowed(store: AppStore, flag: str) -> bool:
+    """Honor user-selectable notification toggles (default fail/down/patch on)."""
+    try:
+        prefs = await store.get_push_prefs()
+    except Exception:
+        from app.core.app_store import DEFAULT_PUSH_PREFS
+
+        prefs = dict(DEFAULT_PUSH_PREFS)
+    if flag not in prefs:
+        return True
+    return bool(prefs[flag])
+
+
 async def send_push_to_all(
     store: AppStore,
     *,

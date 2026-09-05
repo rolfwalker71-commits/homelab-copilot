@@ -97,6 +97,9 @@
         <a href="/modules/backup_verifier" class="{% if request.url.path.startswith('/modules/backup_verifier') %}active{% endif %}">
           <span class="nav-ico">{{ ico('backup') }}</span>Backup
         </a>
+        <a href="/modules/health" class="{% if request.url.path.startswith('/modules/health') %}active{% endif %}">
+          <span class="nav-ico">{{ ico('health') }}</span>Checks
+        </a>
         <a href="/setup" class="{% if request.url.path == '/setup' %}active{% endif %}">
           <span class="nav-ico">{{ ico('setup') }}</span>Setup
         </a>
@@ -149,13 +152,13 @@
       <span class="nav-icon" aria-hidden="true">{{ ico('backup', 22) }}</span>
       Backup
     </a>
+    <a href="/modules/health" class="{% if request.url.path.startswith('/modules/health') %}active{% endif %}">
+      <span class="nav-icon" aria-hidden="true">{{ ico('health', 22) }}</span>
+      Checks
+    </a>
     <a href="/setup" class="{% if request.url.path == '/setup' %}active{% endif %}">
       <span class="nav-icon" aria-hidden="true">{{ ico('setup', 22) }}</span>
       Setup
-    </a>
-    <a href="/api/docs">
-      <span class="nav-icon" aria-hidden="true">{{ ico('api', 22) }}</span>
-      API
     </a>
   </nav>
 

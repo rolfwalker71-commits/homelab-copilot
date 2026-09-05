@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.core.app_store import AppStore
+from app.core.app_store import DEFAULT_PUSH_PREFS, AppStore
 from app.core.locale import format_de, now_berlin
 from app.core.push import ensure_vapid_keys
 
@@ -26,6 +26,15 @@ class PushSubscribePayload(BaseModel):
 
 class PushUnsubscribePayload(BaseModel):
     endpoint: str = Field(..., min_length=8)
+
+
+class PushPrefsPayload(BaseModel):
+    backup_success: bool | None = None
+    backup_failure: bool | None = None
+    backup_partial: bool | None = None
+    patch_findings: bool | None = None
+    health_down: bool | None = None
+    disk_high: bool | None = None
 
 
 def _store(request: Request) -> AppStore:
@@ -76,6 +85,20 @@ async def push_subscribe(
         "message": "Benachrichtigungen aktiviert.",
         "time": format_de(now_berlin()),
     }
+
+
+@router.get("/prefs")
+async def get_push_prefs(request: Request) -> dict[str, Any]:
+    store = _store(request)
+    prefs = await store.get_push_prefs()
+    return {"prefs": prefs, "defaults": DEFAULT_PUSH_PREFS}
+
+
+@router.put("/prefs")
+async def put_push_prefs(payload: PushPrefsPayload, request: Request) -> dict[str, Any]:
+    store = _store(request)
+    prefs = await store.set_push_prefs(payload.model_dump(exclude_none=True))
+    return {"ok": True, "prefs": prefs, "message": "Push-Einstellungen gespeichert."}
 
 
 @router.post("/unsubscribe")

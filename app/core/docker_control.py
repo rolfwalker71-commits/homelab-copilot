@@ -15,6 +15,7 @@ import asyncssh
 
 from app.config import Settings
 from app.core.models import TopologyEntity, TopologySnapshot
+from app.core.ssh_endpoint import find_topology_entity, resolve_ssh_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def ssh_key_present(settings: Settings) -> bool:
 
 
 def resolve_parent_ip(snapshot: TopologySnapshot | None, parent_id: str) -> str | None:
-    """Return SSH target IP for a guest parent_id, or None for local docker."""
+    """Return SSH target IP for a guest/host parent_id, or None for local docker."""
     if parent_id == "local:docker":
         return None
     if snapshot is None:
@@ -75,20 +76,52 @@ def resolve_parent_ip(snapshot: TopologySnapshot | None, parent_id: str) -> str 
             "Keine Topologie geladen — bitte zuerst Discovery ausführen.",
             status_code=404,
         )
-    for g in snapshot.guests:
-        if g.id == parent_id:
-            if not g.ip_addresses:
-                raise DockerControlError(
-                    f"Guest „{g.name}“ hat keine IP — SSH nicht möglich.",
-                    status_code=400,
-                )
-            return g.ip_addresses[0]
-    # Orphan / unknown parent: try container hostname/IP from snapshot
+    entity = find_topology_entity(snapshot, parent_id)
+    if entity is not None:
+        if not entity.ip_addresses:
+            raise DockerControlError(
+                f"„{entity.name}“ hat keine IP — SSH nicht möglich.",
+                status_code=400,
+            )
+        return entity.ip_addresses[0]
     for c in snapshot.containers:
         if c.parent_id == parent_id and c.ip_addresses:
             return c.ip_addresses[0]
         if c.parent_id == parent_id and c.hostname and _looks_like_ip(c.hostname):
             return c.hostname
+    raise DockerControlError(
+        f"Parent „{parent_id}“ nicht in der Topologie gefunden.",
+        status_code=404,
+    )
+
+
+def resolve_parent_ssh(
+    settings: Settings,
+    snapshot: TopologySnapshot | None,
+    parent_id: str,
+) -> tuple[str | None, int, str]:
+    """Return (ip or None for local, port, username)."""
+    if parent_id == "local:docker":
+        return None, settings.docker_ssh_port, settings.docker_ssh_user
+    if snapshot is None:
+        raise DockerControlError(
+            "Keine Topologie geladen — bitte zuerst Discovery ausführen.",
+            status_code=404,
+        )
+    ep = resolve_ssh_endpoint(snapshot, parent_id, settings)
+    if ep is not None:
+        return ep.ip, ep.port, ep.username
+    entity = find_topology_entity(snapshot, parent_id)
+    if entity is not None:
+        raise DockerControlError(
+            f"„{entity.name}“ hat keine IP — SSH nicht möglich.",
+            status_code=400,
+        )
+    for c in snapshot.containers:
+        if c.parent_id == parent_id and c.ip_addresses:
+            return c.ip_addresses[0], settings.docker_ssh_port, settings.docker_ssh_user
+        if c.parent_id == parent_id and c.hostname and _looks_like_ip(c.hostname):
+            return c.hostname, settings.docker_ssh_port, settings.docker_ssh_user
     raise DockerControlError(
         f"Parent „{parent_id}“ nicht in der Topologie gefunden.",
         status_code=404,
@@ -128,7 +161,7 @@ async def run_container_action(
     if action not in ("start", "stop", "restart"):
         raise DockerControlError(f"Unbekannte Aktion: {action}")
 
-    ip = resolve_parent_ip(snapshot, parent_id)
+    ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
     if ip is None:
         return await _local_container_action(settings, name=name, action=action)
 
@@ -140,7 +173,9 @@ async def run_container_action(
         )
 
     cmd = f"docker {action} -- {shlex.quote(name)}"
-    stdout, stderr, code = await _ssh_run(settings, ip, cmd)
+    stdout, stderr, code = await _ssh_run(
+        settings, ip, cmd, port=port, username=user
+    )
     if code != 0:
         detail = (stderr or stdout or "").strip() or f"exit {code}"
         raise DockerControlError(
@@ -166,7 +201,7 @@ async def run_compose_restart(
     snapshot: TopologySnapshot | None,
 ) -> dict[str, Any]:
     project = validate_docker_name(project, kind="Compose-Projekt")
-    ip = resolve_parent_ip(snapshot, parent_id)
+    ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
     if ip is None:
         return await _local_compose_restart(settings, project=project)
 
@@ -178,7 +213,9 @@ async def run_compose_restart(
 
     # Prefer compose v2; fall back to restarting labeled containers.
     cmd = f"docker compose -p {shlex.quote(project)} restart"
-    stdout, stderr, code = await _ssh_run(settings, ip, cmd)
+    stdout, stderr, code = await _ssh_run(
+        settings, ip, cmd, port=port, username=user
+    )
     if code != 0:
         # Fallback: restart each matching container from topology
         names = [
@@ -195,7 +232,9 @@ async def run_compose_restart(
                 status_code=502,
             )
         quoted = " ".join(shlex.quote(n) for n in names)
-        stdout, stderr, code = await _ssh_run(settings, ip, f"docker restart -- {quoted}")
+        stdout, stderr, code = await _ssh_run(
+            settings, ip, f"docker restart -- {quoted}", port=port, username=user
+        )
         if code != 0:
             detail = (stderr or stdout or "").strip() or f"exit {code}"
             raise DockerControlError(
@@ -234,7 +273,7 @@ async def fetch_logs(
 ) -> dict[str, Any]:
     name = validate_docker_name(name)
     tail = max(1, min(int(tail), 2000))
-    ip = resolve_parent_ip(snapshot, parent_id)
+    ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
     if ip is None:
         text = await _local_logs(settings, name=name, tail=tail)
         return {
@@ -253,7 +292,9 @@ async def fetch_logs(
         )
 
     cmd = f"docker logs --tail {tail} -- {shlex.quote(name)} 2>&1"
-    stdout, stderr, code = await _ssh_run(settings, ip, cmd)
+    stdout, stderr, code = await _ssh_run(
+        settings, ip, cmd, port=port, username=user
+    )
     # docker logs writes to stderr for container stderr; we merged via 2>&1 in shell
     text = (stdout or stderr or "").rstrip()
     if code != 0 and not text:
@@ -272,15 +313,22 @@ async def fetch_logs(
     }
 
 
-async def _ssh_run(settings: Settings, ip: str, cmd: str) -> tuple[str, str, int]:
+async def _ssh_run(
+    settings: Settings,
+    ip: str,
+    cmd: str,
+    *,
+    port: int | None = None,
+    username: str | None = None,
+) -> tuple[str, str, int]:
     key = ssh_key_path(settings)
     connect_timeout = min(3.0, settings.docker_ssh_timeout + 1.0)
     cmd_timeout = max(5.0, settings.docker_ssh_timeout + 10.0)
     try:
         async with asyncssh.connect(
             ip,
-            port=settings.docker_ssh_port,
-            username=settings.docker_ssh_user,
+            port=int(port or settings.docker_ssh_port),
+            username=(username or settings.docker_ssh_user),
             client_keys=[str(key)],
             known_hosts=None,
             connect_timeout=connect_timeout,
@@ -476,7 +524,7 @@ async def _inspect_compose_project(
     snapshot: TopologySnapshot | None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     project = validate_docker_name(project, kind="Compose-Projekt")
-    ip = resolve_parent_ip(snapshot, parent_id)
+    ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
     if ip is None:
         inspects = await _local_inspect_project(settings, project)
         return None, inspects
@@ -485,7 +533,9 @@ async def _inspect_compose_project(
             "SSH-Schlüssel fehlt — Compose-Datei nicht erreichbar.",
             status_code=503,
         )
-    inspects = await _remote_inspect_project(settings, ip, project)
+    inspects = await _remote_inspect_project(
+        settings, ip, project, port=port, username=user
+    )
     return ip, inspects
 
 
@@ -513,20 +563,29 @@ async def _local_inspect_project(settings: Settings, project: str) -> list[dict[
 
 
 async def _remote_inspect_project(
-    settings: Settings, ip: str, project: str
+    settings: Settings,
+    ip: str,
+    project: str,
+    *,
+    port: int | None = None,
+    username: str | None = None,
 ) -> list[dict[str, Any]]:
     list_cmd = (
         "docker ps -aq --filter "
         f"label=com.docker.compose.project={shlex.quote(project)}"
     )
-    stdout, _, code = await _ssh_run(settings, ip, list_cmd)
+    stdout, _, code = await _ssh_run(
+        settings, ip, list_cmd, port=port, username=username
+    )
     if code != 0:
         return []
     ids = [x.strip() for x in stdout.splitlines() if x.strip()][:40]
     if not ids:
         return []
     id_args = " ".join(shlex.quote(i) for i in ids)
-    stdout, stderr, code = await _ssh_run(settings, ip, f"docker inspect {id_args}")
+    stdout, stderr, code = await _ssh_run(
+        settings, ip, f"docker inspect {id_args}", port=port, username=username
+    )
     if code != 0:
         detail = (stderr or stdout or "").strip() or f"exit {code}"
         raise DockerControlError(
@@ -622,7 +681,14 @@ async def fetch_compose_file(
             status_code=404,
         )
 
-    content = await _read_text_file(settings, ip, target)
+    _ip, port, user = (
+        resolve_parent_ssh(settings, snapshot, parent_id)
+        if ip
+        else (None, settings.docker_ssh_port, settings.docker_ssh_user)
+    )
+    content = await _read_text_file(
+        settings, ip, target, port=port, username=user
+    )
     return {
         "ok": True,
         "parent_id": parent_id,
@@ -672,7 +738,14 @@ async def save_compose_file(
             "Schreiben nur in deklarierte Compose-Dateien / Working-Dir erlaubt.",
             status_code=403,
         )
-    await _write_text_file(settings, ip, target, content, backup=True)
+    _ip, port, user = (
+        resolve_parent_ssh(settings, snapshot, parent_id)
+        if ip
+        else (None, settings.docker_ssh_port, settings.docker_ssh_user)
+    )
+    await _write_text_file(
+        settings, ip, target, content, backup=True, port=port, username=user
+    )
     return {
         "ok": True,
         "parent_id": parent_id,
@@ -688,7 +761,14 @@ async def save_compose_file(
     }
 
 
-async def _read_text_file(settings: Settings, ip: str | None, path: str) -> str:
+async def _read_text_file(
+    settings: Settings,
+    ip: str | None,
+    path: str,
+    *,
+    port: int | None = None,
+    username: str | None = None,
+) -> str:
     if ip is None:
 
         def _sync() -> str:
@@ -716,8 +796,8 @@ async def _read_text_file(settings: Settings, ip: str | None, path: str) -> str:
     try:
         async with asyncssh.connect(
             ip,
-            port=settings.docker_ssh_port,
-            username=settings.docker_ssh_user,
+            port=int(port or settings.docker_ssh_port),
+            username=(username or settings.docker_ssh_user),
             client_keys=[str(key)],
             known_hosts=None,
             connect_timeout=min(3.0, settings.docker_ssh_timeout + 1.0),
@@ -739,7 +819,9 @@ async def _read_text_file(settings: Settings, ip: str | None, path: str) -> str:
     except (OSError, asyncssh.Error) as exc:
         logger.info("SFTP read failed for %s:%s (%s) — trying cat", ip, path, exc)
         cmd = f"base64 -w0 -- {shlex.quote(path)} 2>/dev/null || base64 -- {shlex.quote(path)}"
-        stdout, stderr, code = await _ssh_run(settings, ip, cmd)
+        stdout, stderr, code = await _ssh_run(
+            settings, ip, cmd, port=port, username=username
+        )
         if code != 0:
             detail = (stderr or stdout or "").strip() or f"exit {code}"
             raise DockerControlError(
@@ -768,6 +850,8 @@ async def _write_text_file(
     content: str,
     *,
     backup: bool = True,
+    port: int | None = None,
+    username: str | None = None,
 ) -> None:
     data = content.encode("utf-8")
     if ip is None:
@@ -792,8 +876,8 @@ async def _write_text_file(
     try:
         async with asyncssh.connect(
             ip,
-            port=settings.docker_ssh_port,
-            username=settings.docker_ssh_user,
+            port=int(port or settings.docker_ssh_port),
+            username=(username or settings.docker_ssh_user),
             client_keys=[str(key)],
             known_hosts=None,
             connect_timeout=min(3.0, settings.docker_ssh_timeout + 1.0),
@@ -830,10 +914,273 @@ async def _write_text_file(
         f"{bak}printf '%s' {shlex.quote(b64)} | base64 -d > {shlex.quote(path)}.tmp "
         f"&& mv -f -- {shlex.quote(path)}.tmp {shlex.quote(path)}"
     )
-    stdout, stderr, code = await _ssh_run(settings, ip, cmd)
+    stdout, stderr, code = await _ssh_run(
+        settings, ip, cmd, port=port, username=username
+    )
     if code != 0:
         detail = (stderr or stdout or "").strip() or f"exit {code}"
         raise DockerControlError(
             f"Schreiben von {path} fehlgeschlagen: {detail}",
             status_code=502,
         )
+
+
+async def scan_image_updates(
+    settings: Settings,
+    *,
+    parent_id: str,
+    snapshot: TopologySnapshot | None,
+    project: str | None = None,
+) -> dict[str, Any]:
+    """Compare local RepoDigests vs remote manifests (no pull, no restart)."""
+    ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
+    if ip is None:
+        raise DockerControlError(
+            "Lokale Image-Prüfung ist nicht vorgesehen — bitte per SSH-Host scannen.",
+            status_code=400,
+        )
+    if not ssh_key_present(settings):
+        raise DockerControlError(
+            "SSH-Schlüssel fehlt — Image-Scan nicht möglich.",
+            status_code=503,
+        )
+
+    containers = [
+        c
+        for c in (snapshot.containers if snapshot else [])
+        if c.parent_id == parent_id
+        and (not project or (c.labels or {}).get("com.docker.compose.project") == project)
+    ]
+    if not containers:
+        return {
+            "ok": True,
+            "parent_id": parent_id,
+            "project": project,
+            "updates": [],
+            "count": 0,
+            "message": "Keine Container auf diesem Host.",
+        }
+
+    names = [c.name for c in containers if _SAFE_NAME.match(c.name)][:80]
+    if not names:
+        return {
+            "ok": True,
+            "parent_id": parent_id,
+            "updates": [],
+            "count": 0,
+            "message": "Keine prüfbaren Container-Namen.",
+        }
+
+    quoted = " ".join(shlex.quote(n) for n in names)
+    inspect_cmd = (
+        "docker inspect --format "
+        "'{{.Name}}|{{.Config.Image}}|{{json .RepoDigests}}' -- " + quoted
+    )
+    stdout, stderr, code = await _ssh_run(
+        settings, ip, inspect_cmd, port=port, username=user
+    )
+    if code != 0:
+        detail = (stderr or stdout or "").strip() or f"exit {code}"
+        raise DockerControlError(
+            f"docker inspect fehlgeschlagen: {detail}",
+            status_code=502,
+        )
+
+    rows: list[dict[str, Any]] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip().lstrip("/")
+        parts = line.split("|", 2)
+        if len(parts) < 3:
+            continue
+        cname, image, digests_raw = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        local_digests: list[str] = []
+        try:
+            parsed = json.loads(digests_raw)
+            if isinstance(parsed, list):
+                local_digests = [str(x) for x in parsed if x]
+        except json.JSONDecodeError:
+            local_digests = []
+        local_sha = ""
+        for d in local_digests:
+            if "@sha256:" in d:
+                local_sha = d.split("@", 1)[-1]
+                break
+        remote_sha = ""
+        newer = False
+        err = ""
+        if not image or image.startswith("sha256:"):
+            err = "Kein Tag — Vergleich nicht möglich."
+        else:
+            remote_cmd = (
+                "docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "
+                + shlex.quote(image)
+                + " 2>/dev/null || docker manifest inspect --verbose "
+                + shlex.quote(image)
+                + " 2>/dev/null | head -c 400"
+            )
+            r_out, r_err, r_code = await _ssh_run(
+                settings, ip, remote_cmd, port=port, username=user
+            )
+            text = (r_out or "").strip()
+            if r_code == 0 and "sha256:" in text:
+                for token in text.replace('"', " ").replace("'", " ").split():
+                    if token.startswith("sha256:"):
+                        remote_sha = token.split(",", 1)[0]
+                        break
+            if not remote_sha:
+                err = (
+                    (r_err or text or "Remote-Manifest nicht lesbar").strip()[:180]
+                )
+            elif local_sha and remote_sha and local_sha != remote_sha:
+                newer = True
+            elif not local_sha and remote_sha:
+                newer = True
+        stack = ""
+        for c in containers:
+            if c.name == cname or c.name.lstrip("/") == cname:
+                stack = (c.labels or {}).get("com.docker.compose.project") or ""
+                break
+        rows.append(
+            {
+                "name": cname,
+                "image": image,
+                "stack": stack,
+                "local_digest": local_sha,
+                "remote_digest": remote_sha,
+                "update_available": newer,
+                "error": err,
+            }
+        )
+
+    updates = [r for r in rows if r["update_available"]]
+    return {
+        "ok": True,
+        "parent_id": parent_id,
+        "project": project,
+        "containers": rows,
+        "updates": updates,
+        "count": len(updates),
+        "message": (
+            f"{len(updates)} Image-Update(s) verfügbar."
+            if updates
+            else "Keine neueren Images gefunden."
+        ),
+    }
+
+
+async def apply_image_updates(
+    settings: Settings,
+    *,
+    parent_id: str,
+    snapshot: TopologySnapshot | None,
+    project: str | None = None,
+    names: list[str] | None = None,
+    restart: bool = True,
+) -> dict[str, Any]:
+    """Pull newer images after explicit confirmation. Restart only if requested."""
+    ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
+    if ip is None:
+        raise DockerControlError(
+            "Lokales Image-Update nicht vorgesehen.",
+            status_code=400,
+        )
+    if not ssh_key_present(settings):
+        raise DockerControlError(
+            "SSH-Schlüssel fehlt — Pull nicht möglich.",
+            status_code=503,
+        )
+
+    safe_names = [validate_docker_name(n) for n in (names or []) if n]
+    project = (project or "").strip() or None
+    if project:
+        validate_docker_name(project, kind="Compose-Projekt")
+
+    logs: list[str] = []
+    if project:
+        cmd = f"docker compose -p {shlex.quote(project)} pull"
+        stdout, stderr, code = await _ssh_run(
+            settings, ip, cmd, port=port, username=user
+        )
+        logs.append((stdout or stderr or "").strip()[:4000])
+        if code != 0:
+            raise DockerControlError(
+                f"docker compose pull fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                status_code=502,
+            )
+        if restart:
+            rcmd = f"docker compose -p {shlex.quote(project)} up -d"
+            stdout, stderr, code = await _ssh_run(
+                settings, ip, rcmd, port=port, username=user
+            )
+            logs.append((stdout or stderr or "").strip()[:2000])
+            if code != 0:
+                raise DockerControlError(
+                    f"Stack-Neustart fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                    status_code=502,
+                )
+        return {
+            "ok": True,
+            "parent_id": parent_id,
+            "project": project,
+            "restarted": restart,
+            "log": "\n".join(x for x in logs if x),
+            "message": (
+                f"Stack „{project}“ Images geholt"
+                + (" und neu gestartet." if restart else " (ohne Neustart).")
+            ),
+        }
+
+    if not safe_names:
+        raise DockerControlError(
+            "Bitte Container-Namen oder ein Compose-Projekt angeben.",
+            status_code=400,
+        )
+    pulled: list[str] = []
+    for name in safe_names:
+        img_cmd = (
+            "docker inspect --format '{{.Config.Image}}' -- " + shlex.quote(name)
+        )
+        stdout, stderr, code = await _ssh_run(
+            settings, ip, img_cmd, port=port, username=user
+        )
+        image = (stdout or "").strip()
+        if code != 0 or not image:
+            raise DockerControlError(
+                f"Image für „{name}“ nicht lesbar: {(stderr or stdout or '').strip()[:180]}",
+                status_code=502,
+            )
+        stdout, stderr, code = await _ssh_run(
+            settings, ip, f"docker pull -- {shlex.quote(image)}", port=port, username=user
+        )
+        logs.append((stdout or stderr or "").strip()[:2000])
+        if code != 0:
+            raise DockerControlError(
+                f"docker pull {image} fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                status_code=502,
+            )
+        pulled.append(image)
+        if restart:
+            stdout, stderr, code = await _ssh_run(
+                settings,
+                ip,
+                f"docker restart -- {shlex.quote(name)}",
+                port=port,
+                username=user,
+            )
+            logs.append((stdout or stderr or "").strip()[:800])
+            if code != 0:
+                raise DockerControlError(
+                    f"Neustart „{name}“ fehlgeschlagen: {(stderr or stdout or '').strip()[:200]}",
+                    status_code=502,
+                )
+    return {
+        "ok": True,
+        "parent_id": parent_id,
+        "images": pulled,
+        "restarted": restart,
+        "log": "\n".join(x for x in logs if x),
+        "message": (
+            f"{len(pulled)} Image(s) geholt"
+            + (" und Container neu gestartet." if restart else " (ohne Neustart).")
+        ),
+    }

@@ -15,6 +15,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.config import Settings, get_settings
 from app.core import docker_control as docker_ctl
 from app.core.models import TopologyEntity, TopologySnapshot
+from app.core.ssh_endpoint import find_topology_entity, resolve_ssh_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -24,44 +25,38 @@ router = APIRouter()
 def resolve_ssh_target(
     snapshot: TopologySnapshot | None, target_id: str
 ) -> TopologyEntity:
-    """Resolve a topology guest or Proxmox node — never trusts client-supplied IPs."""
+    """Resolve a topology guest, host, or Proxmox node — never trusts client IPs."""
     target_id = unquote((target_id or "").strip())
     if not target_id:
         raise ValueError("Ziel-ID fehlt.")
     if snapshot is None:
         raise ValueError("Keine Topologie geladen — bitte zuerst Discovery ausführen.")
 
-    for g in snapshot.guests:
-        if g.id == target_id:
-            if not g.ip_addresses:
-                raise ValueError(f"Guest „{g.name}“ hat keine bekannte IP.")
-            return g
-
-    for n in snapshot.nodes:
-        if n.id == target_id or (
-            target_id.startswith("node:") and n.name == target_id.split(":", 1)[-1]
-        ):
-            if not n.ip_addresses:
-                raise ValueError(
-                    f"Node „{n.name}“ hat keine bekannte IP — "
-                    "Discovery aktualisieren oder PROXMOX_HOST prüfen."
-                )
-            return n
-
-    raise ValueError("Ziel nicht in der Topologie gefunden.")
+    entity = find_topology_entity(snapshot, target_id)
+    if entity is None:
+        raise ValueError("Ziel nicht in der Topologie gefunden.")
+    if not entity.ip_addresses:
+        raise ValueError(f"„{entity.name}“ hat keine bekannte IP.")
+    return entity
 
 
 # Backwards-compatible alias
 resolve_guest = resolve_ssh_target
 
 
-async def _ssh_connect(settings: Settings, ip: str) -> asyncssh.SSHClientConnection:
+async def _ssh_connect(
+    settings: Settings,
+    ip: str,
+    *,
+    port: int | None = None,
+    username: str | None = None,
+) -> asyncssh.SSHClientConnection:
     key = docker_ctl.ssh_key_path(settings)
     connect_timeout = min(8.0, max(3.0, settings.docker_ssh_timeout + 4.0))
     return await asyncssh.connect(
         ip,
-        port=settings.docker_ssh_port,
-        username=settings.docker_ssh_user,
+        port=int(port or settings.docker_ssh_port),
+        username=(username or settings.docker_ssh_user),
         client_keys=[str(key)],
         known_hosts=None,
         connect_timeout=connect_timeout,
@@ -113,17 +108,20 @@ async def ssh_terminal_ws(websocket: WebSocket, guest_id: str) -> None:
         await websocket.close(code=4001)
         return
 
-    ip = guest.ip_addresses[0]
+    ep = resolve_ssh_endpoint(store.snapshot, guest.id, settings)
+    ip = ep.ip if ep else guest.ip_addresses[0]
+    port = ep.port if ep else settings.docker_ssh_port
+    ssh_user = ep.username if ep else settings.docker_ssh_user
     cols, rows = 80, 24
 
     await websocket.send_text(
-        f"\r\n\x1b[90mVerbinde mit {guest.name} ({ip}) als {settings.docker_ssh_user}…\x1b[0m\r\n"
+        f"\r\n\x1b[90mVerbinde mit {guest.name} ({ip}) als {ssh_user}…\x1b[0m\r\n"
     )
 
     conn: asyncssh.SSHClientConnection | None = None
     process: asyncssh.SSHClientProcess | None = None
     try:
-        conn = await _ssh_connect(settings, ip)
+        conn = await _ssh_connect(settings, ip, port=port, username=ssh_user)
         process = await conn.create_process(
             term_type="xterm-256color",
             term_size=(cols, rows),

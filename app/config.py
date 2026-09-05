@@ -72,6 +72,10 @@ class Settings(BaseSettings):
         return self.data_dir / "app.db"
 
     @property
+    def inventory_db_path(self) -> Path:
+        return self.data_dir / "inventory.db"
+
+    @property
     def proxmox_configured(self) -> bool:
         has_auth = bool(self.proxmox_token_secret) or bool(self.proxmox_password)
         return bool(self.proxmox_host) and has_auth

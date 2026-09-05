@@ -13,8 +13,8 @@ Scannt und spielt Linux-Updates auf **Proxmox-Guests (LXC/QEMU)** und **manuell 
 
 ## UI
 
-- `/modules/patcher` — Ziele, Scan, Apply
-- `/modules/patcher/hosts` — manuelle Hosts
+- `/modules/patcher` — Ziele, Scan, Apply, Docker-Images (nur nach Bestätigung)
+- `/modules/patcher/hosts` — manuelle Hosts (erscheinen unter Topologie → Linux)
 - `/modules/patcher/schedule` — Scan-Cron
 - `/modules/patcher/history` — Verlauf
 
@@ -25,6 +25,8 @@ Scannt und spielt Linux-Updates auf **Proxmox-Guests (LXC/QEMU)** und **manuell 
 | GET | `/api/modules/patcher/status` | Status |
 | GET | `/api/modules/patcher/targets` | Guests + Manual |
 | POST | `/api/modules/patcher/scan` | Scan-Job |
+| GET | `/api/modules/patcher/jobs?active=1` | Laufende Scan/Apply-Jobs (Reconnect) |
+| GET | `/api/modules/patcher/jobs/{id}` | Job-Fortschritt |
 | POST | `/api/modules/patcher/apply` | Apply-Job (`confirm`) |
 | POST | `/api/modules/patcher/summarize` | LLM nachträglich |
 | CRUD | `/api/modules/patcher/hosts` | Manuelle Hosts |

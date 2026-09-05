@@ -2,7 +2,7 @@
 
 Phase-1-Foundation: Zero-Config Discovery für **Proxmox** (Nodes, LXC, QEMU) und **Docker** (lokaler Socket + SSH), unified Topology-Cache, erweiterbares Modul-Framework — als **PWA** (installierbar, mobil-tauglich).
 
-Spätere / vorhandene Module (ohne Core-Rewrite): AI-Driven Patch-Management (`modules/patcher/`), Smart Backup Integrity Verifier (`modules/backup_verifier/`).
+Spätere / vorhandene Module (ohne Core-Rewrite): AI-Driven Patch-Management (`modules/patcher/`), Smart Backup Integrity Verifier (`modules/backup_verifier/`), Erreichbarkeit/TLS (`modules/health/`).
 
 ## Stack
 

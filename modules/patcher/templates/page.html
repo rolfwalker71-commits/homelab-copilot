@@ -9,6 +9,7 @@
       <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Patch-Management</h1>
       <p class="mt-2 max-w-3xl text-[var(--muted)]">
         Ausstehende Updates auf Proxmox-Guests und manuellen Linux-Hosts scannen, bewerten und mit Bestätigung einspielen.
+        Docker-Images prüfen und nur nach Bestätigung pullen.
       </p>
     </div>
     <div class="flex flex-wrap items-center gap-2 shrink-0 pt-1">
@@ -478,22 +479,22 @@
     startScanAll();
   });
 
-  // Resume UI if a scan-all is already running (e.g. daily job or refresh mid-run)
-  fetch(API + '/scan-all/status')
-    .then(function (r) { return r.json(); })
-    .then(function (st) {
-      const btn = document.getElementById('btn-scan-all');
+  async function resumeInProgress() {
+    const btn = document.getElementById('btn-scan-all');
+    try {
+      const st = await (await fetch(API + '/scan-all/status')).json();
       if (btn) btn.disabled = false;
       if (st.running) {
         setBusy(true);
         setScanAllBusy(true);
         showProgress('scan', 'alle Hosts');
-        pollScanAll().then(function () {
-          setBusy(false);
-          setScanAllBusy(false);
-          loadTargets();
-        });
-      } else if (st.last_summary && st.finished_at) {
+        await pollScanAll();
+        setBusy(false);
+        setScanAllBusy(false);
+        await loadTargets();
+        return;
+      }
+      if (st.last_summary && st.finished_at) {
         const hint = document.getElementById('scan-all-hint');
         if (hint) {
           hint.textContent =
@@ -503,11 +504,28 @@
               : '');
         }
       }
-    })
-    .catch(function () {
-      const btn = document.getElementById('btn-scan-all');
+      const jr = await (await fetch(API + '/jobs?active=1')).json();
+      const jobs = (jr.jobs || []).filter(function (j) {
+        return !j.done && (j.kind === 'scan' || j.kind === 'apply');
+      });
+      if (!jobs.length || busy) return;
+      const job = jobs[0];
+      const card = document.querySelector('.entity-card[data-id="' + job.target_id + '"]');
+      const nameEl = card && card.querySelector('h3');
+      const name = (nameEl && nameEl.textContent) || job.target_id;
+      setBusy(true);
+      showProgress(job.kind, name, job.target_id);
+      await pollJob(job.job_id || job.id);
+      setBusy(false);
+      const saved = lastCardJob;
+      await loadTargets();
+      if (saved) restoreCardFinished(saved);
+      activeTargetId = null;
+      progressScope = 'global';
+    } catch (_) {
       if (btn) btn.disabled = false;
-    });
+    }
+  }
 
   function renderTargets(targets) {
     const root = document.getElementById('target-list');
@@ -555,6 +573,7 @@
           llm +
           '<div class="mt-3 flex flex-wrap gap-2">' +
             '<button type="button" class="btn btn-sm btn-primary btn-scan" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">Scannen</button>' +
+            '<button type="button" class="btn btn-sm btn-ghost btn-images" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">Images</button>' +
             '<button type="button" class="btn btn-sm btn-ghost btn-apply" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '"' +
               (pending ? '' : ' disabled') + '>Einspielen</button>' +
             (t.last_scan && t.last_scan.id
@@ -769,6 +788,64 @@
     });
   }
 
+  async function scanHostImages(parentId, hostName, btn) {
+    if (!parentId) return;
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/api/docker/image-updates?parent_id=' + encodeURIComponent(parentId));
+      const data = await r.json().catch(function () { return {}; });
+      if (!r.ok) throw new Error(data.detail || 'Image-Scan fehlgeschlagen');
+      const updates = data.updates || [];
+      if (!updates.length) {
+        finishProgress({
+          ok: true,
+          phase: 'Images',
+          percent: 100,
+          message: data.message || ('Keine neueren Images auf ' + (hostName || parentId)),
+        });
+        progressRoot().classList.remove('hidden');
+        return;
+      }
+      const lines = updates.map(function (u) {
+        return (u.stack ? u.stack + '/' : '') + u.name + ' · ' + (u.image || '');
+      }).join('\n');
+      if (!confirm(
+        (data.count || updates.length) + ' Image-Update(s) auf ' + (hostName || parentId) + ':\n\n' +
+        lines + '\n\nJetzt pullen und Container/Stack neu starten?'
+      )) return;
+      const apply = await fetch('/api/docker/image-updates/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parent_id: parentId,
+          restart: true,
+          confirm: true,
+          names: updates.map(function (u) { return u.name; }),
+        }),
+      });
+      const out = await apply.json().catch(function () { return {}; });
+      if (!apply.ok) throw new Error(out.detail || 'Pull fehlgeschlagen');
+      finishProgress({
+        ok: true,
+        phase: 'Images',
+        percent: 100,
+        message: out.message || 'Images aktualisiert',
+      });
+      progressRoot().classList.remove('hidden');
+    } catch (e) {
+      finishProgress({
+        ok: false,
+        phase: 'Images',
+        percent: 100,
+        message: String(e.message || e),
+        error: String(e.message || e),
+      });
+      progressRoot().classList.remove('hidden');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   document.getElementById('detail-close').addEventListener('click', function () {
     document.getElementById('detail-dialog').close();
   });
@@ -780,6 +857,10 @@
       const box = t.closest('[data-host-job]');
       if (box) box.remove();
       lastCardJob = null;
+      return;
+    }
+    if (t.classList.contains('btn-images')) {
+      scanHostImages(t.dataset.id, t.dataset.name, t);
       return;
     }
     if (busy) return;
@@ -806,10 +887,14 @@
     }
   });
 
-  loadStatus().catch(function () {});
-  loadTargets().catch(function (e) {
-    document.getElementById('target-list').innerHTML =
-      '<p class="text-sm" style="color:var(--danger,#c44)">' + esc(String(e)) + '</p>';
+  Promise.all([
+    loadStatus().catch(function () {}),
+    loadTargets().catch(function (e) {
+      document.getElementById('target-list').innerHTML =
+        '<p class="text-sm" style="color:var(--danger,#c44)">' + esc(String(e)) + '</p>';
+    }),
+  ]).then(function () {
+    return resumeInProgress();
   });
 })();
 </script>

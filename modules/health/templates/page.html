@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{% block title %}Checks — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Modul · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Erreichbarkeit</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)]">
+    HTTP(S)-Checks und TLS-Ablauf. Push nur bei Zustandswechsel (Down) und Zertifikat ≤14 Tage (einmal pro Tag).
+    Intervall: {{ poll_interval }}s.
+  </p>
+</section>
+
+<p id="health-msg" class="mb-3 text-sm text-[var(--muted)]" role="status"></p>
+
+<article class="surface p-4 sm:p-5 mb-6 animate-in">
+  <h2 class="font-display text-lg font-bold">URL hinzufügen / bearbeiten</h2>
+  <form id="check-form" class="mt-4 grid gap-3 sm:grid-cols-2">
+    <input type="hidden" id="check-id" />
+    <div>
+      <label class="label" for="check-label">Name</label>
+      <input id="check-label" class="field" required maxlength="128" placeholder="z. B. Paperless" />
+    </div>
+    <div>
+      <label class="label" for="check-url">URL</label>
+      <input id="check-url" class="field" required maxlength="500" placeholder="https://paperless.home" />
+    </div>
+    <div class="sm:col-span-2 flex flex-wrap items-center gap-3">
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" id="check-enabled" class="h-4 w-4" checked />
+        Aktiv
+      </label>
+      <button type="submit" class="btn btn-primary">Speichern</button>
+      <button type="button" id="btn-reset" class="btn btn-ghost">Zurücksetzen</button>
+      <button type="button" id="btn-run-all" class="btn btn-ghost">Jetzt prüfen</button>
+    </div>
+  </form>
+</article>
+
+<article class="surface p-4 sm:p-5 mb-6 animate-in" id="push-prefs-card">
+  <h2 class="font-display text-lg font-bold">Push-Benachrichtigungen</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">Wähle, worüber du informiert wirst. Backup-OK ist standardmäßig aus.</p>
+  <form id="prefs-form" class="mt-4 grid gap-2 sm:grid-cols-2">
+    <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-backup_success" class="h-4 w-4" /> Backup erfolgreich</label>
+    <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-backup_failure" class="h-4 w-4" /> Backup fehlgeschlagen</label>
+    <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-backup_partial" class="h-4 w-4" /> Backup teilweise</label>
+    <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-patch_findings" class="h-4 w-4" /> Patch-Funde / Fehler</label>
+    <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-health_down" class="h-4 w-4" /> Host down / Zertifikat</label>
+    <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-disk_high" class="h-4 w-4" /> Disk &gt; 90&nbsp;%</label>
+  </form>
+  <button type="button" id="btn-save-prefs" class="btn btn-primary mt-3">Einstellungen speichern</button>
+</article>
+
+<div id="check-list" class="space-y-3 mb-8 animate-in">
+  <p class="text-sm text-[var(--muted)]">Laden…</p>
+</div>
+
+<article class="surface p-4 sm:p-5 animate-in">
+  <h2 class="font-display text-lg font-bold">Vorschläge aus der Topologie</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">Veröffentlichte HTTP(S)-Ports und NPM — einmal antippen zum Übernehmen.</p>
+  <div id="suggest-list" class="mt-3 space-y-2 text-sm text-[var(--muted)]">Laden…</div>
+</article>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/health';
+  const PREF_KEYS = ['backup_success','backup_failure','backup_partial','patch_findings','health_down','disk_high'];
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function msg(text, ok) {
+    const el = document.getElementById('health-msg');
+    el.textContent = text || '';
+    el.style.color = ok === false ? 'var(--danger, #c44)' : '';
+  }
+  function chip(status) {
+    if (status === 'up') return '<span class="chip chip-running">erreichbar</span>';
+    if (status === 'down') return '<span class="chip chip-stopped">down</span>';
+    return '<span class="chip chip-unknown">unbekannt</span>';
+  }
+  function resetForm() {
+    document.getElementById('check-id').value = '';
+    document.getElementById('check-label').value = '';
+    document.getElementById('check-url').value = '';
+    document.getElementById('check-enabled').checked = true;
+  }
+  function fillForm(c) {
+    document.getElementById('check-id').value = c.id;
+    document.getElementById('check-label').value = c.label || '';
+    document.getElementById('check-url').value = c.url || '';
+    document.getElementById('check-enabled').checked = !!c.enabled;
+  }
+
+  async function loadChecks() {
+    const r = await fetch(API + '/checks');
+    const d = await r.json();
+    const checks = d.checks || [];
+    const root = document.getElementById('check-list');
+    if (!checks.length) {
+      root.innerHTML = '<p class="text-sm text-[var(--muted)]">Noch keine Checks.</p>';
+      return;
+    }
+    root.innerHTML = checks.map(function (c) {
+      const cert = c.cert_days_left != null
+        ? (c.cert_days_left <= 14
+          ? '<span class="chip chip-stopped">Zertifikat ' + esc(c.cert_days_left) + 'd</span>'
+          : '<span class="text-xs text-[var(--muted)]">Zertifikat ' + esc(c.cert_days_left) + ' Tage</span>')
+        : '';
+      return (
+        '<article class="entity-card">' +
+          '<div class="flex flex-wrap justify-between gap-2">' +
+            '<div class="min-w-0"><h3 class="font-semibold break-words leading-snug">' + esc(c.label) + '</h3>' +
+            '<p class="text-xs text-[var(--muted)] break-words">' + esc(c.url) +
+            (c.source === 'auto' ? ' · automatisch' : '') +
+            (c.enabled ? '' : ' · deaktiviert') + '</p>' +
+            '<p class="mt-1 text-xs text-[var(--muted)]">' +
+              (c.last_checked_at ? 'Zuletzt: ' + esc(c.last_checked_at) : 'Noch nicht geprüft') +
+              (c.last_http_code ? ' · HTTP ' + esc(c.last_http_code) : '') +
+              (c.last_error ? ' · ' + esc(c.last_error) : '') +
+            '</p></div>' +
+            '<div class="flex flex-wrap gap-2 items-start">' + chip(c.last_status) + cert + '</div>' +
+          '</div>' +
+          '<div class="mt-3 flex flex-wrap gap-2">' +
+            '<button type="button" class="btn btn-sm btn-ghost btn-run">Prüfen</button>' +
+            '<button type="button" class="btn btn-sm btn-ghost btn-edit">Bearbeiten</button>' +
+            '<button type="button" class="btn btn-sm btn-ghost btn-del">Löschen</button>' +
+          '</div>' +
+        '</article>'
+      );
+    }).join('');
+    root.querySelectorAll('.entity-card').forEach(function (card, i) {
+      const c = checks[i];
+      card.querySelector('.btn-edit').addEventListener('click', function () {
+        fillForm(c); window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+      card.querySelector('.btn-del').addEventListener('click', async function () {
+        if (!confirm('Check „' + c.label + '“ löschen?')) return;
+        await fetch(API + '/checks/' + c.id, { method: 'DELETE' });
+        loadChecks();
+      });
+      card.querySelector('.btn-run').addEventListener('click', async function () {
+        msg('Prüfe…');
+        const rr = await fetch(API + '/checks/' + c.id + '/run', { method: 'POST' });
+        const dd = await rr.json();
+        if (!rr.ok) { msg(dd.detail || 'Fehler', false); return; }
+        msg('Aktualisiert', true);
+        loadChecks();
+      });
+    });
+  }
+
+  async function loadSuggestions() {
+    const r = await fetch(API + '/suggestions');
+    const d = await r.json();
+    const items = d.suggestions || [];
+    const root = document.getElementById('suggest-list');
+    if (!items.length) {
+      root.textContent = 'Keine veröffentlichten HTTP(S)-Ports gefunden.';
+      return;
+    }
+    root.innerHTML = items.map(function (s, i) {
+      return '<button type="button" class="btn btn-ghost btn-sm mr-2 mb-2 btn-sug" data-i="' + i + '"' +
+        (s.exists ? ' disabled' : '') + '>' +
+        esc(s.label) + ' · ' + esc(s.url) + (s.exists ? ' (vorhanden)' : '') + '</button>';
+    }).join('');
+    root.querySelectorAll('.btn-sug').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const s = items[Number(btn.getAttribute('data-i'))];
+        document.getElementById('check-label').value = s.label;
+        document.getElementById('check-url').value = s.url;
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+    });
+  }
+
+  document.getElementById('check-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    const idVal = document.getElementById('check-id').value;
+    const body = {
+      id: idVal ? Number(idVal) : null,
+      label: document.getElementById('check-label').value.trim(),
+      url: document.getElementById('check-url').value.trim(),
+      enabled: document.getElementById('check-enabled').checked,
+    };
+    const r = await fetch(API + '/checks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) { msg(d.detail || 'Speichern fehlgeschlagen', false); return; }
+    msg('Gespeichert', true);
+    resetForm();
+    loadChecks();
+    loadSuggestions();
+  });
+  document.getElementById('btn-reset').addEventListener('click', resetForm);
+  document.getElementById('btn-run-all').addEventListener('click', async function () {
+    msg('Prüfe alle…');
+    const r = await fetch(API + '/run-all', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) { msg(d.detail || 'Fehler', false); return; }
+    msg((d.checked || 0) + ' geprüft, ' + (d.down || 0) + ' down', true);
+    loadChecks();
+  });
+
+  async function loadPrefs() {
+    const r = await fetch('/api/push/prefs');
+    const d = await r.json();
+    const prefs = d.prefs || {};
+    PREF_KEYS.forEach(function (k) {
+      const el = document.getElementById('pref-' + k);
+      if (el) el.checked = !!prefs[k];
+    });
+  }
+  document.getElementById('btn-save-prefs').addEventListener('click', async function () {
+    const body = {};
+    PREF_KEYS.forEach(function (k) {
+      body[k] = !!document.getElementById('pref-' + k).checked;
+    });
+    const r = await fetch('/api/push/prefs', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    msg(r.ok ? (d.message || 'Gespeichert') : (d.detail || 'Fehler'), r.ok);
+  });
+
+  loadChecks().catch(function (e) { msg(String(e), false); });
+  loadSuggestions().catch(function () {});
+  loadPrefs().catch(function () {});
+})();
+</script>
+{% endblock %}

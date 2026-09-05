@@ -2,6 +2,40 @@
 {% block title %}Topologie — {{ app_name }}{% endblock %}
 {% from "_icons.html" import ico %}
 
+{% macro inventory_section(entity_id) -%}
+<section class="topo-inventory" aria-labelledby="inv-{{ entity_id }}">
+  <div class="topo-node-section-head">
+    <h4 id="inv-{{ entity_id }}" class="topo-node-section-title">Inventar / Doku</h4>
+    <p class="topo-node-section-hint">Lokale Notizen, Extra-Tags und Links — unabhängig von Proxmox-Tags</p>
+  </div>
+  <form class="topo-inventory-form" data-inventory="{{ entity_id }}">
+    <label class="label" for="inv-notes-{{ entity_id }}">Notizen</label>
+    <textarea id="inv-notes-{{ entity_id }}" class="field topo-inventory-notes" rows="3" maxlength="8000" placeholder="Zweck, Zugänge, Besonderheiten…"></textarea>
+    <label class="label" for="inv-tags-{{ entity_id }}">Extra-Tags (Komma oder Semikolon)</label>
+    <input id="inv-tags-{{ entity_id }}" class="field" data-inv-tags maxlength="400" placeholder="prod, monitoring" />
+    <p class="label">Links</p>
+    <div class="topo-inventory-links" data-inv-links></div>
+    <button type="button" class="btn btn-ghost btn-sm" data-inv-add-link>Link hinzufügen</button>
+    <div class="mt-3 flex flex-wrap gap-2">
+      <button type="submit" class="btn btn-primary btn-sm">Doku speichern</button>
+      <p class="text-sm text-[var(--muted)]" data-inv-status role="status"></p>
+    </div>
+  </form>
+</section>
+{%- endmacro %}
+
+{% macro snapshots_section(guest_id) -%}
+<section class="topo-snapshots" aria-labelledby="snap-{{ guest_id }}">
+  <div class="topo-node-section-head">
+    <h4 id="snap-{{ guest_id }}" class="topo-node-section-title">Snapshots</h4>
+    <p class="topo-node-section-hint">Proxmox, nur Anzeige</p>
+  </div>
+  <div class="topo-snapshot-list" data-guest-snapshots="{{ guest_id }}">
+    <p class="topo-node-loading text-sm text-[var(--muted)]">Snapshots werden geladen…</p>
+  </div>
+</section>
+{%- endmacro %}
+
 {% macro guest_tag_chips(g) -%}
 {% set tags = (g.meta or {}).get('tags_list') %}
 {% if not tags %}
@@ -111,7 +145,12 @@
     {% elif item.source == 'compose' %}
     <span class="topo-stack-badge" title="Docker Compose Projekt">Compose</span>
     {% endif %}
-    {% if item.compose_project and item.containers and item.containers[0].parent_id %}
+    {% if item.containers and item.containers[0].parent_id %}
+    <button type="button" class="btn btn-ghost btn-xs"
+      data-image-scan
+      data-parent-id="{{ item.containers[0].parent_id }}"
+      {% if item.compose_project %}data-project="{{ item.compose_project }}"{% endif %}
+      title="Neuere Images prüfen">Images</button>
     <button type="button" class="btn btn-ghost btn-xs topo-stack-restart"
       data-compose-restart
       data-parent-id="{{ item.containers[0].parent_id }}"
@@ -460,6 +499,7 @@
         <p class="topo-node-loading text-sm text-[var(--muted)]">Storage wird geladen…</p>
       </div>
     </section>
+    {{ inventory_section(node_block.id or ('node:' ~ node_block.name)) }}
   </div>
 </article>
 {%- endmacro %}
@@ -623,6 +663,54 @@
       </div>
       {% endfor %}
 
+      {% if topology.linux_hosts %}
+      <div class="topo-rail-group" data-rail-node="__linux__">
+        <div class="topo-rail-group-head">
+          <button type="button"
+            class="topo-rail-chevron-btn"
+            data-rail-toggle
+            aria-expanded="true"
+            title="Hosts ein- oder ausklappen"
+            aria-label="Linux-Hosts ein- oder ausklappen">
+            <svg class="topo-rail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+              <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <span class="topo-rail-node-static">
+            <svg class="topo-rail-node-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+              <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+            </svg>
+            <span class="topo-rail-group-name">Linux</span>
+          </span>
+        </div>
+        <ul class="topo-rail-list" role="listbox" aria-label="Manuelle Linux-Hosts">
+          {% for row in topology.linux_hosts %}
+          {% set g = row.guest %}
+          <li>
+            <button type="button"
+              class="topo-rail-item"
+              role="option"
+              aria-selected="false"
+              aria-label="{{ g.name }}, Status {{ g.status.value }}"
+              title="{{ g.name }} · {{ g.status.value }}"
+              data-select-guest="{{ g.id }}"
+              data-filter-text="{{ g.name }} {{ g.ip_addresses | join(' ') }} linux host">
+              <span class="topo-rail-status topo-rail-status-{{ g.status.value }}" aria-hidden="true"></span>
+              <span class="topo-rail-item-body">
+                <span class="topo-rail-item-name break-words">{{ g.name }}</span>
+                <span class="topo-rail-item-sub">
+                  {% if g.ip_addresses %}{{ g.ip_addresses[0] }}{% else %}Linux{% endif %}
+                  {% if row.docker_count %} · {{ row.docker_count }} Docker{% endif %}
+                </span>
+              </span>
+            </button>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
       {% if topology.orphan_count %}
       <div class="topo-rail-group" data-rail-node="__orphans__">
         <div class="topo-rail-group-head">
@@ -747,6 +835,9 @@
             </div>
           </section>
 
+          {{ snapshots_section(g.id) }}
+          {{ inventory_section(g.id) }}
+
           {% if row.docker_count %}
           <div class="topo-app-grid">
             {{ docker_panel(row.docker_stacks, row.docker_singles, g.id) }}
@@ -757,6 +848,76 @@
         </div>
       </article>
       {% endfor %}
+      {% endfor %}
+
+      {% for row in topology.linux_hosts %}
+      {% set g = row.guest %}
+      <article class="topo-detail-panel status-{{ g.status.value }}" data-status="{{ g.status.value }}" data-guest-panel="{{ g.id }}" data-guest-detail data-guest-detail-key="{{ g.id }}" data-entity-kind="host" hidden>
+        <header class="topo-detail-head row-status-{{ g.status.value }}"
+          title="{{ g.name }} · {{ g.status.value }}"
+          aria-label="{{ g.name }}, Status {{ g.status.value }}">
+          <div class="topo-detail-lead">
+            <button type="button"
+              class="topo-detail-toggle"
+              data-guest-detail-toggle
+              aria-expanded="true"
+              title="{{ g.name }} ein- oder ausklappen"
+              aria-label="Host {{ g.name }} ein- oder ausklappen">
+              <svg class="topo-detail-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+                <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <svg class="topo-detail-kind-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false" title="Linux">
+                <rect x="2.5" y="1.5" width="11" height="13" rx="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M4.5 5h7M4.5 8h7M4.5 11h7" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <div class="topo-detail-heading">
+              <div class="topo-detail-title-row">
+                <h3 class="topo-detail-name break-words">{{ g.name }}</h3>
+              </div>
+              <p class="topo-detail-meta">
+                Linux-Host
+                {% if g.ip_addresses %} · {{ g.ip_addresses | join(', ') }}{% endif %}
+                {% if (g.meta or {}).get('ssh_user') %} · SSH {{ (g.meta or {}).get('ssh_user') }}{% endif %}
+                {% if (g.meta or {}).get('ssh_port') %} · Port {{ (g.meta or {}).get('ssh_port') }}{% endif %}
+                {% if row.docker_count %}
+                <span class="topo-sep" aria-hidden="true">·</span>
+                <span class="topo-node-docker-n">{{ row.docker_count }} Docker</span>
+                {% endif %}
+              </p>
+              <p class="topo-detail-meta" data-host-facts-line="{{ g.id }}">OS / Uptime / Disk werden per SSH geladen…</p>
+            </div>
+          </div>
+          <div class="topo-detail-actions">
+            {% if g.ip_addresses %}
+            <button type="button" class="btn btn-primary btn-sm"
+              data-ssh-terminal
+              data-guest-id="{{ g.id }}"
+              data-guest-name="{{ g.name }}"
+              data-guest-ip="{{ g.ip_addresses[0] }}"
+              title="SSH-Terminal">
+              Terminal
+            </button>
+            {% endif %}
+            <button type="button" class="btn btn-ghost btn-sm"
+              data-image-scan
+              data-parent-id="{{ g.id }}"
+              title="Docker-Images prüfen">
+              Images prüfen
+            </button>
+          </div>
+        </header>
+        <div class="topo-detail-body">
+          {{ inventory_section(g.id) }}
+          {% if row.docker_count %}
+          <div class="topo-app-grid">
+            {{ docker_panel(row.docker_stacks, row.docker_singles, g.id) }}
+          </div>
+          {% else %}
+          <p class="topo-detail-none">Keine Docker-Container auf diesem Host entdeckt.</p>
+          {% endif %}
+        </div>
+      </article>
       {% endfor %}
 
       {% if topology.orphan_count %}
@@ -1545,12 +1706,132 @@
       .replace(/"/g, '&quot;');
   }
 
+  function renderSnapshots(listEl, data) {
+    if (!listEl) return;
+    if (data && data.acl_denied) {
+      listEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">' +
+        escapeHtml(data.message || 'Keine Berechtigung für Snapshots.') + '</p>';
+      return;
+    }
+    const snaps = (data && data.snapshots) || [];
+    const useful = snaps.filter((s) => s && s.name && s.name !== 'current');
+    if (!useful.length) {
+      listEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Keine Snapshots.</p>';
+      return;
+    }
+    listEl.innerHTML = useful.map((s) => (
+      '<div class="topo-storage-row">' +
+        '<div class="topo-storage-top">' +
+          '<span class="topo-storage-name break-words">' + escapeHtml(s.name) + '</span>' +
+          '<span class="topo-storage-pct">' + escapeHtml(s.date || '—') + '</span>' +
+        '</div>' +
+        (s.description
+          ? '<div class="topo-storage-meta">' + escapeHtml(s.description) + '</div>'
+          : '') +
+      '</div>'
+    )).join('');
+  }
+
+  function renderInventory(form, data) {
+    if (!form) return;
+    const notes = form.querySelector('textarea');
+    const tags = form.querySelector('[data-inv-tags]');
+    const linksRoot = form.querySelector('[data-inv-links]');
+    if (notes) notes.value = (data && data.notes) || '';
+    if (tags) tags.value = ((data && data.extra_tags) || []).join(', ');
+    if (linksRoot) {
+      const links = (data && data.links) || [];
+      linksRoot.innerHTML = '';
+      links.forEach((l) => addInventoryLinkRow(linksRoot, l.label, l.url));
+      if (!links.length) addInventoryLinkRow(linksRoot, '', '');
+    }
+  }
+
+  function addInventoryLinkRow(root, label, url) {
+    const row = document.createElement('div');
+    row.className = 'topo-inv-link-row';
+    row.innerHTML =
+      '<input class="field" data-inv-link-label maxlength="120" placeholder="Bezeichnung" value="' + escapeHtml(label || '') + '" />' +
+      '<input class="field" data-inv-link-url maxlength="500" placeholder="https://…" value="' + escapeHtml(url || '') + '" />' +
+      '<button type="button" class="btn btn-ghost btn-sm" data-inv-link-del aria-label="Link entfernen">Entfernen</button>';
+    root.appendChild(row);
+  }
+
+  async function loadInventory(entityId) {
+    const form = document.querySelector('[data-inventory="' + entityId + '"]');
+    if (!form) return;
+    try {
+      const res = await fetch('/api/inventory/' + encodeURIComponent(entityId));
+      if (!res.ok) return;
+      renderInventory(form, await res.json());
+    } catch (_) {}
+  }
+
+  async function saveInventory(form) {
+    const entityId = form.getAttribute('data-inventory');
+    const status = form.querySelector('[data-inv-status]');
+    const notes = form.querySelector('textarea');
+    const tags = form.querySelector('[data-inv-tags]');
+    const links = Array.from(form.querySelectorAll('.topo-inv-link-row')).map((row) => ({
+      label: (row.querySelector('[data-inv-link-label]') || {}).value || '',
+      url: (row.querySelector('[data-inv-link-url]') || {}).value || '',
+    })).filter((l) => (l.url || '').trim());
+    if (status) status.textContent = 'Speichere…';
+    try {
+      const res = await fetch('/api/inventory/' + encodeURIComponent(entityId), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          notes: notes ? notes.value : '',
+          extra_tags: tags
+          ? tags.value.split(/[,;]/).map((s) => s.trim()).filter(Boolean)
+          : [],
+          links: links,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Speichern fehlgeschlagen');
+      if (status) status.textContent = 'Gespeichert' + (data.updated_at ? ' · ' + data.updated_at : '');
+    } catch (e) {
+      if (status) status.textContent = String(e.message || e);
+    }
+  }
+
+  async function loadHostFacts(hostId) {
+    const line = document.querySelector('[data-host-facts-line="' + hostId + '"]');
+    if (!line) return;
+    try {
+      const res = await fetch('/api/hosts/' + encodeURIComponent(hostId) + '/facts');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        line.textContent = data.detail || 'SSH-Fakten nicht verfügbar.';
+        return;
+      }
+      const bits = [];
+      if (data.os) bits.push(data.os);
+      if (data.kernel) bits.push(data.kernel);
+      if (data.uptime != null) bits.push('Uptime ' + formatUptimeJs(data.uptime));
+      if (data.disk && data.disk.pct != null) {
+        bits.push('Disk ' + data.disk.pct + '% (' + formatBytesJs(data.disk.used) + ' / ' + formatBytesJs(data.disk.total) + ')');
+      }
+      line.textContent = bits.join(' · ') || 'Keine Fakten.';
+    } catch (e) {
+      line.textContent = String(e.message || e);
+    }
+  }
+
   async function loadGuestSparks(guestId) {
     if (!guestId || guestId.startsWith('__')) return;
+    loadInventory(guestId);
+    if (guestId.startsWith('manual:')) {
+      loadHostFacts(guestId);
+      return;
+    }
     const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
     const metrics = panel && panel.querySelector('[data-guest-metrics]');
     const storageEl = panel && panel.querySelector('[data-guest-storage]');
-    if (!metrics && !storageEl) return;
+    const snapEl = panel && panel.querySelector('[data-guest-snapshots]');
+    if (!metrics && !storageEl && !snapEl) return;
     if (sparkAbort) sparkAbort.abort();
     sparkAbort = new AbortController();
     const signal = sparkAbort.signal;
@@ -1571,9 +1852,10 @@
       return res.json();
     };
 
-    const [rrdRes, storageRes] = await Promise.allSettled([
+    const [rrdRes, storageRes, snapRes] = await Promise.allSettled([
       fetchJson('/api/guests/' + enc + '/rrd?timeframe=hour'),
       fetchJson('/api/guests/' + enc + '/storage'),
+      fetchJson('/api/guests/' + enc + '/snapshots'),
     ]);
 
     if (metrics) {
@@ -1602,11 +1884,21 @@
         storageEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Live-Daten fehlgeschlagen.</p>';
       }
     }
+
+    if (typeof snapRes !== 'undefined' && snapRes.status === 'fulfilled') {
+      renderSnapshots(snapEl, snapRes.value);
+    } else if (typeof snapRes !== 'undefined' && !(snapRes.reason && snapRes.reason.name === 'AbortError')) {
+      if (snapEl) {
+        snapEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Snapshots nicht verfügbar.</p>';
+      }
+    }
   }
 
   async function loadNodeLive(nodeName) {
     if (!nodeName || nodeName.startsWith('__')) return;
     const panel = document.querySelector('[data-node-panel="' + String(nodeName).replace(/"/g, '\\"') + '"]');
+    const invForm = panel && panel.querySelector('[data-inventory]');
+    if (invForm) loadInventory(invForm.getAttribute('data-inventory'));
     if (!panel) return;
     if (sparkAbort) sparkAbort.abort();
     sparkAbort = new AbortController();
@@ -2109,7 +2401,77 @@
         sshBtn.getAttribute('data-guest-name'),
         sshBtn.getAttribute('data-guest-ip')
       );
+      return;
+    }
+    const imgBtn = e.target.closest('[data-image-scan]');
+    if (imgBtn) {
+      e.preventDefault();
+      scanImageUpdates(
+        imgBtn.getAttribute('data-parent-id'),
+        imgBtn.getAttribute('data-project'),
+        imgBtn
+      );
     }
   });
+
+  document.addEventListener('submit', (e) => {
+    const form = e.target.closest('[data-inventory]');
+    if (!form) return;
+    e.preventDefault();
+    saveInventory(form);
+  });
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('[data-inv-add-link]')) {
+      const form = e.target.closest('[data-inventory]');
+      const root = form && form.querySelector('[data-inv-links]');
+      if (root) addInventoryLinkRow(root, '', '');
+    }
+    if (e.target.closest('[data-inv-link-del]')) {
+      const row = e.target.closest('.topo-inv-link-row');
+      if (row && row.parentElement) row.remove();
+    }
+  });
+
+  async function scanImageUpdates(parentId, project, btn) {
+    if (!parentId) return;
+    if (btn) btn.disabled = true;
+    showToast('Prüfe Images…');
+    try {
+      let url = '/api/docker/image-updates?parent_id=' + encodeURIComponent(parentId);
+      if (project) url += '&project=' + encodeURIComponent(project);
+      const res = await fetch(url);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Image-Scan fehlgeschlagen');
+      const updates = data.updates || [];
+      if (!updates.length) {
+        showToast(data.message || 'Keine neueren Images.');
+        return;
+      }
+      const lines = updates.map((u) => (u.stack ? u.stack + '/' : '') + u.name + ' · ' + (u.image || '')).join('\n');
+      if (!confirm(
+        (data.count || updates.length) + ' Image-Update(s) gefunden:\n\n' +
+        lines + '\n\nJetzt pullen und Container/Stack neu starten?'
+      )) return;
+      const apply = await fetch('/api/docker/image-updates/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parent_id: parentId,
+          project: project || null,
+          names: project ? [] : updates.map((u) => u.name),
+          restart: true,
+          confirm: true,
+        }),
+      });
+      const out = await apply.json().catch(() => ({}));
+      if (!apply.ok) throw new Error(out.detail || 'Pull fehlgeschlagen');
+      showToast(out.message || 'Images aktualisiert');
+      setTimeout(() => window.location.reload(), 900);
+    } catch (err) {
+      showToast(String(err.message || err), true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
 </script>
 {% endblock %}

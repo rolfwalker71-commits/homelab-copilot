@@ -292,6 +292,10 @@
           + '</a>';
       }
     } else {
+      if (panel) {
+        panel.classList.remove('hidden');
+        panel.setAttribute('aria-busy', 'true');
+      }
       if (title) {
         title.textContent = 'Backup läuft…';
         title.style.color = '';
@@ -677,8 +681,30 @@
     }
   });
 
+  async function resumeActiveBackup() {
+    if (backupBusy) return;
+    try {
+      const res = await fetch(API + '/jobs?active=1');
+      const data = await res.json().catch(() => ({}));
+      const jobs = data.jobs || [];
+      const job = jobs.find((j) => !j.done && (j.status === 'running' || j.status === 'queued'));
+      if (!job) return;
+      const sel = document.getElementById('stack-select');
+      if (sel && job.parent_id && job.project) {
+        const want = encodeURIComponent(job.parent_id) + '|' + encodeURIComponent(job.project);
+        if ([...sel.options].some((o) => o.value === want)) sel.value = want;
+      }
+      backupBusy = true;
+      setBackupEnabled(false);
+      showProgressPanel();
+      renderJob(job);
+      pollJob(job.job_id || job.id);
+    } catch (_) {}
+  }
+
   async function refreshAll() {
     await Promise.all([loadStatus(), loadStacks()]);
+    await resumeActiveBackup();
   }
   document.getElementById('btn-refresh-all')?.addEventListener('click', refreshAll);
   refreshAll();

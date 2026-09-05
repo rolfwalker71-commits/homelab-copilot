@@ -77,6 +77,7 @@ class BackupJob:
             "snapshot_id": run.get("snapshot_id") or "",
             "bytes_added": run.get("bytes_added"),
             "bytes_processed": run.get("bytes_processed"),
+            "updated_at": self.updated_at,
         }
 
 
@@ -106,6 +107,16 @@ class JobRegistry:
     def get(self, job_id: str) -> BackupJob | None:
         with self._lock:
             return self._jobs.get(job_id)
+
+    def list_active(self) -> list[BackupJob]:
+        with self._lock:
+            jobs = [
+                j
+                for j in self._jobs.values()
+                if j.status in ("queued", "running")
+            ]
+        jobs.sort(key=lambda j: j.updated_at, reverse=True)
+        return jobs
 
     def set_running(self, job_id: str) -> None:
         with self._lock:

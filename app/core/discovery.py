@@ -10,6 +10,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import quote
 
@@ -40,11 +41,19 @@ def _status_from_str(value: str | None) -> EntityStatus:
     return EntityStatus.UNKNOWN
 
 
+ManualHostsFn = Callable[[], Awaitable[list[dict[str, Any]]]]
+
+
 class DiscoveryEngine:
     """Orchestrates Proxmox + Docker discovery into one topology snapshot."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._manual_hosts_fn: ManualHostsFn | None = None
+
+    def set_manual_hosts_provider(self, fn: ManualHostsFn | None) -> None:
+        """Reuse the patcher host store (name, IP, SSH user/port)."""
+        self._manual_hosts_fn = fn
 
     @staticmethod
     def _exc_text(exc: BaseException) -> str:
@@ -90,6 +99,7 @@ class DiscoveryEngine:
         errors: list[str] = []
         nodes: list[TopologyEntity] = []
         guests: list[TopologyEntity] = []
+        hosts: list[TopologyEntity] = []
         containers: list[TopologyEntity] = []
 
         if self.settings.proxmox_configured:
@@ -123,7 +133,14 @@ class DiscoveryEngine:
                 logger.warning(msg)
                 errors.append(msg)
 
-        ssh_targets, ssh_skip = self._collect_ssh_targets(guests)
+        try:
+            hosts = await self._load_manual_hosts()
+        except Exception as exc:
+            msg = f"Manuelle Hosts konnten nicht geladen werden: {self._exc_text(exc)}"
+            logger.warning(msg)
+            errors.append(msg)
+
+        ssh_targets, ssh_skip = self._collect_ssh_targets(guests, hosts)
         if ssh_skip:
             errors.append(ssh_skip)
         if ssh_targets:
@@ -137,10 +154,52 @@ class DiscoveryEngine:
             refreshed_at_iso=iso_utc(now),
             nodes=nodes,
             guests=guests,
+            hosts=hosts,
             containers=containers,
             errors=errors,
             proxmox_configured=self.settings.proxmox_configured,
         )
+
+    async def _load_manual_hosts(self) -> list[TopologyEntity]:
+        if self._manual_hosts_fn is None:
+            return []
+        rows = await self._manual_hosts_fn()
+        stamp = format_de()
+        stamp_iso = iso_utc()
+        out: list[TopologyEntity] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            hid = row.get("id")
+            name = str(row.get("name") or "").strip()
+            addr = str(row.get("host") or "").strip()
+            if hid is None or not name or not addr:
+                continue
+            try:
+                port = int(row.get("port") or self.settings.docker_ssh_port)
+            except (TypeError, ValueError):
+                port = self.settings.docker_ssh_port
+            user = str(row.get("ssh_user") or "").strip()
+            out.append(
+                TopologyEntity(
+                    id=f"manual:{int(hid)}",
+                    kind=EntityKind.HOST,
+                    name=name,
+                    status=EntityStatus.RUNNING,
+                    hostname=name,
+                    ip_addresses=[addr],
+                    meta={
+                        "source": "manual",
+                        "ssh_user": user,
+                        "ssh_port": port,
+                        "note": str(row.get("note") or ""),
+                    },
+                    discovered_at=stamp,
+                    discovered_at_iso=stamp_iso,
+                )
+            )
+        out.sort(key=lambda h: h.name.lower())
+        return out
 
     # ------------------------------------------------------------------
     # Proxmox
@@ -1009,6 +1068,85 @@ class DiscoveryEngine:
             "volumes": volumes,
         }
 
+    async def fetch_guest_snapshots(self, guest_id: str) -> dict[str, Any]:
+        """Read-only Proxmox snapshots for an LXC or QEMU guest.
+
+        Missing ACL (403) is returned as a German hint, not a hard failure.
+        """
+        parts = guest_id.split(":")
+        if len(parts) != 3 or parts[0] not in {"lxc", "qemu"}:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}")
+        kind, node, vmid_s = parts
+        try:
+            vmid = int(vmid_s)
+        except ValueError as exc:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}") from exc
+
+        client, headers = await self._proxmox_authed_client()
+        try:
+            try:
+                rows = await self._proxmox_get(
+                    client,
+                    f"/nodes/{quote(node)}/{kind}/{vmid}/snapshot",
+                    headers,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {401, 403}:
+                    return {
+                        "guest_id": guest_id,
+                        "kind": kind,
+                        "node": node,
+                        "vmid": vmid,
+                        "snapshots": [],
+                        "acl_denied": True,
+                        "message": (
+                            "Keine Berechtigung für Snapshots (HTTP "
+                            f"{exc.response.status_code}). Dem API-Token fehlt "
+                            "vermutlich VM.Snapshot / VM.Audit."
+                        ),
+                    }
+                raise
+        finally:
+            await client.aclose()
+
+        snaps: list[dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            snaptime = row.get("snaptime")
+            date_de = ""
+            if snaptime is not None:
+                try:
+                    from datetime import datetime, timezone
+
+                    dt = datetime.fromtimestamp(int(snaptime), tz=timezone.utc)
+                    date_de = format_de(dt)
+                except (TypeError, ValueError, OSError):
+                    date_de = ""
+            snaps.append(
+                {
+                    "name": name,
+                    "description": str(row.get("description") or "").strip(),
+                    "snaptime": snaptime,
+                    "date": date_de,
+                    "current": name == "current",
+                }
+            )
+        snaps.sort(
+            key=lambda s: (0 if s["current"] else 1, -(s.get("snaptime") or 0), s["name"])
+        )
+        return {
+            "guest_id": guest_id,
+            "kind": kind,
+            "node": node,
+            "vmid": vmid,
+            "snapshots": snaps,
+            "acl_denied": False,
+        }
+
     async def guest_power(self, guest_id: str, action: str) -> dict[str, Any]:
         """Start / stop / shutdown / reboot an LXC or QEMU guest via Proxmox.
 
@@ -1280,7 +1418,10 @@ class DiscoveryEngine:
             ]
             name = c.name.lstrip("/") if c.name else c.short_id
             labels = dict(c.labels or {})
+            published = self._published_ports_from_inspect(attrs)
             meta: dict[str, Any] = {"short_id": c.short_id}
+            if published:
+                meta["published_ports"] = published
             if labels.get("com.docker.compose.project"):
                 meta["compose_project"] = labels["com.docker.compose.project"]
             if labels.get("com.docker.compose.service"):
@@ -1319,15 +1460,29 @@ class DiscoveryEngine:
         return configured
 
     def _collect_ssh_targets(
-        self, guests: list[TopologyEntity]
-    ) -> tuple[list[tuple[str, str]], str | None]:
-        """Return ((parent_id, ip) pairs, optional skip reason for topology.errors)."""
-        candidates: list[tuple[str, str]] = []
+        self,
+        guests: list[TopologyEntity],
+        hosts: list[TopologyEntity] | None = None,
+    ) -> tuple[list[tuple[str, str, int, str]], str | None]:
+        """Return ((parent_id, ip, port, user) tuples, optional skip reason)."""
+        s = self.settings
+        candidates: list[tuple[str, str, int, str]] = []
         for g in guests:
             if g.status != EntityStatus.RUNNING or not g.ip_addresses:
                 continue
-            # Prefer first non-loopback IP
-            candidates.append((g.id, g.ip_addresses[0]))
+            candidates.append(
+                (g.id, g.ip_addresses[0], s.docker_ssh_port, s.docker_ssh_user)
+            )
+        for h in hosts or []:
+            if not h.ip_addresses:
+                continue
+            meta = h.meta or {}
+            try:
+                port = int(meta.get("ssh_port") or s.docker_ssh_port)
+            except (TypeError, ValueError):
+                port = s.docker_ssh_port
+            user = str(meta.get("ssh_user") or "").strip() or s.docker_ssh_user
+            candidates.append((h.id, h.ip_addresses[0], port, user))
 
         if not candidates:
             return [], None
@@ -1352,7 +1507,7 @@ class DiscoveryEngine:
         return [], msg
 
     async def _discover_docker_ssh_many(
-        self, targets: list[tuple[str, str]]
+        self, targets: list[tuple[str, str, int, str]]
     ) -> tuple[list[TopologyEntity], str | None]:
         """Scan guests via SSH with concurrency + overall time budget.
 
@@ -1372,11 +1527,13 @@ class DiscoveryEngine:
             budget,
         )
 
-        async def one(parent_id: str, ip: str) -> list[TopologyEntity]:
+        async def one(
+            parent_id: str, ip: str, port: int, user: str
+        ) -> list[TopologyEntity]:
             async with sem:
                 try:
                     return await asyncio.wait_for(
-                        self._discover_docker_ssh(parent_id, ip),
+                        self._discover_docker_ssh(parent_id, ip, port=port, username=user),
                         timeout=per_host,
                     )
                 except asyncio.TimeoutError:
@@ -1386,7 +1543,10 @@ class DiscoveryEngine:
                     logger.debug("SSH Docker scan %s (%s): %s", parent_id, ip, exc)
                     return []
 
-        tasks = [asyncio.create_task(one(pid, ip)) for pid, ip in targets]
+        tasks = [
+            asyncio.create_task(one(pid, ip, port, user))
+            for pid, ip, port, user in targets
+        ]
         done, pending = await asyncio.wait(tasks, timeout=budget)
         for t in pending:
             t.cancel()
@@ -1411,21 +1571,29 @@ class DiscoveryEngine:
             logger.info("SSH Docker scan finished: %d container(s)", len(merged))
         return merged, warn
 
-    async def _discover_docker_ssh(self, parent_id: str, ip: str) -> list[TopologyEntity]:
+    async def _discover_docker_ssh(
+        self,
+        parent_id: str,
+        ip: str,
+        *,
+        port: int | None = None,
+        username: str | None = None,
+    ) -> list[TopologyEntity]:
         s = self.settings
         # Include Compose project/service labels for dashboard stack grouping.
         cmd = (
             "docker ps -a --format "
             "'{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|"
             "{{.Label \"com.docker.compose.project\"}}|"
-            "{{.Label \"com.docker.compose.service\"}}'"
+            "{{.Label \"com.docker.compose.service\"}}|"
+            "{{.Ports}}'"
         )
         # Keep connect short; command gets the remaining per-host budget via wait_for.
         connect_timeout = min(2.0, s.docker_ssh_timeout)
         async with asyncssh.connect(
             ip,
-            port=s.docker_ssh_port,
-            username=s.docker_ssh_user,
+            port=int(port or s.docker_ssh_port),
+            username=(username or s.docker_ssh_user),
             client_keys=[str(self._ssh_key_path())],
             known_hosts=None,
             connect_timeout=connect_timeout,
@@ -1449,6 +1617,7 @@ class DiscoveryEngine:
             cid, name, image, status_raw = parts[0], parts[1], parts[2], parts[3]
             compose_project = (parts[4].strip() if len(parts) > 4 else "") or ""
             compose_service = (parts[5].strip() if len(parts) > 5 else "") or ""
+            ports_raw = (parts[6].strip() if len(parts) > 6 else "") or ""
             # Names can be comma-separated aliases — prefer the first.
             name = name.split(",", 1)[0].strip()
             status = EntityStatus.RUNNING if status_raw.lower().startswith("up") else EntityStatus.STOPPED
@@ -1458,11 +1627,16 @@ class DiscoveryEngine:
                 labels["com.docker.compose.project"] = compose_project
             if compose_service:
                 labels["com.docker.compose.service"] = compose_service
+            published = self._parse_published_ports(ports_raw)
             meta: dict[str, Any] = {"via": "ssh", "raw_status": status_raw}
             if compose_project:
                 meta["compose_project"] = compose_project
             if compose_service:
                 meta["compose_service"] = compose_service
+            if published:
+                meta["published_ports"] = published
+            if ports_raw:
+                meta["ports_raw"] = ports_raw
             out.append(
                 TopologyEntity(
                     id=f"docker:{parent_id}:{cid[:12]}",
@@ -1481,3 +1655,140 @@ class DiscoveryEngine:
                 )
             )
         return out
+
+    @staticmethod
+    def _parse_published_ports(raw: str) -> list[dict[str, Any]]:
+        """Parse ``docker ps`` Ports column into host-published bindings."""
+        if not raw or raw == "-":
+            return []
+        out: list[dict[str, Any]] = []
+        seen: set[tuple[str, int, str]] = set()
+        for m in re.finditer(
+            r"(?:(?P<hip>\d+\.\d+\.\d+\.\d+|\[[^\]]+\]|\*):)?(?P<hport>\d+)"
+            r"->(?P<cport>\d+)/(?P<proto>\w+)",
+            raw,
+        ):
+            try:
+                hport = int(m.group("hport"))
+            except (TypeError, ValueError):
+                continue
+            hip = (m.group("hip") or "0.0.0.0").strip()
+            proto = (m.group("proto") or "tcp").lower()
+            key = (hip, hport, proto)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "host_ip": hip,
+                    "host_port": hport,
+                    "container_port": int(m.group("cport") or 0),
+                    "proto": proto,
+                }
+            )
+        return out
+
+    @classmethod
+    def _published_ports_from_inspect(cls, attrs: dict[str, Any]) -> list[dict[str, Any]]:
+        ports = ((attrs.get("NetworkSettings") or {}).get("Ports") or {})
+        if not isinstance(ports, dict):
+            return []
+        out: list[dict[str, Any]] = []
+        seen: set[tuple[str, int, str]] = set()
+        for key, bindings in ports.items():
+            if not bindings:
+                continue
+            proto = "tcp"
+            cport = 0
+            if isinstance(key, str) and "/" in key:
+                cport_s, proto = key.split("/", 1)
+                try:
+                    cport = int(cport_s)
+                except ValueError:
+                    cport = 0
+            for b in bindings if isinstance(bindings, list) else []:
+                if not isinstance(b, dict):
+                    continue
+                try:
+                    hport = int(b.get("HostPort") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not hport:
+                    continue
+                hip = str(b.get("HostIp") or "0.0.0.0")
+                key_t = (hip, hport, proto)
+                if key_t in seen:
+                    continue
+                seen.add(key_t)
+                out.append(
+                    {
+                        "host_ip": hip,
+                        "host_port": hport,
+                        "container_port": cport,
+                        "proto": proto,
+                    }
+                )
+        return out
+
+    async def fetch_host_facts(
+        self,
+        ip: str,
+        *,
+        port: int | None = None,
+        username: str | None = None,
+    ) -> dict[str, Any]:
+        """OS / uptime / disk via a short SSH probe (manual Linux hosts)."""
+        s = self.settings
+        cmd = (
+            "set +e; "
+            "os=$(. /etc/os-release 2>/dev/null; echo \"${PRETTY_NAME:-}\"); "
+            "kern=$(uname -sr 2>/dev/null); "
+            "up=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); "
+            "disk=$(df -P -B1 / 2>/dev/null | awk 'NR==2{print $3\" \"$2\" \"$5}'); "
+            "printf 'os=%s\\nkernel=%s\\nuptime=%s\\ndisk=%s\\n' "
+            "\"$os\" \"$kern\" \"$up\" \"$disk\""
+        )
+        connect_timeout = min(4.0, max(2.0, s.docker_ssh_timeout))
+        async with asyncssh.connect(
+            ip,
+            port=int(port or s.docker_ssh_port),
+            username=(username or s.docker_ssh_user),
+            client_keys=[str(self._ssh_key_path())],
+            known_hosts=None,
+            connect_timeout=connect_timeout,
+            login_timeout=connect_timeout,
+        ) as conn:
+            result = await conn.run(cmd, check=False, timeout=8.0)
+        text = (result.stdout or "") if isinstance(result.stdout, str) else (
+            (result.stdout or b"").decode("utf-8", errors="replace")
+        )
+        facts: dict[str, Any] = {"os": "", "kernel": "", "uptime": None, "disk": None}
+        for line in text.splitlines():
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key, val = key.strip(), val.strip()
+            if key == "os":
+                facts["os"] = val
+            elif key == "kernel":
+                facts["kernel"] = val
+            elif key == "uptime":
+                try:
+                    facts["uptime"] = int(float(val))
+                except (TypeError, ValueError):
+                    facts["uptime"] = None
+            elif key == "disk":
+                parts = val.split()
+                if len(parts) >= 2:
+                    try:
+                        used = int(parts[0])
+                        total = int(parts[1])
+                        pct = None
+                        if len(parts) >= 3:
+                            pct = float(parts[2].rstrip("%"))
+                        elif total > 0:
+                            pct = round(100.0 * used / total, 1)
+                        facts["disk"] = {"used": used, "total": total, "pct": pct}
+                    except (TypeError, ValueError):
+                        facts["disk"] = None
+        return facts

@@ -40,6 +40,16 @@ KEY_VAPID_PRIVATE = "vapid_private_key"
 KEY_VAPID_PUBLIC = "vapid_public_key"
 KEY_VAPID_SUBJECT = "vapid_subject"
 KEY_PATCHER_LAST_DAILY = "patcher_last_daily_scan"
+KEY_PUSH_PREFS = "push_prefs"
+
+DEFAULT_PUSH_PREFS: dict[str, bool] = {
+    "backup_success": False,
+    "backup_failure": True,
+    "backup_partial": True,
+    "patch_findings": True,
+    "health_down": True,
+    "disk_high": True,
+}
 
 
 class AppStore:
@@ -190,3 +200,25 @@ class AppStore:
 
     async def set_patcher_last_daily(self, iso_ts: str) -> None:
         await self.set(KEY_PATCHER_LAST_DAILY, iso_ts)
+
+    async def get_push_prefs(self) -> dict[str, bool]:
+        raw = await self.get(KEY_PUSH_PREFS)
+        prefs = dict(DEFAULT_PUSH_PREFS)
+        if raw:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = {}
+            if isinstance(data, dict):
+                for key in DEFAULT_PUSH_PREFS:
+                    if key in data:
+                        prefs[key] = bool(data[key])
+        return prefs
+
+    async def set_push_prefs(self, updates: dict[str, Any]) -> dict[str, bool]:
+        prefs = await self.get_push_prefs()
+        for key in DEFAULT_PUSH_PREFS:
+            if key in updates:
+                prefs[key] = bool(updates[key])
+        await self.set(KEY_PUSH_PREFS, json.dumps(prefs, ensure_ascii=False))
+        return prefs

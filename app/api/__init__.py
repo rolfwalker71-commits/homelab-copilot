@@ -9,8 +9,10 @@ from pydantic import BaseModel, Field
 
 from app.config import Settings, get_settings
 from app.core import docker_control as docker_ctl
+from app.core.inventory import InventoryStore
 from app.core.locale import format_de, now_berlin
 from app.core.registry import registry
+from app.core.ssh_endpoint import resolve_ssh_endpoint
 from app.api.auth import router as auth_router
 from app.api.push import router as push_router
 
@@ -53,6 +55,20 @@ class DockerComposeFileSavePayload(BaseModel):
     project: str = Field(..., min_length=1)
     path: str = Field(..., min_length=1)
     content: str = Field(..., max_length=524288)
+
+
+class InventoryPayload(BaseModel):
+    notes: str = Field(default="", max_length=8000)
+    extra_tags: list[str] = Field(default_factory=list)
+    links: list[dict[str, str]] = Field(default_factory=list)
+
+
+class ImageUpdateApplyPayload(BaseModel):
+    parent_id: str = Field(..., min_length=1)
+    project: str | None = None
+    names: list[str] = Field(default_factory=list)
+    restart: bool = True
+    confirm: bool = False
 
 
 @router.get("/health")
@@ -185,6 +201,115 @@ async def guest_rrd(
             status_code=502,
             detail=f"Proxmox-RRD fehlgeschlagen: {exc}",
         ) from exc
+
+
+@router.get("/guests/{guest_id}/snapshots")
+async def guest_snapshots(guest_id: str, request: Request) -> dict[str, Any]:
+    """Read-only Proxmox snapshots (name, description, date)."""
+    engine = request.app.state.discovery_engine
+    try:
+        return await engine.fetch_guest_snapshots(guest_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Proxmox-Snapshots fehlgeschlagen: {exc}",
+        ) from exc
+
+
+@router.get("/hosts/{host_id}/facts")
+async def host_facts(host_id: str, request: Request) -> dict[str, Any]:
+    """OS / uptime / disk via SSH for a manual Linux host."""
+    engine = request.app.state.discovery_engine
+    store = request.app.state.topology_store
+    settings = get_settings()
+    ep = resolve_ssh_endpoint(store.snapshot, host_id, settings)
+    if ep is None:
+        raise HTTPException(status_code=404, detail="Host nicht in der Topologie.")
+    try:
+        facts = await engine.fetch_host_facts(
+            ep.ip, port=ep.port, username=ep.username
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"SSH-Fakten fehlgeschlagen: {exc}",
+        ) from exc
+    return {"ok": True, "host_id": host_id, "name": ep.entity.name, **facts}
+
+
+@router.get("/inventory/{entity_id:path}")
+async def get_inventory(entity_id: str, request: Request) -> dict[str, Any]:
+    inv: InventoryStore | None = getattr(request.app.state, "inventory_store", None)
+    if inv is None:
+        raise HTTPException(status_code=503, detail="Inventar-Store nicht bereit.")
+    return await inv.get(entity_id)
+
+
+@router.put("/inventory/{entity_id:path}")
+async def put_inventory(
+    entity_id: str, payload: InventoryPayload, request: Request
+) -> dict[str, Any]:
+    inv: InventoryStore | None = getattr(request.app.state, "inventory_store", None)
+    if inv is None:
+        raise HTTPException(status_code=503, detail="Inventar-Store nicht bereit.")
+    try:
+        row = await inv.upsert(
+            entity_id,
+            notes=payload.notes,
+            extra_tags=payload.extra_tags,
+            links=payload.links,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **row}
+
+
+@router.get("/docker/image-updates")
+async def docker_image_updates(
+    request: Request,
+    parent_id: str = Query(..., min_length=1),
+    project: str | None = Query(None),
+) -> dict[str, Any]:
+    settings = get_settings()
+    store = request.app.state.topology_store
+    try:
+        return await docker_ctl.scan_image_updates(
+            settings,
+            parent_id=parent_id,
+            snapshot=store.snapshot,
+            project=project,
+        )
+    except docker_ctl.DockerControlError as exc:
+        raise _docker_http_error(exc) from exc
+
+
+@router.post("/docker/image-updates/apply")
+async def docker_image_updates_apply(
+    payload: ImageUpdateApplyPayload,
+    request: Request,
+) -> dict[str, Any]:
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Image-Update erfordert confirm=true.",
+        )
+    settings = get_settings()
+    store = request.app.state.topology_store
+    try:
+        return await docker_ctl.apply_image_updates(
+            settings,
+            parent_id=payload.parent_id,
+            snapshot=store.snapshot,
+            project=payload.project,
+            names=payload.names,
+            restart=payload.restart,
+        )
+    except docker_ctl.DockerControlError as exc:
+        raise _docker_http_error(exc) from exc
 
 
 @router.get("/guests/{guest_id}/storage")

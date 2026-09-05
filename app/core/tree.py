@@ -133,28 +133,45 @@ def group_docker_items(containers: list[TopologyEntity]) -> list[dict[str, Any]]
     return stacks + flats
 
 
+def _docker_row(entity: TopologyEntity, children: list[TopologyEntity]) -> dict[str, Any]:
+    children = sorted(children, key=lambda x: x.name.lower())
+    docker_items = group_docker_items(children)
+    return {
+        "guest": entity,
+        "containers": children,
+        "docker_items": docker_items,
+        "docker_stacks": [i for i in docker_items if i["kind"] == "stack"],
+        "docker_singles": [i for i in docker_items if i["kind"] == "container"],
+        "docker_count": len(children),
+    }
+
+
 def build_topology_tree(snapshot: TopologySnapshot | None) -> dict[str, Any]:
     """Group guests by Proxmox node and nest Docker under matching parent guests.
 
-    Matching rule: ``container.parent_id == guest.id``.
+    Matching rule: ``container.parent_id == guest.id`` or host id (``manual:…``).
     Orphans (local socket, missing parent, no parent_id) go under ``orphans``.
+    Manual Linux hosts sit in a virtual ``linux`` group.
     """
     if snapshot is None:
         return {
             "nodes": [],
+            "linux_hosts": [],
+            "linux_host_count": 0,
             "orphans": [],
             "orphan_items": [],
             "orphan_count": 0,
             "has_anything": False,
         }
 
-    guest_ids = {g.id for g in snapshot.guests}
+    host_ids = {h.id for h in snapshot.hosts}
+    parent_ids = {g.id for g in snapshot.guests} | host_ids
     by_parent: dict[str, list[TopologyEntity]] = {}
     orphans: list[TopologyEntity] = []
 
     for c in snapshot.containers:
         pid = c.parent_id
-        if pid and pid in guest_ids:
+        if pid and pid in parent_ids:
             by_parent.setdefault(pid, []).append(c)
         else:
             orphans.append(c)
@@ -184,19 +201,8 @@ def build_topology_tree(snapshot: TopologySnapshot | None) -> dict[str, Any]:
         node_docker = 0
         for g in sorted(guests, key=lambda x: (x.vmid or 0, x.name.lower())):
             children = by_parent.get(g.id, [])
-            children = sorted(children, key=lambda x: x.name.lower())
             node_docker += len(children)
-            docker_items = group_docker_items(children)
-            guest_rows.append(
-                {
-                    "guest": g,
-                    "containers": children,
-                    "docker_items": docker_items,
-                    "docker_stacks": [i for i in docker_items if i["kind"] == "stack"],
-                    "docker_singles": [i for i in docker_items if i["kind"] == "container"],
-                    "docker_count": len(children),
-                }
-            )
+            guest_rows.append(_docker_row(g, children))
         node_ent = nodes_by_name.get(name)
         running = sum(1 for g in guests if g.status == EntityStatus.RUNNING)
         stopped = sum(1 for g in guests if g.status == EntityStatus.STOPPED)
@@ -217,14 +223,20 @@ def build_topology_tree(snapshot: TopologySnapshot | None) -> dict[str, Any]:
             }
         )
 
+    linux_hosts: list[dict[str, Any]] = []
+    for h in sorted(snapshot.hosts, key=lambda x: x.name.lower()):
+        linux_hosts.append(_docker_row(h, by_parent.get(h.id, [])))
+
     orphans_sorted = sorted(orphans, key=lambda x: x.name.lower())
     orphan_items = group_docker_items(orphans_sorted)
     return {
         "nodes": nodes_out,
+        "linux_hosts": linux_hosts,
+        "linux_host_count": len(linux_hosts),
         "orphans": orphans_sorted,
         "orphan_items": orphan_items,
         "orphan_stacks": [i for i in orphan_items if i["kind"] == "stack"],
         "orphan_singles": [i for i in orphan_items if i["kind"] == "container"],
         "orphan_count": len(orphans_sorted),
-        "has_anything": bool(nodes_out or orphans_sorted),
+        "has_anything": bool(nodes_out or linux_hosts or orphans_sorted),
     }

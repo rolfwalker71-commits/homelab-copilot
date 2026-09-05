@@ -52,6 +52,7 @@ class TopologySnapshot(BaseModel):
     source: str = "discovery"
     nodes: list[TopologyEntity] = Field(default_factory=list)
     guests: list[TopologyEntity] = Field(default_factory=list)  # LXC + QEMU
+    hosts: list[TopologyEntity] = Field(default_factory=list)  # manual Linux hosts
     containers: list[TopologyEntity] = Field(default_factory=list)  # Docker
     errors: list[str] = Field(default_factory=list)
     proxmox_configured: bool = False
@@ -61,6 +62,7 @@ class TopologySnapshot(BaseModel):
         return {
             "nodes": len(self.nodes),
             "guests": len(self.guests),
+            "hosts": len(self.hosts),
             "containers": len(self.containers),
             "errors": len(self.errors),
         }

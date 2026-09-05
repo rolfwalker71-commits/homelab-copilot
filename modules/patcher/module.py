@@ -312,6 +312,11 @@ async def _notify_scan_findings(summary: dict[str, Any]) -> None:
         if store is None:
             return
 
+        from app.core.push import push_allowed
+
+        if not await push_allowed(store, "patch_findings"):
+            return
+
         lines: list[str] = []
         if hosts_u:
             lines.append(
@@ -674,6 +679,12 @@ async def api_summarize(payload: SummarizePayload) -> dict[str, Any]:
     return {"ok": True, "scan_id": payload.scan_id, "llm_summary": text}
 
 
+@router.get("/jobs")
+async def api_jobs(active: bool = True) -> dict[str, Any]:
+    jobs = JOBS.list_active() if active else []
+    return {"ok": True, "jobs": [j.to_dict() for j in jobs]}
+
+
 @router.get("/jobs/{job_id}")
 async def api_job(job_id: str) -> dict[str, Any]:
     job = JOBS.get(job_id)
@@ -801,6 +812,15 @@ class PatcherModule:
         _store = PatcherStore(ps.db_path)
         await _store.connect()
         app.state.patcher_store = _store
+
+        engine = getattr(app.state, "discovery_engine", None)
+        if engine is not None and hasattr(engine, "set_manual_hosts_provider"):
+            store_ref = _store
+
+            async def _manual_hosts() -> list[dict[str, Any]]:
+                return await store_ref.list_hosts(enabled_only=True)
+
+            engine.set_manual_hosts_provider(_manual_hosts)
 
         templates = _make_templates()
         settings = get_settings()

@@ -43,6 +43,7 @@ class PatchJob:
             "result": self.result,
             "done": self.status in ("success", "failed"),
             "ok": self.status == "success",
+            "updated_at": self.updated_at,
         }
 
 
@@ -70,6 +71,16 @@ class JobRegistry:
     def get(self, job_id: str) -> PatchJob | None:
         with self._lock:
             return self._jobs.get(job_id)
+
+    def list_active(self) -> list[PatchJob]:
+        with self._lock:
+            jobs = [
+                j
+                for j in self._jobs.values()
+                if j.status in ("queued", "running")
+            ]
+        jobs.sort(key=lambda j: j.updated_at, reverse=True)
+        return jobs
 
     def set_progress(
         self,

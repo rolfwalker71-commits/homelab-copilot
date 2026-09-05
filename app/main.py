@@ -16,6 +16,7 @@ from app.api import router as api_router
 from app.api.ssh_ws import router as ssh_ws_router
 from app.config import get_settings
 from app.core.app_store import AppStore
+from app.core.inventory import InventoryStore
 from app.core.auth import TotpAuthMiddleware, ensure_totp_secret
 from app.core.discovery import DiscoveryEngine
 from app.core.locale import (
@@ -87,10 +88,14 @@ async def lifespan(app: FastAPI):
     await ensure_totp_secret(app_store)
     vapid = await ensure_vapid_keys(app_store, settings)
 
+    inventory = InventoryStore(settings.inventory_db_path)
+    await inventory.connect()
+
     app.state.topology_store = store
     app.state.discovery_engine = engine
     app.state.settings = settings
     app.state.app_store = app_store
+    app.state.inventory_store = inventory
     app.state.cookie_secret = cookie_secret
 
     logger.info(
@@ -126,6 +131,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await registry.run_shutdown(app)
+    await inventory.close()
     await app_store.close()
     await store.close()
 
