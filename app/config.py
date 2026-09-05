@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # --- Discovery refresh ---
     discovery_interval_seconds: int = Field(default=300, ge=30)
 
-    # --- Proxmox ---
+    # --- Proxmox (optional env bootstrap; Setup save → SQLite /data wins) ---
     proxmox_host: str = ""
     proxmox_port: int = 8006
     proxmox_user: str = "root@pam"

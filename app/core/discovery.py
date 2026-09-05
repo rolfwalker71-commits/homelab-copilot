@@ -122,8 +122,8 @@ class DiscoveryEngine:
                 errors.append(msg)
         else:
             errors.append(
-                "Proxmox nicht konfiguriert — bitte PROXMOX_HOST und Token/Passwort setzen "
-                "oder den Setup-Assistenten verwenden."
+                "Proxmox nicht konfiguriert — bitte im Setup speichern "
+                "(Datenbank) oder optional PROXMOX_HOST und Token/Passwort setzen."
             )
 
         # Docker: local socket first (optional), then SSH to discovered guest IPs
@@ -428,7 +428,8 @@ class DiscoveryEngine:
         endpoints = self.settings.proxmox_endpoints()
         if not endpoints:
             return [], [], [
-                "Keine Proxmox-Auth: PROXMOX_TOKEN_SECRET oder PROXMOX_PASSWORD setzen."
+                "Keine Proxmox-Auth: im Setup Token/Passwort speichern "
+                "oder optional PROXMOX_TOKEN_SECRET / PROXMOX_PASSWORD setzen."
             ]
 
         gathered = await asyncio.gather(

@@ -30,6 +30,20 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     created_at TEXT NOT NULL,
     created_at_iso TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS proxmox_hosts (
+    slot INTEGER PRIMARY KEY,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 8006,
+    user TEXT NOT NULL DEFAULT 'root@pam',
+    token_id TEXT NOT NULL DEFAULT '',
+    token_secret TEXT NOT NULL DEFAULT '',
+    password TEXT NOT NULL DEFAULT '',
+    verify_ssl INTEGER NOT NULL DEFAULT 0,
+    label TEXT NOT NULL DEFAULT '',
+    updated_at TEXT,
+    updated_at_iso TEXT
+);
 """
 
 # Well-known keys
@@ -222,3 +236,60 @@ class AppStore:
                 prefs[key] = bool(updates[key])
         await self.set(KEY_PUSH_PREFS, json.dumps(prefs, ensure_ascii=False))
         return prefs
+
+    # --- Proxmox API hosts (survive container/host restart on /data) ---
+
+    async def list_proxmox_hosts(self) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            """
+            SELECT slot, host, port, user, token_id, token_secret, password,
+                   verify_ssl, label
+            FROM proxmox_hosts
+            ORDER BY slot ASC
+            """
+        )
+        rows = await cur.fetchall()
+        return [
+            {
+                "slot": int(r["slot"]),
+                "host": str(r["host"] or ""),
+                "port": int(r["port"] or 8006),
+                "user": str(r["user"] or "root@pam"),
+                "token_id": str(r["token_id"] or ""),
+                "token_secret": str(r["token_secret"] or ""),
+                "password": str(r["password"] or ""),
+                "verify_ssl": bool(r["verify_ssl"]),
+                "label": str(r["label"] or ""),
+            }
+            for r in rows
+        ]
+
+    async def replace_proxmox_hosts(self, rows: list[dict[str, Any]]) -> None:
+        now = now_berlin()
+        await self.db.execute("DELETE FROM proxmox_hosts")
+        for row in rows:
+            host = str(row.get("host") or "").strip()
+            if not host:
+                continue
+            await self.db.execute(
+                """
+                INSERT INTO proxmox_hosts
+                    (slot, host, port, user, token_id, token_secret, password,
+                     verify_ssl, label, updated_at, updated_at_iso)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(row.get("slot") or 0),
+                    host,
+                    int(row.get("port") or 8006),
+                    str(row.get("user") or "root@pam") or "root@pam",
+                    str(row.get("token_id") or ""),
+                    str(row.get("token_secret") or ""),
+                    str(row.get("password") or ""),
+                    1 if row.get("verify_ssl") else 0,
+                    str(row.get("label") or ""),
+                    format_de(now),
+                    iso_utc(now),
+                ),
+            )
+        await self.db.commit()

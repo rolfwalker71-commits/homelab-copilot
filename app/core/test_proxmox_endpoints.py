@@ -11,9 +11,14 @@ from app.core.discovery import DiscoveryEngine
 from app.core.models import EntityKind, EntityStatus, TopologyEntity, TopologySnapshot
 from app.core.proxmox import (
     ProxmoxEndpoint,
+    ProxmoxHostRow,
     ProxmoxNodeUnboundError,
+    apply_host_rows_to_settings,
     endpoints_from_settings,
     format_proxmox_api_error,
+    host_rows_from_setup_payload,
+    hosts_from_env,
+    merge_proxmox_hosts,
     strip_unbound_metrics,
     unbound_message,
 )
@@ -166,6 +171,116 @@ class RoutingTests(unittest.TestCase):
         engine.remember_from_snapshot(snap)
         with self.assertRaises(ProxmoxNodeUnboundError):
             engine._require_endpoint_for_node("pve02")
+
+
+class MergeTests(unittest.TestCase):
+    def test_empty_db_uses_env(self) -> None:
+        s = _settings(
+            proxmox_host="192.168.5.101",
+            proxmox_token_secret="env-a",
+            proxmox_2_host="192.168.5.102",
+            proxmox_2_token_secret="env-b",
+        )
+        merged = merge_proxmox_hosts([], s)
+        self.assertEqual([r.host for r in merged], ["192.168.5.101", "192.168.5.102"])
+        self.assertEqual(merged[1].token_secret, "env-b")
+
+    def test_db_rows_win_over_env(self) -> None:
+        s = _settings(
+            proxmox_host="10.0.0.1",
+            proxmox_token_secret="env-a",
+            proxmox_2_host="10.0.0.2",
+            proxmox_2_token_secret="env-b",
+        )
+        db = [
+            ProxmoxHostRow(
+                slot=1, host="192.168.5.101", token_secret="db-a", label="pve01"
+            ),
+            ProxmoxHostRow(
+                slot=2, host="192.168.5.102", token_secret="db-b", label="pve02"
+            ),
+        ]
+        merged = merge_proxmox_hosts(db, s)
+        self.assertEqual([r.host for r in merged], ["192.168.5.101", "192.168.5.102"])
+        self.assertEqual(merged[1].token_secret, "db-b")
+        apply_host_rows_to_settings(s, merged)
+        eps = endpoints_from_settings(s)
+        self.assertEqual([e.id for e in eps], ["primary", "extra:2"])
+        self.assertEqual(eps[1].host, "192.168.5.102")
+        self.assertEqual(s.proxmox_2_host, "192.168.5.102")
+
+    def test_db_primary_only_does_not_keep_env_pve02(self) -> None:
+        s = _settings(
+            proxmox_host="192.168.5.101",
+            proxmox_token_secret="env-a",
+            proxmox_2_host="192.168.5.102",
+            proxmox_2_token_secret="env-b",
+        )
+        db = [
+            ProxmoxHostRow(slot=1, host="192.168.5.101", token_secret="db-a"),
+        ]
+        merged = merge_proxmox_hosts(db, s)
+        apply_host_rows_to_settings(s, merged)
+        self.assertEqual(len(endpoints_from_settings(s)), 1)
+        self.assertEqual(s.proxmox_2_host, "")
+        self.assertEqual(s.proxmox_2_token_secret, "")
+
+    def test_setup_save_keeps_blank_secrets(self) -> None:
+        previous = hosts_from_env(
+            _settings(
+                proxmox_host="192.168.5.101",
+                proxmox_token_id="copilot",
+                proxmox_token_secret="keep-a",
+                proxmox_2_host="192.168.5.102",
+                proxmox_2_token_secret="keep-b",
+            )
+        )
+        rows = host_rows_from_setup_payload(
+            {
+                "proxmox_host": "192.168.5.101",
+                "proxmox_port": 8006,
+                "proxmox_user": "root@pam",
+                "proxmox_token_id": "copilot",
+                "proxmox_verify_ssl": False,
+                "proxmox_2_host": "192.168.5.102",
+                "proxmox_2_port": 8006,
+                "proxmox_2_user": "root@pam",
+                "proxmox_2_token_id": "copilot",
+                "proxmox_2_verify_ssl": False,
+            },
+            previous,
+        )
+        self.assertEqual(rows[0].token_secret, "keep-a")
+        self.assertEqual(rows[1].token_secret, "keep-b")
+
+    def test_setup_clears_slot2_when_empty(self) -> None:
+        previous = [
+            ProxmoxHostRow(slot=1, host="192.168.5.101", token_secret="a"),
+            ProxmoxHostRow(slot=2, host="192.168.5.102", token_secret="b"),
+        ]
+        rows = host_rows_from_setup_payload(
+            {
+                "proxmox_host": "192.168.5.101",
+                "proxmox_token_secret": "a",
+                "proxmox_2_host": "",
+            },
+            previous,
+            include_slot2=True,
+        )
+        self.assertEqual([r.slot for r in rows], [1])
+
+    def test_setup_keeps_slot3(self) -> None:
+        previous = [
+            ProxmoxHostRow(slot=1, host="192.168.5.101", token_secret="a"),
+            ProxmoxHostRow(slot=3, host="192.168.5.103", token_secret="c", label="pve03"),
+        ]
+        rows = host_rows_from_setup_payload(
+            {"proxmox_host": "192.168.5.101", "proxmox_2_host": "192.168.5.102"},
+            previous,
+        )
+        self.assertEqual(rows[1].token_secret, "")  # new slot2, no previous secret
+        self.assertEqual([r.slot for r in rows], [1, 2, 3])
+        self.assertEqual(rows[2].host, "192.168.5.103")
 
 
 if __name__ == "__main__":

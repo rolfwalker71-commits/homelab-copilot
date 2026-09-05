@@ -9,7 +9,9 @@
   <p class="mt-2 max-w-xl text-[var(--muted)]">
     Proxmox verbinden. Eigenständige Hosts (kein gemeinsames Cluster) brauchen jeweils
     eine eigene API — nicht nur einen zweiten Node-Namen auf dem ersten Host.
-    Für dauerhafte Konfiguration Umgebungsvariablen im Container setzen.
+    Speichern legt die Zugänge in der Datenbank unter <code class="text-[var(--text)]">/data</code>
+    ab. Sie überstehen Container- und Host-Neustarts und liegen nicht in
+    <code class="text-[var(--text)]">.env</code>.
   </p>
   <p class="mt-3 max-w-xl rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 text-sm text-[var(--muted)]">
     <strong class="text-[var(--text)]">Token-Rechte:</strong>
@@ -94,9 +96,9 @@
       Eigenständiger zweiter PVE, <strong class="text-[var(--text)]">kein</strong> Cluster-Mitglied
       von Host&nbsp;1. Copilot spricht ihn nur über diese eigene URL/Token an —
       niemals über die API von Host&nbsp;1 (<code class="text-[var(--text)]">/nodes/pve02/status</code>).
-      Leer lassen, wenn du nur einen Host hast. Dauerhaft:
-      <code class="text-[var(--text)]">PROXMOX_2_HOST</code> und Token in
-      <code class="text-[var(--text)]">.env</code> / Compose.
+      Leer lassen, wenn du nur einen Host hast. Wird mit Speichern in der Datenbank
+      abgelegt — nicht in <code class="text-[var(--text)]">.env</code> — und bleibt nach
+      Neustart erhalten.
     </p>
     <div>
       <label class="label" for="proxmox_2_host">Zweiter Host / IP</label>

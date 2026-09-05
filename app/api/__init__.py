@@ -27,7 +27,7 @@ router.include_router(push_router)
 
 
 class SetupPayload(BaseModel):
-    """Persisted via env file rewrite is out of scope; this updates runtime settings."""
+    """Proxmox hosts are written to SQLite (/data). Env is bootstrap only."""
 
     proxmox_host: str = ""
     proxmox_port: int = 8006
@@ -189,20 +189,18 @@ async def setup_status() -> dict[str, Any]:
 
 
 @router.post("/setup")
-async def apply_setup(payload: SetupPayload) -> dict[str, Any]:
-    """Update in-memory settings for the running process.
+async def apply_setup(request: Request, payload: SetupPayload) -> dict[str, Any]:
+    """Persist Proxmox hosts to SQLite on /data. Blank secrets keep previous values."""
+    from app.core.proxmox import (
+        apply_host_rows_to_settings,
+        host_rows_from_dicts,
+        host_rows_from_setup_payload,
+        merge_proxmox_hosts,
+    )
 
-    For durable config, set the matching environment variables / `.env` and restart.
-    Empty secret/password fields keep the previously configured values.
-    """
     s = get_settings()
     raw = payload.model_dump()
-    # Old setup clients omit host-2 fields — do not wipe env-configured extras.
-    if "proxmox_2_host" not in payload.model_fields_set:
-        for key in list(raw):
-            if key.startswith("proxmox_2_"):
-                raw.pop(key, None)
-    # Do not wipe secrets when the setup form leaves password fields blank
+    include_slot2 = "proxmox_2_host" in payload.model_fields_set
     if not raw.get("proxmox_token_secret"):
         raw.pop("proxmox_token_secret", None)
     if not raw.get("proxmox_password"):
@@ -211,14 +209,25 @@ async def apply_setup(payload: SetupPayload) -> dict[str, Any]:
         raw.pop("proxmox_2_token_secret", None)
     if not raw.get("proxmox_2_password"):
         raw.pop("proxmox_2_password", None)
-    for key, value in raw.items():
-        if hasattr(s, key):
-            object.__setattr__(s, key, value)
+
+    store = getattr(request.app.state, "app_store", None)
+    db_rows = host_rows_from_dicts(await store.list_proxmox_hosts()) if store else []
+    previous = merge_proxmox_hosts(db_rows, s)
+    rows = host_rows_from_setup_payload(
+        raw, previous, include_slot2=include_slot2
+    )
+    if store is not None:
+        await store.replace_proxmox_hosts([r.to_dict() for r in rows])
+    apply_host_rows_to_settings(s, rows)
+
+    for key in ("docker_use_local_socket", "docker_ssh_user"):
+        if key in raw and hasattr(s, key):
+            object.__setattr__(s, key, raw[key])
     return {
         "ok": True,
         "message": (
-            "Laufzeit-Konfiguration aktualisiert. "
-            "Für Persistenz bitte Umgebungsvariablen setzen und Container neu starten."
+            "Proxmox-Zugänge in der Datenbank gespeichert. "
+            "Sie bleiben nach Neustart erhalten — nicht in .env."
         ),
         "proxmox_configured": s.proxmox_configured,
         "time": format_de(now_berlin()),

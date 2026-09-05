@@ -76,7 +76,7 @@ In der Proxmox-UI: **Datacenter → Permissions → Add**
 
 Alternativ Privilege Separation am Token deaktivieren (Token erbt dann User-Rechte) — weniger restriktiv.
 
-Alternativ: Setup-Assistent unter `/setup` (Laufzeit; für Persistenz Env-Vars setzen).
+Alternativ: Setup-Assistent unter `/setup` — speichert Proxmox-Zugänge in SQLite (`/data`). Env-Vars sind nur optionaler Fallback, bis einmal gespeichert wurde.
 
 ## PWA / Mobile
 
@@ -116,7 +116,7 @@ Router landen unter `/api/modules/<name>/…`.
 | GET | `/api/topology` | Aktuelle Topologie |
 | POST | `/api/discovery/refresh` | Manuelle Discovery |
 | GET | `/api/modules` | Geladene Module |
-| GET/POST | `/api/setup` | Setup-Status / Laufzeit-Config |
+| GET/POST | `/api/setup` | Setup-Status / Proxmox-Hosts in SQLite |
 
 OpenAPI: `/api/docs`
 

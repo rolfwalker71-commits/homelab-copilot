@@ -691,8 +691,10 @@
 <div class="alert-tonal mb-8 animate-in" role="alert">
   <p class="font-semibold text-[var(--warn)]">Proxmox nicht konfiguriert</p>
   <p class="mt-1 text-sm text-[var(--muted)]">
-    Setze <code class="text-[var(--text)]">PROXMOX_HOST</code> und Token/Passwort oder nutze den
-    <a href="/setup" class="underline decoration-[var(--accent)] underline-offset-2">Setup-Assistenten</a>.
+    Nutze den
+    <a href="/setup" class="underline decoration-[var(--accent)] underline-offset-2">Setup-Assistenten</a>
+    (Speichern schreibt in die Datenbank, nicht in <code class="text-[var(--text)]">.env</code>)
+    oder setze optional <code class="text-[var(--text)]">PROXMOX_HOST</code> als Startwert.
   </p>
 </div>
 {% endif %}

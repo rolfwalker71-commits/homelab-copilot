@@ -19,6 +19,7 @@ from app.core.app_store import AppStore
 from app.core.inventory import InventoryStore
 from app.core.auth import TotpAuthMiddleware, ensure_totp_secret
 from app.core.discovery import DiscoveryEngine
+from app.core.proxmox import hydrate_proxmox_settings
 from app.core.backup_storage import bagel_dasharray, copilot_fs_usage
 from app.core.host_presence import host_presence_for_app
 from app.core.locale import (
@@ -80,12 +81,14 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
+    app_store = AppStore(settings.app_db_path)
+    await app_store.connect()
+    await hydrate_proxmox_settings(settings, app_store)
+
     store = TopologyStore(settings.db_path)
     await store.connect()
     engine = DiscoveryEngine(settings)
 
-    app_store = AppStore(settings.app_db_path)
-    await app_store.connect()
     cookie_secret = await app_store.ensure_cookie_secret()
     await ensure_totp_secret(app_store)
     vapid = await ensure_vapid_keys(app_store, settings)

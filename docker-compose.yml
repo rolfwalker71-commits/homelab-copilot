@@ -14,6 +14,7 @@ services:
       MODULES_DIR: /app/modules
       DISCOVERY_INTERVAL_SECONDS: ${DISCOVERY_INTERVAL_SECONDS:-300}
       HEALTH_POLL_INTERVAL_SECONDS: ${HEALTH_POLL_INTERVAL_SECONDS:-300}
+      # Optional bootstrap; Setup save → SQLite /data (copilot-data) wins.
       PROXMOX_HOST: ${PROXMOX_HOST:-}
       PROXMOX_PORT: ${PROXMOX_PORT:-8006}
       PROXMOX_USER: ${PROXMOX_USER:-root@pam}
@@ -21,7 +22,7 @@ services:
       PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET:-}
       PROXMOX_PASSWORD: ${PROXMOX_PASSWORD:-}
       PROXMOX_VERIFY_SSL: ${PROXMOX_VERIFY_SSL:-false}
-      # Second standalone PVE (not a cluster member of PROXMOX_HOST)
+      # Optional second standalone PVE (not a cluster member of PROXMOX_HOST)
       PROXMOX_2_HOST: ${PROXMOX_2_HOST:-}
       PROXMOX_2_PORT: ${PROXMOX_2_PORT:-8006}
       PROXMOX_2_USER: ${PROXMOX_2_USER:-root@pam}
