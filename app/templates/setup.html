@@ -20,10 +20,32 @@
 </section>
 
 <nav class="mb-6 flex flex-wrap gap-2 text-sm" aria-label="Setup-Bereiche">
+  <a href="#appearance" class="btn btn-ghost btn-sm">Darstellung</a>
   <a href="#proxmox" class="btn btn-ghost btn-sm">Proxmox</a>
   <a href="#security" class="btn btn-ghost btn-sm">Sicherheit</a>
   <a href="#modules" class="btn btn-ghost btn-sm">Module</a>
 </nav>
+
+<section id="appearance" class="mb-8 max-w-xl scroll-mt-24 animate-in" aria-labelledby="appearance-heading">
+  <article class="surface space-y-4 p-5 sm:p-6">
+    <h2 id="appearance-heading" class="font-display text-lg font-bold">Darstellung</h2>
+    <p class="text-sm text-[var(--muted)]">
+      Hell, Dunkel oder System (folgt dem Gerät). Die Wahl gilt für alle Seiten und bleibt gespeichert.
+      Unabhängig vom Layout (Android / Desktop).
+    </p>
+    <div class="seg" role="radiogroup" aria-label="Darstellung">
+      <button type="button" role="radio" aria-checked="false" data-theme-set="light">
+        {{ ico('sun', 16) }} Hell
+      </button>
+      <button type="button" role="radio" aria-checked="false" data-theme-set="dark">
+        {{ ico('moon', 16) }} Dunkel
+      </button>
+      <button type="button" role="radio" aria-checked="true" data-theme-set="system">
+        {{ ico('system', 16) }} System
+      </button>
+    </div>
+  </article>
+</section>
 
 <form id="setup-form" class="surface animate-in animate-in-delay-1 max-w-xl space-y-5 p-5 sm:p-6 mb-10" novalidate>
   <h2 id="proxmox" class="font-display text-lg font-bold scroll-mt-24">Proxmox &amp; Docker</h2>

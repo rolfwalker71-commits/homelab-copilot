@@ -27,19 +27,19 @@
 <div id="job-progress" class="mb-4 hidden animate-in" aria-live="polite" aria-busy="false">
   <div class="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 sm:p-4 space-y-3">
     <div class="flex items-start gap-3">
-      <span id="jp-spinner" class="mt-0.5 inline-block h-5 w-5 shrink-0 rounded-full border-2 border-[var(--border)] border-t-[var(--primary)] animate-spin" aria-hidden="true"></span>
+      <span id="jp-spinner" data-jp="spinner" class="mt-0.5 inline-block h-5 w-5 shrink-0 rounded-full border-2 border-[var(--border)] border-t-[var(--primary)] animate-spin" aria-hidden="true"></span>
       <div class="min-w-0 flex-1">
-        <p id="jp-title" class="font-medium text-[var(--text)]">Auftrag läuft…</p>
-        <p id="jp-phase" class="mt-0.5 text-sm text-[var(--muted)]">—</p>
+        <p id="jp-title" data-jp="title" class="font-medium text-[var(--text)]">Auftrag läuft…</p>
+        <p id="jp-phase" data-jp="phase" class="mt-0.5 text-sm text-[var(--muted)]">—</p>
       </div>
-      <span id="jp-percent" class="shrink-0 text-sm font-medium tabular-nums text-[var(--text)]">0&nbsp;%</span>
+      <span id="jp-percent" data-jp="percent" class="shrink-0 text-sm font-medium tabular-nums text-[var(--text)]">0&nbsp;%</span>
     </div>
-    <div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" id="jp-bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-      <div id="jp-bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>
+    <div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" id="jp-bar-wrap" data-jp="bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div id="jp-bar" data-jp="bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>
     </div>
-    <p id="jp-message" class="text-sm text-[var(--muted)]">Status wird geladen…</p>
-    <pre id="jp-log" class="max-h-32 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words hidden"></pre>
-    <p id="jp-footer" class="text-sm hidden"></p>
+    <p id="jp-message" data-jp="message" class="text-sm text-[var(--muted)]">Status wird geladen…</p>
+    <pre id="jp-log" data-jp="log" class="max-h-32 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words hidden"></pre>
+    <p id="jp-footer" data-jp="footer" class="text-sm hidden"></p>
   </div>
 </div>
 
@@ -88,6 +88,9 @@
   let pollTimer = null;
   let busy = false;
   let activeTargetId = null;
+  let progressScope = 'global';
+  let lastCardJob = null;
+  let cardJobMeta = { kind: 'scan', targetName: '' };
 
   function esc(s) {
     return String(s == null ? '' : s)
@@ -105,100 +108,230 @@
     return document.getElementById('job-progress');
   }
 
-  function showProgress(kind, targetName) {
+  function hideGlobalProgress() {
+    const root = progressRoot();
+    if (!root) return;
+    root.classList.add('hidden');
+    root.setAttribute('aria-busy', 'false');
+  }
+
+  function clearCardJobs() {
+    document.querySelectorAll('[data-host-job]').forEach(function (el) { el.remove(); });
+  }
+
+  function cardFor(targetId) {
+    if (!targetId) return null;
+    return document.querySelector('.entity-card[data-id="' + CSS.escape(targetId) + '"]');
+  }
+
+  function progressInnerHtml() {
+    return (
+      '<div class="flex items-start gap-3">' +
+        '<span data-jp="spinner" class="mt-0.5 inline-block h-5 w-5 shrink-0 rounded-full border-2 border-[var(--border)] border-t-[var(--primary)] animate-spin" aria-hidden="true"></span>' +
+        '<div class="min-w-0 flex-1">' +
+          '<p data-jp="title" class="font-medium text-[var(--text)]">Auftrag läuft…</p>' +
+          '<p data-jp="phase" class="mt-0.5 text-sm text-[var(--muted)]">—</p>' +
+        '</div>' +
+        '<span data-jp="percent" class="shrink-0 text-sm font-medium tabular-nums text-[var(--text)]">0&nbsp;%</span>' +
+      '</div>' +
+      '<div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" data-jp="bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">' +
+        '<div data-jp="bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>' +
+      '</div>' +
+      '<p data-jp="message" class="text-sm text-[var(--muted)]">Status wird geladen…</p>' +
+      '<pre data-jp="log" class="max-h-32 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words hidden"></pre>' +
+      '<div class="flex flex-wrap items-center justify-between gap-2">' +
+        '<p data-jp="footer" class="text-sm hidden m-0"></p>' +
+        '<button type="button" class="btn btn-ghost btn-sm host-job-dismiss hidden">Ausblenden</button>' +
+      '</div>'
+    );
+  }
+
+  function ensureCardJobPanel(targetId) {
+    const card = cardFor(targetId);
+    if (!card) return null;
+    let box = card.querySelector('[data-host-job]');
+    if (!box) {
+      box = document.createElement('div');
+      box.setAttribute('data-host-job', '');
+      box.setAttribute('aria-live', 'polite');
+      box.className = 'mt-3 rounded-lg border border-[var(--border)] bg-[color-mix(in_srgb,var(--muted)_8%,transparent)] p-3 space-y-3';
+      const slot = card.querySelector('[data-host-job-slot]');
+      if (slot) slot.appendChild(box);
+      else card.appendChild(box);
+    }
+    if (!box.querySelector('[data-jp="title"]')) {
+      box.innerHTML = progressInnerHtml();
+    }
+    return box;
+  }
+
+  function activeProgressRoot() {
+    if (progressScope === 'card' && activeTargetId) {
+      const box = ensureCardJobPanel(activeTargetId);
+      if (box) return box;
+    }
+    return progressRoot();
+  }
+
+  function jp(name) {
+    const root = activeProgressRoot();
+    if (!root) return null;
+    return root.querySelector('[data-jp="' + name + '"]');
+  }
+
+  function resetProgressFields(kind, targetName) {
+    const spinner = jp('spinner');
+    if (spinner) spinner.classList.remove('hidden');
+    const title = jp('title');
+    if (title) {
+      title.textContent =
+        (kind === 'apply' ? 'Updates werden eingespielt' : 'Scan läuft') +
+        (targetName ? ': ' + targetName : '…');
+    }
+    const phase = jp('phase');
+    if (phase) phase.textContent = 'Warteschlange';
+    const message = jp('message');
+    if (message) {
+      message.textContent = 'Auftrag wird gestartet…';
+      message.style.color = '';
+    }
+    const percent = jp('percent');
+    if (percent) percent.textContent = '0\u00a0%';
+    const bar = jp('bar');
+    if (bar) {
+      bar.style.width = '0%';
+      bar.style.background = 'var(--primary)';
+    }
+    const wrap = jp('bar-wrap');
+    if (wrap) wrap.setAttribute('aria-valuenow', '0');
+    const log = jp('log');
+    if (log) {
+      log.textContent = '';
+      log.classList.add('hidden');
+    }
+    const foot = jp('footer');
+    if (foot) {
+      foot.classList.add('hidden');
+      foot.textContent = '';
+      foot.style.color = '';
+    }
+    const root = activeProgressRoot();
+    const dismiss = root && root.querySelector('.host-job-dismiss');
+    if (dismiss) dismiss.classList.add('hidden');
+  }
+
+  function showProgress(kind, targetName, targetId) {
+    if (targetId) {
+      progressScope = 'card';
+      activeTargetId = targetId;
+      lastCardJob = null;
+      cardJobMeta = { kind: kind, targetName: targetName || '' };
+      hideGlobalProgress();
+      clearCardJobs();
+      const box = ensureCardJobPanel(targetId);
+      if (box) {
+        box.classList.remove('hidden');
+        box.setAttribute('aria-busy', 'true');
+      }
+      resetProgressFields(kind, targetName);
+      const card = cardFor(targetId);
+      if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      return;
+    }
+    progressScope = 'global';
+    clearCardJobs();
+    lastCardJob = null;
     const root = progressRoot();
     if (!root) return;
     root.classList.remove('hidden');
     root.setAttribute('aria-busy', 'true');
-    document.getElementById('jp-spinner').classList.remove('hidden');
-    document.getElementById('jp-title').textContent =
-      (kind === 'apply' ? 'Updates werden eingespielt' : 'Scan läuft') +
-      (targetName ? ': ' + targetName : '…');
-    document.getElementById('jp-phase').textContent = 'Warteschlange';
-    document.getElementById('jp-message').textContent = 'Auftrag wird gestartet…';
-    document.getElementById('jp-message').style.color = '';
-    document.getElementById('jp-percent').textContent = '0\u00a0%';
-    document.getElementById('jp-bar').style.width = '0%';
-    document.getElementById('jp-bar').style.background = 'var(--primary)';
-    document.getElementById('jp-bar-wrap').setAttribute('aria-valuenow', '0');
-    const log = document.getElementById('jp-log');
-    log.textContent = '';
-    log.classList.add('hidden');
-    const foot = document.getElementById('jp-footer');
-    foot.classList.add('hidden');
-    foot.textContent = '';
+    resetProgressFields(kind, targetName);
     root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
   function updateProgress(job) {
     const pct = Math.max(0, Math.min(100, Number(job.percent) || 0));
-    document.getElementById('jp-phase').textContent = job.phase || '—';
-    document.getElementById('jp-message').textContent = job.message || job.status || '';
-    document.getElementById('jp-percent').textContent = pct + '\u00a0%';
-    document.getElementById('jp-bar').style.width = pct + '%';
-    document.getElementById('jp-bar-wrap').setAttribute('aria-valuenow', String(pct));
+    const phase = jp('phase');
+    if (phase) phase.textContent = job.phase || '—';
+    const message = jp('message');
+    if (message) message.textContent = job.message || job.status || '';
+    const percent = jp('percent');
+    if (percent) percent.textContent = pct + '\u00a0%';
+    const bar = jp('bar');
+    if (bar) bar.style.width = pct + '%';
+    const wrap = jp('bar-wrap');
+    if (wrap) wrap.setAttribute('aria-valuenow', String(pct));
     const lines = job.log_lines || [];
-    const log = document.getElementById('jp-log');
-    if (lines.length) {
+    const log = jp('log');
+    if (log && lines.length) {
       log.classList.remove('hidden');
       log.textContent = lines.join('\n');
       log.scrollTop = log.scrollHeight;
     }
-    setCardBusy(activeTargetId, true, job.phase, pct, job.message);
   }
 
   function finishProgress(job) {
-    const root = progressRoot();
+    const root = activeProgressRoot();
     if (!root) return;
     root.setAttribute('aria-busy', 'false');
-    document.getElementById('jp-spinner').classList.add('hidden');
+    const spinner = jp('spinner');
+    if (spinner) spinner.classList.add('hidden');
     const ok = !!(job && job.ok);
     const pct = 100;
-    document.getElementById('jp-percent').textContent = pct + '\u00a0%';
-    document.getElementById('jp-bar').style.width = pct + '%';
-    document.getElementById('jp-bar').style.background = ok
-      ? 'var(--primary)'
-      : 'var(--danger, #c44)';
-    document.getElementById('jp-phase').textContent = (job && job.phase) || (ok ? 'Fertig' : 'Fehler');
+    const percent = jp('percent');
+    if (percent) percent.textContent = pct + '\u00a0%';
+    const bar = jp('bar');
+    if (bar) {
+      bar.style.width = pct + '%';
+      bar.style.background = ok ? 'var(--primary)' : 'var(--danger, #c44)';
+    }
+    const wrap = jp('bar-wrap');
+    if (wrap) wrap.setAttribute('aria-valuenow', String(pct));
+    const phase = jp('phase');
+    if (phase) phase.textContent = (job && job.phase) || (ok ? 'Fertig' : 'Fehler');
     const msg = (job && (job.message || job.error)) || (ok ? 'Fertig' : 'Fehlgeschlagen');
-    document.getElementById('jp-message').textContent = msg;
-    document.getElementById('jp-message').style.color = ok ? '' : 'var(--danger, #c44)';
-    const foot = document.getElementById('jp-footer');
-    foot.classList.remove('hidden');
-    foot.style.color = ok ? '' : 'var(--danger, #c44)';
-    foot.textContent = ok ? 'Abgeschlossen.' : ('Fehler: ' + msg);
+    const message = jp('message');
+    if (message) {
+      message.textContent = msg;
+      message.style.color = ok ? '' : 'var(--danger, #c44)';
+    }
+    const foot = jp('footer');
+    if (foot) {
+      foot.classList.remove('hidden');
+      foot.style.color = ok ? '' : 'var(--danger, #c44)';
+      foot.textContent = ok ? 'Abgeschlossen.' : ('Fehler: ' + msg);
+    }
+    const dismiss = root.querySelector('.host-job-dismiss');
+    if (dismiss) dismiss.classList.toggle('hidden', progressScope !== 'card');
     const lines = (job && job.log_lines) || [];
-    if (lines.length) {
-      const log = document.getElementById('jp-log');
+    const log = jp('log');
+    if (log && lines.length) {
       log.classList.remove('hidden');
       log.textContent = lines.join('\n');
     }
+    if (progressScope === 'card' && activeTargetId) {
+      lastCardJob = {
+        targetId: activeTargetId,
+        job: job,
+        kind: cardJobMeta.kind,
+        targetName: cardJobMeta.targetName,
+      };
+    }
   }
 
-  function setCardBusy(targetId, on, phase, pct, message) {
-    if (!targetId) return;
-    const card = document.querySelector('.entity-card[data-id="' + CSS.escape(targetId) + '"]');
-    if (!card) return;
-    let box = card.querySelector('.card-progress');
-    if (on) {
-      if (!box) {
-        box = document.createElement('div');
-        box.className = 'card-progress mt-3 rounded-lg border border-[var(--border)] p-2 space-y-2';
-        card.appendChild(box);
-      }
-      box.innerHTML =
-        '<div class="flex items-center justify-between gap-2 text-sm">' +
-          '<span class="font-medium">' + esc(phase || 'Läuft…') + '</span>' +
-          '<span class="tabular-nums text-[var(--muted)]">' + (pct != null ? pct + '\u00a0%' : '') + '</span>' +
-        '</div>' +
-        '<div class="h-1.5 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]">' +
-          '<div class="h-full rounded-full bg-[var(--primary)] transition-[width] duration-300" style="width:' + (pct || 0) + '%"></div>' +
-        '</div>' +
-        '<p class="text-xs text-[var(--muted)]">' + esc(message || '') + '</p>';
-      card.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
-    } else if (box) {
-      box.remove();
+  function restoreCardFinished(saved) {
+    if (!saved || !saved.targetId || !saved.job) return;
+    progressScope = 'card';
+    activeTargetId = saved.targetId;
+    const box = ensureCardJobPanel(saved.targetId);
+    if (!box) return;
+    const title = box.querySelector('[data-jp="title"]');
+    if (title) {
+      title.textContent =
+        (saved.kind === 'apply' ? 'Updates werden eingespielt' : 'Scan läuft') +
+        (saved.targetName ? ': ' + saved.targetName : '');
     }
+    finishProgress(saved.job);
   }
 
   function setBusy(on) {
@@ -431,6 +564,7 @@
               ? '<button type="button" class="btn btn-sm btn-ghost btn-reboot" data-id="' + esc(t.id) + '">Reboot</button>'
               : '') +
           '</div>' +
+          '<div data-host-job-slot></div>' +
         '</article>'
       );
     }).join('');
@@ -486,24 +620,20 @@
     if (busy) return;
     setBusy(true);
     activeTargetId = targetId;
-    showProgress(kind, targetName);
-    setCardBusy(targetId, true, 'Start', 2, 'Auftrag wird gestartet…');
+    lastCardJob = null;
+    showProgress(kind, targetName, targetId);
     try {
       const j = await startFn();
-      if (!j) return;
-      const done = await pollJob(j.job_id);
-      await loadTargets();
-      if (done && !done.ok) {
-        /* progress panel already shows error */
-      }
+      if (j) await pollJob(j.job_id);
     } catch (e) {
       finishProgress({ ok: false, error: String(e), phase: 'Fehler', percent: 100, message: String(e) });
     } finally {
-      setCardBusy(activeTargetId, false);
-      activeTargetId = null;
       setBusy(false);
-      /* re-enable buttons via reload */
+      const saved = lastCardJob;
       await loadTargets();
+      if (saved) restoreCardFinished(saved);
+      activeTargetId = null;
+      progressScope = 'global';
     }
   }
 
@@ -645,7 +775,14 @@
 
   document.getElementById('target-list').addEventListener('click', function (ev) {
     const t = ev.target.closest('button');
-    if (!t || busy) return;
+    if (!t) return;
+    if (t.classList.contains('host-job-dismiss')) {
+      const box = t.closest('[data-host-job]');
+      if (box) box.remove();
+      lastCardJob = null;
+      return;
+    }
+    if (busy) return;
     if (t.classList.contains('btn-scan')) startScan(t.dataset.id, t.dataset.name);
     if (t.classList.contains('btn-apply')) openApply(t.dataset.id, t.dataset.name);
     if (t.classList.contains('btn-detail')) showDetail(Number(t.dataset.scan));

@@ -84,6 +84,7 @@ Alternativ: Setup-Assistent unter `/setup` (Laufzeit; für Persistenz Env-Vars s
 - **Mobile (&lt; lg):** Material You 3 Expressive — Flush-NavigationBar, tonal Surfaces, Squircle-FAB, Seed `#6750A4`
 - **Desktop (lg+):** Fluent 2 — Mica-Header, kompakter Radius, Accent-Underline-Nav (`#60cdff` / `#005fb8`)
 - Chrome-Auto: `document.documentElement.dataset.chrome` (`android` | `desktop`); Override via `localStorage.hlops-chrome`
+- Darstellung: `data-theme` (`light` | `dark`); Wahl via `localStorage.hlops-theme` (`system` | `light` | `dark`)
 - Installierbar (Chrome/Edge/Android; iOS: Teilen → „Zum Home-Bildschirm“)
 - Offline-Fallback unter `/offline`
 

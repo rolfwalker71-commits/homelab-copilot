@@ -1,10 +1,9 @@
 <!DOCTYPE html>
-<html lang="de" data-chrome="android">
+<html lang="de" data-chrome="android" data-theme="dark" data-theme-pref="system">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#1a2422" media="(prefers-color-scheme: dark)" />
-  <meta name="theme-color" content="#e6f2ef" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#1a2422" />
   <meta name="color-scheme" content="dark light" />
   <meta name="description" content="Homelab Operations Copilot — Proxmox- &amp; Docker-Topologie als PWA." />
   <meta name="application-name" content="HomelabOps" />
@@ -19,15 +18,35 @@
   <link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
   <script>
-    /* Chrome detection before paint — auto: <lg → android (MY3E), lg+ → desktop (Fluent 2) */
+    /* Chrome + theme before first paint — avoids flash. Theme ≠ chrome. */
     (function () {
-      var pref = localStorage.getItem('hlops-chrome') || 'auto';
-      var chrome = pref;
-      if (pref === 'auto') {
+      var root = document.documentElement;
+      var chromePref = localStorage.getItem('hlops-chrome') || 'auto';
+      var chrome = chromePref;
+      if (chromePref === 'auto') {
         chrome = window.matchMedia('(min-width: 1024px)').matches ? 'desktop' : 'android';
       }
       if (chrome !== 'android' && chrome !== 'desktop' && chrome !== 'ios') chrome = 'android';
-      document.documentElement.dataset.chrome = chrome;
+      root.dataset.chrome = chrome;
+
+      var themePref = localStorage.getItem('hlops-theme') || 'system';
+      if (themePref !== 'light' && themePref !== 'dark' && themePref !== 'system') themePref = 'system';
+      var theme = themePref === 'system'
+        ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        : themePref;
+      root.dataset.theme = theme;
+      root.dataset.themePref = themePref;
+      root.style.colorScheme = theme;
+
+      var colors = {
+        dark: { android: '#1a2422', desktop: '#1a1f1e', ios: '#1a2422' },
+        light: { android: '#e6f2ef', desktop: '#f0f5f3', ios: '#e6f2ef' }
+      };
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) {
+        var row = colors[theme] || colors.dark;
+        meta.setAttribute('content', row[chrome] || row.android);
+      }
     })();
   </script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -88,6 +107,26 @@
       <div class="flex items-center gap-2">
         <button type="button" id="btn-install" class="btn btn-ghost hidden !min-h-10 !px-3 !text-sm" aria-label="App installieren">Installieren</button>
         <time class="hidden text-sm text-[var(--muted)] lg:block" datetime="{{ now }}">{{ now }}</time>
+        <div class="theme-control">
+          <button type="button" id="btn-theme" class="theme-toggle"
+                  aria-label="Darstellung: System" aria-haspopup="menu"
+                  aria-expanded="false" aria-controls="theme-menu">
+            <span class="theme-toggle-icon" data-theme-icon="light" hidden>{{ ico('sun', 20) }}</span>
+            <span class="theme-toggle-icon" data-theme-icon="dark" hidden>{{ ico('moon', 20) }}</span>
+            <span class="theme-toggle-icon" data-theme-icon="system">{{ ico('system', 20) }}</span>
+          </button>
+          <div id="theme-menu" class="theme-menu" hidden role="menu" aria-label="Darstellung">
+            <button type="button" role="menuitemradio" aria-checked="false" data-theme-set="light">
+              {{ ico('sun', 16) }} Hell
+            </button>
+            <button type="button" role="menuitemradio" aria-checked="false" data-theme-set="dark">
+              {{ ico('moon', 16) }} Dunkel
+            </button>
+            <button type="button" role="menuitemradio" aria-checked="true" data-theme-set="system">
+              {{ ico('system', 16) }} System
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </header>

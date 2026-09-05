@@ -9,6 +9,10 @@ html {
   color-scheme: dark;
 }
 
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
 /* Shared semantic aliases used by templates */
 :root {
   --bg: var(--background);
@@ -84,46 +88,44 @@ html[data-chrome="desktop"] {
   --nav-h: 0;
 }
 
-@media (prefers-color-scheme: light) {
-  html[data-chrome="android"] {
-    color-scheme: light;
-    --background: #f4faf8;
-    --surface-container: #e6f2ef;
-    --card: #ffffff;
-    --outline: #6b7c78;
-    --on-surface: #0f1a18;
-    --on-surface-variant: #3d4f4b;
-    --primary: #0d9488;
-    --primary-container: #99f6e4;
-    --secondary: #cce8e2;
-    --on-secondary: #0f1a18;
-    --on-primary: #ffffff;
-    --success: #15803d;
-    --partial: #b45309;
-    --danger: #b3261e;
-    --warn: #7d5700;
-    --info: #0f766e;
-  }
+html[data-theme="light"][data-chrome="android"] {
+  color-scheme: light;
+  --background: #f4faf8;
+  --surface-container: #e6f2ef;
+  --card: #ffffff;
+  --outline: #6b7c78;
+  --on-surface: #0f1a18;
+  --on-surface-variant: #3d4f4b;
+  --primary: #0d9488;
+  --primary-container: #99f6e4;
+  --secondary: #cce8e2;
+  --on-secondary: #0f1a18;
+  --on-primary: #ffffff;
+  --success: #15803d;
+  --partial: #b45309;
+  --danger: #b3261e;
+  --warn: #7d5700;
+  --info: #0f766e;
+}
 
-  html[data-chrome="desktop"] {
-    color-scheme: light;
-    --background: #f0f5f3;
-    --surface-container: rgb(255 255 255 / 0.78);
-    --card: #ffffff;
-    --outline: #d5e0dc;
-    --on-surface: #121a18;
-    --on-surface-variant: #4a5c57;
-    --primary: #0f766e;
-    --primary-container: #5eead4;
-    --secondary: #f3faf8;
-    --on-secondary: #121a18;
-    --on-primary: #ffffff;
-    --success: #15803d;
-    --partial: #b45309;
-    --danger: #c42b1c;
-    --warn: #9a6700;
-    --info: #0f766e;
-  }
+html[data-theme="light"][data-chrome="desktop"] {
+  color-scheme: light;
+  --background: #f0f5f3;
+  --surface-container: rgb(255 255 255 / 0.78);
+  --card: #ffffff;
+  --outline: #d5e0dc;
+  --on-surface: #121a18;
+  --on-surface-variant: #4a5c57;
+  --primary: #0f766e;
+  --primary-container: #5eead4;
+  --secondary: #f3faf8;
+  --on-secondary: #121a18;
+  --on-primary: #ffffff;
+  --success: #15803d;
+  --partial: #b45309;
+  --danger: #c42b1c;
+  --warn: #9a6700;
+  --info: #0f766e;
 }
 
 body {
@@ -254,26 +256,24 @@ html[data-chrome="desktop"] .entity-card:hover {
   background: color-mix(in srgb, var(--warn) 13%, var(--card));
 }
 
-@media (prefers-color-scheme: light) {
-  .chip-running { color: var(--success); }
+html[data-theme="light"] .chip-running { color: var(--success); }
 
-  .row-status-running {
-    background: color-mix(in srgb, var(--success) 11%, var(--card));
-  }
+html[data-theme="light"] .row-status-running {
+  background: color-mix(in srgb, var(--success) 11%, var(--card));
+}
 
-  .row-status-stopped,
-  .row-status-exited,
-  .row-status-dead {
-    background: color-mix(in srgb, var(--danger) 10%, var(--card));
-  }
+html[data-theme="light"] .row-status-stopped,
+html[data-theme="light"] .row-status-exited,
+html[data-theme="light"] .row-status-dead {
+  background: color-mix(in srgb, var(--danger) 10%, var(--card));
+}
 
-  .row-status-paused,
-  .row-status-unknown,
-  .row-status-error,
-  .row-status-created,
-  .row-status-restarting {
-    background: color-mix(in srgb, var(--warn) 10%, var(--card));
-  }
+html[data-theme="light"] .row-status-paused,
+html[data-theme="light"] .row-status-unknown,
+html[data-theme="light"] .row-status-error,
+html[data-theme="light"] .row-status-created,
+html[data-theme="light"] .row-status-restarting {
+  background: color-mix(in srgb, var(--warn) 10%, var(--card));
 }
 
 /* ── Buttons ──────────────────────────────── */
@@ -993,10 +993,8 @@ html[data-chrome="android"] .topo-rail-node-select.is-selected {
   background: color-mix(in srgb, var(--primary) 18%, var(--card));
 }
 
-@media (prefers-color-scheme: light) {
-  html[data-chrome="android"] .topo-rail-node-select.is-selected {
-    background: color-mix(in srgb, var(--primary-container) 72%, var(--card));
-  }
+html[data-theme="light"][data-chrome="android"] .topo-rail-node-select.is-selected {
+  background: color-mix(in srgb, var(--primary-container) 72%, var(--card));
 }
 
 .topo-rail-node-static {
@@ -1093,10 +1091,8 @@ html[data-chrome="android"] .topo-rail-item.is-selected {
   background: color-mix(in srgb, var(--primary) 18%, var(--card));
 }
 
-@media (prefers-color-scheme: light) {
-  html[data-chrome="android"] .topo-rail-item.is-selected {
-    background: color-mix(in srgb, var(--primary-container) 72%, var(--card));
-  }
+html[data-theme="light"][data-chrome="android"] .topo-rail-item.is-selected {
+  background: color-mix(in srgb, var(--primary-container) 72%, var(--card));
 }
 
 .topo-rail-status {
@@ -1126,10 +1122,8 @@ html[data-chrome="android"] .topo-rail-item.is-selected {
   background: var(--warn);
 }
 
-@media (prefers-color-scheme: light) {
-  .topo-rail-status-running {
-    background: var(--success);
-  }
+html[data-theme="light"] .topo-rail-status-running {
+  background: var(--success);
 }
 
 .topo-rail-item-body {
@@ -1288,24 +1282,22 @@ html[data-chrome="android"] .topo-detail {
   background: color-mix(in srgb, var(--warn) 13%, var(--card));
 }
 
-@media (prefers-color-scheme: light) {
-  .topo-detail-head.row-status-running {
-    background: color-mix(in srgb, var(--success) 12%, var(--card));
-  }
+html[data-theme="light"] .topo-detail-head.row-status-running {
+  background: color-mix(in srgb, var(--success) 12%, var(--card));
+}
 
-  .topo-detail-head.row-status-stopped,
-  .topo-detail-head.row-status-exited,
-  .topo-detail-head.row-status-dead {
-    background: color-mix(in srgb, var(--danger) 12%, var(--card));
-  }
+html[data-theme="light"] .topo-detail-head.row-status-stopped,
+html[data-theme="light"] .topo-detail-head.row-status-exited,
+html[data-theme="light"] .topo-detail-head.row-status-dead {
+  background: color-mix(in srgb, var(--danger) 12%, var(--card));
+}
 
-  .topo-detail-head.row-status-paused,
-  .topo-detail-head.row-status-unknown,
-  .topo-detail-head.row-status-error,
-  .topo-detail-head.row-status-created,
-  .topo-detail-head.row-status-restarting {
-    background: color-mix(in srgb, var(--warn) 12%, var(--card));
-  }
+html[data-theme="light"] .topo-detail-head.row-status-paused,
+html[data-theme="light"] .topo-detail-head.row-status-unknown,
+html[data-theme="light"] .topo-detail-head.row-status-error,
+html[data-theme="light"] .topo-detail-head.row-status-created,
+html[data-theme="light"] .topo-detail-head.row-status-restarting {
+  background: color-mix(in srgb, var(--warn) 12%, var(--card));
 }
 
 .topo-detail-title-row {
@@ -1590,14 +1582,12 @@ html[data-chrome="android"] .topo-detail-metrics {
   color: var(--danger);
 }
 
-@media (prefers-color-scheme: dark) {
-  .topo-metric.level-ok .topo-metric-icon {
-    color: var(--success);
-  }
+html[data-theme="dark"] .topo-metric.level-ok .topo-metric-icon {
+  color: var(--success);
+}
 
-  .topo-metric.level-ok .topo-metric-bar-fill {
-    background: var(--success);
-  }
+html[data-theme="dark"] .topo-metric.level-ok .topo-metric-bar-fill {
+  background: var(--success);
 }
 
 .topo-metric-sub {
@@ -1694,11 +1684,9 @@ html[data-chrome="desktop"] .topo-node-status-pill {
   color: var(--danger);
 }
 
-@media (prefers-color-scheme: dark) {
-  .topo-node-status-pill.status-running {
-    color: var(--success);
-    background: color-mix(in srgb, var(--success) 16%, var(--card));
-  }
+html[data-theme="dark"] .topo-node-status-pill.status-running {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 16%, var(--card));
 }
 
 .topo-node-versions {
@@ -1935,18 +1923,16 @@ html[data-chrome="android"] .topo-storage-row {
   }
 }
 
-@media (prefers-color-scheme: dark) {
-  .topo-chart-line-mem {
-    stroke: var(--success);
-  }
+html[data-theme="dark"] .topo-chart-line-mem {
+  stroke: var(--success);
+}
 
-  .topo-storage-row.level-ok .topo-metric-bar-fill {
-    background: var(--success);
-  }
+html[data-theme="dark"] .topo-storage-row.level-ok .topo-metric-bar-fill {
+  background: var(--success);
+}
 
-  .topo-storage-row.level-ok .topo-storage-pct {
-    color: var(--success);
-  }
+html[data-theme="dark"] .topo-storage-row.level-ok .topo-storage-pct {
+  color: var(--success);
 }
 
 @media (max-width: 40rem) {
@@ -2266,24 +2252,22 @@ html[data-chrome="desktop"] .topo-docker-panel-orphan {
   background: color-mix(in srgb, var(--warn) 13%, color-mix(in srgb, var(--background) 45%, var(--card)));
 }
 
-@media (prefers-color-scheme: light) {
-  .topo-docker-chip.row-status-running {
-    background: color-mix(in srgb, var(--success) 11%, color-mix(in srgb, var(--background) 40%, var(--card)));
-  }
+html[data-theme="light"] .topo-docker-chip.row-status-running {
+  background: color-mix(in srgb, var(--success) 11%, color-mix(in srgb, var(--background) 40%, var(--card)));
+}
 
-  .topo-docker-chip.row-status-stopped,
-  .topo-docker-chip.row-status-exited,
-  .topo-docker-chip.row-status-dead {
-    background: color-mix(in srgb, var(--danger) 10%, color-mix(in srgb, var(--background) 40%, var(--card)));
-  }
+html[data-theme="light"] .topo-docker-chip.row-status-stopped,
+html[data-theme="light"] .topo-docker-chip.row-status-exited,
+html[data-theme="light"] .topo-docker-chip.row-status-dead {
+  background: color-mix(in srgb, var(--danger) 10%, color-mix(in srgb, var(--background) 40%, var(--card)));
+}
 
-  .topo-docker-chip.row-status-paused,
-  .topo-docker-chip.row-status-unknown,
-  .topo-docker-chip.row-status-error,
-  .topo-docker-chip.row-status-created,
-  .topo-docker-chip.row-status-restarting {
-    background: color-mix(in srgb, var(--warn) 10%, color-mix(in srgb, var(--background) 40%, var(--card)));
-  }
+html[data-theme="light"] .topo-docker-chip.row-status-paused,
+html[data-theme="light"] .topo-docker-chip.row-status-unknown,
+html[data-theme="light"] .topo-docker-chip.row-status-error,
+html[data-theme="light"] .topo-docker-chip.row-status-created,
+html[data-theme="light"] .topo-docker-chip.row-status-restarting {
+  background: color-mix(in srgb, var(--warn) 10%, color-mix(in srgb, var(--background) 40%, var(--card)));
 }
 
 .topo-docker-chip-name {
@@ -2817,4 +2801,172 @@ html[data-chrome="android"] .topo-docker-summary:active {
 #history-table td > .flex {
   align-items: center;
   min-height: 1.75rem;
+}
+
+/* ── Appearance (theme) — not chrome (android/desktop) ── */
+.theme-control {
+  position: relative;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 3rem;
+  min-height: 3rem;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--on-surface);
+  cursor: pointer;
+}
+
+.theme-toggle:hover {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+html[data-chrome="desktop"] .theme-toggle {
+  min-width: 2.5rem;
+  min-height: 2.5rem;
+  border-radius: var(--radius-ctrl);
+}
+
+.theme-toggle-icon {
+  display: inline-flex;
+}
+
+.theme-toggle-icon[hidden] {
+  display: none;
+}
+
+.theme-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.25rem);
+  z-index: 50;
+  min-width: 11rem;
+  padding: 0.35rem;
+  margin: 0;
+  background: var(--card);
+  border: 1px solid var(--outline);
+  border-radius: 1.25rem;
+}
+
+html[data-chrome="desktop"] .theme-menu {
+  border-radius: var(--radius-ctrl);
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  backdrop-filter: blur(1.25rem) saturate(1.4);
+}
+
+.theme-menu[hidden] {
+  display: none;
+}
+
+.theme-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0 0.75rem;
+  border: none;
+  border-radius: 0.9rem;
+  background: transparent;
+  color: var(--on-surface);
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+}
+
+html[data-chrome="desktop"] .theme-menu button {
+  min-height: 2.5rem;
+  border-radius: var(--radius-ctrl);
+}
+
+.theme-menu button:hover {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.theme-menu button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.theme-menu button.is-active {
+  background: var(--secondary);
+  color: var(--primary);
+}
+
+.theme-menu button svg {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+}
+
+.seg {
+  display: flex;
+  height: 2.5rem;
+  min-height: 2.5rem;
+  max-width: 22rem;
+  padding: 0.125rem;
+  border-radius: 999px;
+  background: var(--secondary);
+}
+
+html[data-chrome="desktop"] .seg {
+  border-radius: var(--radius-ctrl);
+}
+
+.seg button {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  gap: 0.35rem;
+  height: 100%;
+  min-height: 0;
+  padding: 0 0.4rem;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--on-surface-variant);
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+html[data-chrome="desktop"] .seg button {
+  border-radius: calc(var(--radius-ctrl) - 1px);
+}
+
+.seg button:hover {
+  color: var(--on-surface);
+}
+
+.seg button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.seg button.is-active {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+.seg button svg {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
 }
