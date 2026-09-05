@@ -2151,19 +2151,50 @@ html[data-chrome="android"] .topo-storage-row {
   background: transparent;
   color: inherit;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
+  /* block, not flex: Safari ignores clicks on flex <summary> */
+  display: block;
+  list-style: none;
   width: 100%;
   margin: 0 0 0.55rem;
-  padding: 0.15rem 0.2rem 0.15rem 0;
+  padding: 0.15rem 0.35rem 0.15rem 0.15rem;
   text-align: left;
   font: inherit;
+  user-select: none;
   border-radius: calc(var(--radius) * 0.4);
 }
 
+html[data-chrome="android"] .topo-inventory-toggle {
+  border-radius: 1rem;
+  padding: 0.2rem 0.55rem 0.2rem 0.4rem;
+}
+
+html[data-chrome="android"] .topo-inventory-toggle:active {
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.topo-inventory-toggle::-webkit-details-marker,
+.topo-inventory-toggle::marker {
+  display: none;
+}
+
+.topo-inventory:not([open]) .topo-inventory-toggle,
 .topo-inventory.is-collapsed .topo-inventory-toggle {
   margin-bottom: 0;
+}
+
+.topo-inventory-toggle-inner {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2.75rem;
+}
+
+html[data-chrome="android"] .topo-inventory-toggle-inner {
+  min-height: 3rem;
+}
+
+html[data-chrome="desktop"] .topo-inventory-toggle-inner {
+  min-height: 2.5rem;
 }
 
 .topo-inventory-toggle:hover {
@@ -2181,6 +2212,7 @@ html[data-chrome="android"] .topo-storage-row {
   transition: transform 0.18s var(--motion);
 }
 
+.topo-inventory:not([open]) .topo-inventory-chevron,
 .topo-inventory.is-collapsed .topo-inventory-chevron {
   transform: rotate(-90deg);
 }
@@ -2193,14 +2225,15 @@ html[data-chrome="android"] .topo-storage-row {
   min-width: 0;
 }
 
-.topo-inventory.is-collapsed .topo-inventory-form {
-  display: none;
-}
-
 .topo-inventory-form {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
+}
+
+.topo-inventory:not([open]) .topo-inventory-form,
+.topo-inventory.is-collapsed .topo-inventory-form {
+  display: none;
 }
 
 .topo-inventory-notes {
