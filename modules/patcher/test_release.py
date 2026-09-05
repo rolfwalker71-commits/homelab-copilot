@@ -19,6 +19,7 @@ from patcher.release import (
     ubuntu_series_is_supported,
     ubuntu_upgrade_tool_mirror,
     upgrade_tool_url_candidates,
+    upgrader_log_tail,
 )
 
 ASOF = date(2026, 9, 5)
@@ -236,6 +237,31 @@ class HopPinTests(unittest.TestCase):
         self.assertIn("plucky", msg)
         self.assertIn("hlops-", msg)
         self.assertEqual(detect_fetched_upgrade_codename(blob), "resolute")
+
+    def test_failure_shows_last_30_lines_not_prefix(self) -> None:
+        s = suggest_ubuntu_release(version_id="24.10", today=ASOF)
+        assert s is not None
+        hop = s.hops[0]
+        prefix = "\n".join(
+            f"Reading package lists... line {i}" for i in range(40)
+        )
+        prefix += "\nDistUpgrade-Tarball gefunden: http://archive.ubuntu.com/ubuntu/dists/plucky/..."
+        suffix = (
+            "----- letzte 30 Zeilen /var/log/dist-upgrade/main.log -----\n"
+            "ERROR Can not write to '/boot'\n"
+            "Its not possible to write to the system directory '/boot'\n"
+            "DistUpgrade Exit: 1"
+        )
+        blob = prefix + "\n" + suffix
+        msg = hop_failure_message(hop, 1, blob)
+        self.assertIn("24.10 → 25.04", msg)
+        self.assertIn("Can not write to '/boot'", msg)
+        self.assertIn("DistUpgrade Exit: 1", msg)
+        self.assertNotIn("Reading package lists... line 0", msg)
+        self.assertNotIn("Reading package lists... line 9", msg)
+        tail = upgrader_log_tail(blob, 30)
+        self.assertIn("Can not write to '/boot'", tail)
+        self.assertNotIn("line 0", tail)
 
 
 class DebianSuggestTests(unittest.TestCase):

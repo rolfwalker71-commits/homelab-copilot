@@ -282,6 +282,19 @@ def detect_fetched_upgrade_codename(text: str) -> str:
     return found
 
 
+def upgrader_log_tail(blob: str, n: int = 30) -> str:
+    """Last ``n`` non-empty lines of DistUpgrade/SSH output (not the prefix).
+
+    DistUpgradeViewNonInteractive writes errors to main.log; the hop script
+    appends that tail. The operator must see *those* lines, not apt-get's
+    first 600 characters (which stop at „Tarball gefunden“).
+    """
+    lines = [ln.rstrip() for ln in (blob or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    return "\n".join(lines[-max(1, n) :])
+
+
 def hop_failure_message(hop: "ReleaseHop", code: int, blob: str) -> str:
     """German error: intended hop, leaked tarball if any, Proxmox snap rollback."""
     leaked = detect_fetched_upgrade_codename(blob)
@@ -299,9 +312,9 @@ def hop_failure_message(hop: "ReleaseHop", code: int, blob: str) -> str:
         " Ein Proxmox-Snapshot (hlops-*) vor dem Versuch kann zur Rückkehr "
         "genutzt werden."
     )
-    tail = (blob or "").strip()[:600]
+    tail = upgrader_log_tail(blob, 30)
     if tail:
-        return f"{head}{extra}{snap} {tail}"
+        return f"{head}{extra}{snap}\n{tail}"
     return f"{head}{extra}{snap}"
 
 

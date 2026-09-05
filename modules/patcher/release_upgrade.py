@@ -140,20 +140,79 @@ if [ -z "$FOUND" ] || [ ! -s "$WORKDIR/$CODE.tar.gz" ]; then
   exit 1
 fi
 echo "DistUpgrade geladen von: $FOUND"
-chmod 0644 "$WORKDIR/$CODE.tar.gz" "$WORKDIR/$CODE.tar.gz.gpg" 2>/dev/null || chmod 0644 "$WORKDIR/$CODE.tar.gz"
+chmod 0644 "$WORKDIR/$CODE.tar.gz"
+[ -f "$WORKDIR/$CODE.tar.gz.gpg" ] && chmod 0644 "$WORKDIR/$CODE.tar.gz.gpg" || true
 if command -v gpgv >/dev/null 2>&1 && [ -s "$WORKDIR/$CODE.tar.gz.gpg" ]; then
-  gpgv --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg \\
-    "$WORKDIR/$CODE.tar.gz.gpg" "$WORKDIR/$CODE.tar.gz" \\
-    || echo "Hinweis: gpgv-Prüfung fehlgeschlagen — fahre fort."
+  echo "gpgv: prüfe $CODE.tar.gz"
+  KR=""
+  for k in /usr/share/keyrings/ubuntu-archive-keyring.gpg \\
+           /usr/share/keyrings/ubuntu-archive-removed-keys.gpg \\
+           /etc/apt/trusted.gpg \\
+           /etc/apt/trusted.gpg.d/ubuntu-keyring-2012-archive.gpg \\
+           /etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg \\
+           /etc/apt/trusted.gpg.d/*.gpg; do
+    [ -s "$k" ] || continue
+    KR="$KR --keyring $k"
+  done
+  if [ -n "$KR" ]; then
+    gpgv $KR "$WORKDIR/$CODE.tar.gz.gpg" "$WORKDIR/$CODE.tar.gz" \\
+      || echo "Hinweis: gpgv-Prüfung fehlgeschlagen — fahre fort."
+  fi
+else
+  echo "Hinweis: keine gpgv-Signaturprüfung (gpgv oder .gpg fehlt)."
 fi
-cd "$WORKDIR"
-tar -xzf "$CODE.tar.gz"
-if [ ! -x "./$CODE" ]; then
-  echo "DistUpgrade-Skript ./$CODE fehlt nach dem Entpacken"; exit 2
+EXTRACT="$WORKDIR/$CODE.d"
+echo "Entpacke nach $EXTRACT (--no-same-owner, nicht ins Arbeitsverzeichnis)"
+rm -rf "$EXTRACT"
+mkdir -p "$EXTRACT"
+chmod 0755 "$EXTRACT"
+if ! tar --no-same-owner -xzf "$WORKDIR/$CODE.tar.gz" -C "$EXTRACT"; then
+  echo "tar --no-same-owner fehlgeschlagen — versuche tar -xzf"
+  tar -xzf "$WORKDIR/$CODE.tar.gz" -C "$EXTRACT" || {{
+    echo "DistUpgrade-Tarball konnte nicht entpackt werden"; exit 2
+  }}
 fi
+SCRIPT=""
+if [ -f "$EXTRACT/$CODE" ]; then SCRIPT="$EXTRACT/$CODE"
+elif [ -f "$EXTRACT/dist-upgrade.py" ]; then SCRIPT="$EXTRACT/dist-upgrade.py"
+else SCRIPT=$(find "$EXTRACT" -maxdepth 3 -type f -name "$CODE" | head -n 1)
+fi
+if [ -z "$SCRIPT" ] || [ ! -f "$SCRIPT" ]; then
+  echo "DistUpgrade-Skript $CODE fehlt nach dem Entpacken in $EXTRACT"
+  ls -la "$EXTRACT" | head -n 20
+  exit 2
+fi
+chmod a+x "$SCRIPT" || true
+if [ ! -x "$SCRIPT" ]; then
+  echo "DistUpgrade-Skript $SCRIPT ist nicht ausführbar"; exit 2
+fi
+echo "DistUpgrade-Skript: $SCRIPT"
 echo HLOPS_HOP_TARGET=$CODE
+mkdir -p /var/log/dist-upgrade /var/run
+# Spare sshd on :1022 hangs or is missing in LXC; we always come in via SSH.
+: > /var/run/release-upgrader-sshd.pid
+export RELEASE_UPGRADER_NO_SCREEN=1 PYTHONUNBUFFERED=1
+echo "Starte DistUpgrade ./$CODE --frontend=DistUpgradeViewNonInteractive --datadir=$EXTRACT"
+cd "$(dirname "$SCRIPT")"
+set +e
+./"$(basename "$SCRIPT")" --frontend=DistUpgradeViewNonInteractive --mode=server --datadir=. --disable-gnu-screen
+UP_RC=$?
+echo "DistUpgrade Exit: $UP_RC"
+if [ "$UP_RC" != 0 ]; then
+  echo "----- letzte 30 Zeilen /var/log/dist-upgrade/main.log -----"
+  if [ -f /var/log/dist-upgrade/main.log ]; then
+    tail -n 30 /var/log/dist-upgrade/main.log
+  else
+    echo "(kein /var/log/dist-upgrade/main.log — Abbruch vor DistUpgrade-Logging)"
+  fi
+  if [ -f /var/log/dist-upgrade/apt.log ]; then
+    echo "----- letzte 20 Zeilen /var/log/dist-upgrade/apt.log -----"
+    tail -n 20 /var/log/dist-upgrade/apt.log
+  fi
+  exit "$UP_RC"
+fi
 """
-        invoke = f'./"$CODE" --frontend=DistUpgradeViewNonInteractive --mode=server\n'
+        invoke = ""
 
     return f"""
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C \\
@@ -161,6 +220,7 @@ export DEBIAN_FRONTEND=noninteractive LC_ALL=C \\
   NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \\
   UCF_FORCE_CONFFOLD=1 APT_LISTCHANGES_FRONTEND=none \\
   RELEASE_UPGRADER_ALLOW_THIRD_PARTY=1 \\
+  RELEASE_UPGRADER_NO_SCREEN=1 PYTHONUNBUFFERED=1 \\
   TMPDIR={_HLOPS_UPGRADER_DIR}
 WORKDIR={_HLOPS_UPGRADER_DIR}
 HL_APT_CONF={_HLOPS_APT_SANDBOX}
@@ -191,7 +251,7 @@ URI_UNSTABLE_POSTFIX =
 URI_PROPOSED_POSTFIX =
 HLOPS_URI_EOF
 echo "meta-release gepinnt: {hop.source} → {hop.target} ({code})"
-apt-get install -y update-manager-core \\
+apt-get install -y update-manager-core gpgv \\
   -o DPkg::Lock::Timeout=60 \\
   -o Acquire::ForceIPv4=true \\
   -o APT::Sandbox::User=root
