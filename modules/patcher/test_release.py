@@ -163,9 +163,14 @@ class HopPinTests(unittest.TestCase):
         self.assertIn("old-releases.ubuntu.com", pin)
         plucky_block = pin.split("Dist: plucky", 1)[1]
         self.assertIn("old-releases.ubuntu.com", plucky_block)
-        self.assertNotIn("archive.ubuntu.com", plucky_block)
+        self.assertIn(
+            "http://archive.ubuntu.com/ubuntu/dists/plucky/main/"
+            "dist-upgrader-all/current/plucky.tar.gz",
+            plucky_block,
+        )
+        self.assertNotIn("plucky-updates", plucky_block)
 
-    def test_eol_tool_urls_prefer_old_releases(self) -> None:
+    def test_eol_tool_urls_use_dists_codename_not_updates(self) -> None:
         self.assertEqual(
             ubuntu_upgrade_tool_mirror("25.04", ASOF),
             "http://old-releases.ubuntu.com/ubuntu",
@@ -178,10 +183,41 @@ class HopPinTests(unittest.TestCase):
             ubuntu_upgrade_tool_mirror("26.04", ASOF),
             "http://archive.ubuntu.com/ubuntu",
         )
-        urls = upgrade_tool_url_candidates("25.04", ASOF)
-        self.assertTrue(urls[0].startswith("http://old-releases.ubuntu.com/"))
-        self.assertIn("plucky.tar.gz", urls[0])
-        self.assertTrue(any("archive.ubuntu.com" in u for u in urls))
+        # HEAD 2026-09-05: plucky.tar.gz is on archive, not old-releases.
+        plucky = upgrade_tool_url_candidates("25.04", ASOF)
+        self.assertEqual(
+            plucky[0],
+            "http://archive.ubuntu.com/ubuntu/dists/plucky/main/"
+            "dist-upgrader-all/current/plucky.tar.gz",
+        )
+        self.assertIn(
+            "http://old-releases.ubuntu.com/ubuntu/dists/plucky/main/"
+            "dist-upgrader-all/current/plucky.tar.gz",
+            plucky,
+        )
+        self.assertTrue(any("archive.ubuntu.com" in u for u in plucky))
+        for version in ("25.04", "25.10", "26.04"):
+            urls = upgrade_tool_url_candidates(version, ASOF)
+            self.assertTrue(urls)
+            for url in urls:
+                self.assertNotRegex(url, r"dists/[a-z]+-updates/")
+                self.assertNotRegex(url, r"dists/[a-z]+-security/")
+                self.assertRegex(
+                    url,
+                    r"/dists/[a-z]+(?:-proposed)?/main/dist-upgrader-all/current/[a-z]+\.tar\.gz$",
+                )
+        questing = upgrade_tool_url_candidates("25.10", ASOF)
+        self.assertEqual(
+            questing[0],
+            "http://archive.ubuntu.com/ubuntu/dists/questing/main/"
+            "dist-upgrader-all/current/questing.tar.gz",
+        )
+        resolute = upgrade_tool_url_candidates("26.04", ASOF)
+        self.assertEqual(
+            resolute[0],
+            "http://archive.ubuntu.com/ubuntu/dists/resolute/main/"
+            "dist-upgrader-all/current/resolute.tar.gz",
+        )
 
     def test_failure_mentions_leaked_resolute_and_snap(self) -> None:
         s = suggest_ubuntu_release(version_id="24.10", today=ASOF)

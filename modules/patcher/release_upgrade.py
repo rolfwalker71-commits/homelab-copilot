@@ -114,28 +114,32 @@ WORKDIR={_HLOPS_UPGRADER_DIR}
 echo "Schrittziel $CODE — DistUpgrade-Tarball (kein -d)"
 FOUND=""
 for url in {url_list}; do
-  echo "Hole DistUpgrade: $url"
+  echo "Versuche DistUpgrade-Tarball: $url"
   if command -v curl >/dev/null 2>&1; then
     if curl -fsSL --connect-timeout 20 -o "$WORKDIR/$CODE.tar.gz" "$url"; then
       curl -fsSL --connect-timeout 20 -o "$WORKDIR/$CODE.tar.gz.gpg" "$url.gpg" || true
       FOUND=$url
+      echo "DistUpgrade-Tarball gefunden: $url"
       break
     fi
+    echo "DistUpgrade-Tarball nicht unter $url — nächste Quelle."
   elif command -v wget >/dev/null 2>&1; then
     if wget -q -O "$WORKDIR/$CODE.tar.gz" "$url"; then
       wget -q -O "$WORKDIR/$CODE.tar.gz.gpg" "$url.gpg" || true
       FOUND=$url
+      echo "DistUpgrade-Tarball gefunden: $url"
       break
     fi
+    echo "DistUpgrade-Tarball nicht unter $url — nächste Quelle."
   else
     echo "weder curl noch wget vorhanden"; exit 2
   fi
 done
 if [ -z "$FOUND" ] || [ ! -s "$WORKDIR/$CODE.tar.gz" ]; then
-  echo "DistUpgrade-Tarball für $CODE nicht gefunden (old-releases/archive)."
+  echo "DistUpgrade-Tarball für $CODE nicht gefunden (old-releases/archive, dists/$CODE/)."
   exit 1
 fi
-echo "DistUpgrade geladen: $FOUND"
+echo "DistUpgrade geladen von: $FOUND"
 chmod 0644 "$WORKDIR/$CODE.tar.gz" "$WORKDIR/$CODE.tar.gz.gpg" 2>/dev/null || chmod 0644 "$WORKDIR/$CODE.tar.gz"
 if command -v gpgv >/dev/null 2>&1 && [ -s "$WORKDIR/$CODE.tar.gz.gpg" ]; then
   gpgv --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg \\

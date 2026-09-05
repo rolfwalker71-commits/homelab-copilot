@@ -175,21 +175,52 @@ def ubuntu_upgrade_tool_mirror(version: str, today: date | None = None) -> str:
     return _ARCHIVE_MIRROR
 
 
+def _dist_upgrader_tarball_url(host: str, code: str, pocket: str | None = None) -> str:
+    """``dists/<codename>/…/<codename>.tar.gz`` — never ``*-updates`` / ``*-security``."""
+    dist = pocket or code
+    return f"{host}/dists/{dist}/main/dist-upgrader-all/current/{code}.tar.gz"
+
+
+# HEAD 2026-09-05: 25.04/25.10 tarballs still on archive; old-releases 404s.
+# 26.04 is on archive under dists/resolute/ (also under -updates; we never use that).
+_DIST_UPGRADER_FIRST_HOST: dict[str, str] = {
+    "plucky": _ARCHIVE_MIRROR,
+    "questing": _ARCHIVE_MIRROR,
+    "resolute": _ARCHIVE_MIRROR,
+}
+
+
 def upgrade_tool_url_candidates(version: str, today: date | None = None) -> list[str]:
-    """DistUpgrade tarball URLs. EOL: old-releases first, archive as fallback."""
+    """DistUpgrade tarball URLs under ``dists/<codename>/`` (never ``*-updates``).
+
+    First success wins. As of 2026-09-05, 25.04/25.10 are EOL but Ubuntu left
+    ``plucky.tar.gz`` / ``questing.tar.gz`` on archive, not old-releases.
+    ``*-proposed`` is a last-resort pocket only.
+    """
     code = ubuntu_codename(version)
     if not code:
         return []
+    first = _DIST_UPGRADER_FIRST_HOST.get(code)
+    if first is None:
+        first = (
+            _OLD_RELEASES_MIRROR
+            if ubuntu_series_is_eol(version, today)
+            else _ARCHIVE_MIRROR
+        )
+    other = (
+        _ARCHIVE_MIRROR if first == _OLD_RELEASES_MIRROR else _OLD_RELEASES_MIRROR
+    )
+    urls = [
+        _dist_upgrader_tarball_url(first, code),
+        _dist_upgrader_tarball_url(other, code),
+    ]
     if ubuntu_series_is_eol(version, today):
-        hosts = [_OLD_RELEASES_MIRROR, _ARCHIVE_MIRROR]
-    else:
-        hosts = [_ARCHIVE_MIRROR]
-    urls: list[str] = []
-    for host in hosts:
-        for pocket in (f"{code}-updates", code):
-            urls.append(
-                f"{host}/dists/{pocket}/main/dist-upgrader-all/current/{code}.tar.gz"
-            )
+        urls.append(
+            _dist_upgrader_tarball_url(_OLD_RELEASES_MIRROR, code, f"{code}-proposed")
+        )
+        urls.append(
+            _dist_upgrader_tarball_url(_ARCHIVE_MIRROR, code, f"{code}-proposed")
+        )
     return urls
 
 
@@ -202,11 +233,11 @@ def _meta_release_block(
     pub = meta[2] if meta else date(2000, 1, 1)
     date_s = pub.strftime("%a, %d %B %Y 00:00:00 UTC")
     mirror = ubuntu_upgrade_tool_mirror(version, today)
-    pocket = f"{code}-updates"
-    tool = f"{mirror}/dists/{pocket}/main/dist-upgrader-all/current/{code}.tar.gz"
+    candidates = upgrade_tool_url_candidates(version, today)
+    tool = candidates[0] if candidates else _dist_upgrader_tarball_url(mirror, code)
     lts = " LTS" if is_ubuntu_lts(version) else ""
     notes = (
-        f"{mirror}/dists/{pocket}/main/dist-upgrader-all/current/ReleaseAnnouncement"
+        f"{mirror}/dists/{code}/main/dist-upgrader-all/current/ReleaseAnnouncement"
         if supported and not ubuntu_series_is_eol(version, today)
         else "http://changelogs.ubuntu.com/EOLReleaseAnnouncement"
     )
@@ -217,7 +248,7 @@ def _meta_release_block(
         f"Date: {date_s}\n"
         f"Supported: {1 if supported else 0}\n"
         f"Description: This is the {version}{lts} release\n"
-        f"Release-File: {mirror}/dists/{pocket}/Release\n"
+        f"Release-File: {mirror}/dists/{code}/Release\n"
         f"ReleaseNotes: {notes}\n"
         f"UpgradeTool: {tool}\n"
         f"UpgradeToolSignature: {tool}.gpg\n"

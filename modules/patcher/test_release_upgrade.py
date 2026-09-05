@@ -33,12 +33,20 @@ class ReleaseUpgradeCmdTests(unittest.TestCase):
         cmd = _release_upgrade_cmd(hop, container=True)
         self.assertIn("plucky", cmd)
         self.assertIn("plucky.tar.gz", cmd)
+        self.assertIn(
+            "http://archive.ubuntu.com/ubuntu/dists/plucky/main/"
+            "dist-upgrader-all/current/plucky.tar.gz",
+            cmd,
+        )
         self.assertIn("old-releases.ubuntu.com", cmd)
+        self.assertNotIn("plucky-updates", cmd)
+        self.assertNotIn("dists/plucky-updates/", cmd)
         self.assertIn("/var/tmp/ubuntu-release-upgrader", cmd)
         self.assertIn('APT::Sandbox::User "root"', cmd)
         self.assertIn("file:///var/tmp/ubuntu-release-upgrader/meta-release", cmd)
         self.assertIn("Dist: plucky", cmd)
         self.assertIn("Supported: 1", cmd)
+        self.assertIn("Versuche DistUpgrade-Tarball:", cmd)
         self.assertNotIn("resolute.tar.gz", cmd)
         self.assertNotIn("do-release-upgrade -d", cmd)
         self.assertNotRegex(cmd, r"do-release-upgrade\s+-d\b")
@@ -53,6 +61,12 @@ class ReleaseUpgradeCmdTests(unittest.TestCase):
         cmd = _release_upgrade_cmd(hop, container=False)
         self.assertIn("resolute.tar.gz", cmd)
         self.assertIn("archive.ubuntu.com", cmd)
+        self.assertIn(
+            "http://archive.ubuntu.com/ubuntu/dists/resolute/main/"
+            "dist-upgrader-all/current/resolute.tar.gz",
+            cmd,
+        )
+        self.assertNotIn("resolute-updates", cmd)
         self.assertNotIn("do-release-upgrade -d", cmd)
         prompt = _set_prompt_cmd(hop.prompt)
         self.assertIn("Prompt=lts", prompt)
@@ -64,7 +78,13 @@ class ReleaseUpgradeCmdTests(unittest.TestCase):
         self.assertEqual(hop.target, "25.10")
         cmd = _release_upgrade_cmd(hop, container=True)
         self.assertIn("questing.tar.gz", cmd)
+        self.assertIn(
+            "http://archive.ubuntu.com/ubuntu/dists/questing/main/"
+            "dist-upgrader-all/current/questing.tar.gz",
+            cmd,
+        )
         self.assertIn("old-releases.ubuntu.com", cmd)
+        self.assertNotIn("questing-updates", cmd)
         self.assertNotIn("do-release-upgrade -d", cmd)
         self.assertNotIn("resolute.tar.gz", cmd)
 
