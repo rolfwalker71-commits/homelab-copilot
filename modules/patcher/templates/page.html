@@ -64,6 +64,19 @@
         <option value="all" selected>Alle Updates</option>
       </select>
     </div>
+    <fieldset class="m-0 border-0 p-0">
+      <legend class="label">Reboot nach Einspielen</legend>
+      <div class="choice-track" role="radiogroup" aria-label="Reboot nach Einspielen">
+        <label class="choice-opt inline-flex items-center gap-2">
+          <input type="radio" name="apply-reboot" id="apply-reboot-no" value="0" checked />
+          <span>Nein</span>
+        </label>
+        <label class="choice-opt inline-flex items-center gap-2">
+          <input type="radio" name="apply-reboot" id="apply-reboot-yes" value="1" />
+          <span>Ja</span>
+        </label>
+      </div>
+    </fieldset>
     <label class="flex items-start gap-2 text-sm">
       <input type="checkbox" id="apply-confirm" class="mt-1 h-4 w-4" />
       <span id="apply-confirm-label">Ich bestätige das Einspielen der Updates auf diesem Host. Es erfolgt kein automatischer Neustart.</span>
@@ -97,7 +110,34 @@
   let lastCardJob = null;
   let cardJobMeta = { kind: 'scan', targetName: '' };
   const CONFIRM_SINGLE = 'Ich bestätige das Einspielen der Updates auf diesem Host. Es erfolgt kein automatischer Neustart.';
+  const CONFIRM_SINGLE_REBOOT = 'Ich bestätige das Einspielen der Updates auf diesem Host. Der Host wird anschließend neu gestartet.';
   const CONFIRM_BATCH = 'Ich bestätige das Einspielen der Updates auf den ausgewählten Hosts (nacheinander). Es erfolgt kein automatischer Neustart.';
+  const CONFIRM_BATCH_REBOOT = 'Ich bestätige das Einspielen der Updates auf den ausgewählten Hosts (nacheinander). Jeder erfolgreich aktualisierte Host wird anschließend neu gestartet.';
+
+  function rebootAfterChecked() {
+    const yes = document.getElementById('apply-reboot-yes');
+    return !!(yes && yes.checked);
+  }
+
+  function setRebootAfter(on) {
+    const yes = document.getElementById('apply-reboot-yes');
+    const no = document.getElementById('apply-reboot-no');
+    if (yes) yes.checked = !!on;
+    if (no) no.checked = !on;
+    syncApplyConfirmLabel();
+  }
+
+  function syncApplyConfirmLabel() {
+    const label = document.getElementById('apply-confirm-label');
+    if (!label) return;
+    const batch = (document.getElementById('apply-mode') || {}).value === 'batch';
+    const reboot = rebootAfterChecked();
+    if (batch) {
+      label.textContent = reboot ? CONFIRM_BATCH_REBOOT : CONFIRM_BATCH;
+    } else {
+      label.textContent = reboot ? CONFIRM_SINGLE_REBOOT : CONFIRM_SINGLE;
+    }
+  }
 
   function jobTitle(kind, targetName) {
     let head = 'Scan läuft';
@@ -593,18 +633,15 @@
             '" data-name="' + esc(t.name) + '" aria-label="Host auswählen: ' + esc(t.name) + '" />' +
         '</label>')
       : '';
+    const monitorLabel = monitored ? 'Monitoring ein' : 'Monitoring aus';
     const monitorSwitch =
-      '<label class="host-monitor shrink-0">' +
-        '<input type="checkbox" class="host-monitor-input" role="switch"' +
+      '<label class="host-monitor inline-flex items-center gap-3 shrink-0">' +
+        '<input type="checkbox" class="host-monitor-input h-6 w-11 shrink-0" role="switch"' +
           ' data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '"' +
           (monitored ? ' checked' : '') +
           ' aria-checked="' + (monitored ? 'true' : 'false') + '"' +
-          ' aria-label="Überwachen: ' + esc(t.name) + '" />' +
-        '<span class="host-monitor-track" aria-hidden="true"></span>' +
-        '<span class="host-monitor-copy">' +
-          '<span class="host-monitor-title">Überwachen</span>' +
-          '<span class="host-monitor-state">' + (monitored ? 'Ein' : 'Aus') + '</span>' +
-        '</span>' +
+          ' aria-label="' + monitorLabel + ': ' + esc(t.name) + '" />' +
+        '<span class="host-monitor-label">' + monitorLabel + '</span>' +
       '</label>';
     return (
       '<article class="entity-card" data-id="' + esc(t.id) + '" data-monitored="' + (monitored ? '1' : '0') + '">' +
@@ -674,16 +711,31 @@
     syncBatchButton();
   }
 
+  function syncMonitorLabel(inputEl, monitored) {
+    if (!inputEl) return;
+    const text = monitored ? 'Monitoring ein' : 'Monitoring aus';
+    const copy = inputEl.closest('.host-monitor') && inputEl.closest('.host-monitor').querySelector('.host-monitor-label');
+    if (copy) copy.textContent = text;
+    inputEl.setAttribute('aria-checked', monitored ? 'true' : 'false');
+    inputEl.setAttribute('aria-label', text + ': ' + (inputEl.dataset.name || inputEl.dataset.id || ''));
+  }
+
   async function setMonitored(targetId, name, monitored, inputEl) {
     if (busy) {
-      if (inputEl) inputEl.checked = !monitored;
+      if (inputEl) {
+        inputEl.checked = !monitored;
+        syncMonitorLabel(inputEl, !monitored);
+      }
       return;
     }
     if (!monitored) {
       if (!confirm(
         name + ' nicht mehr überwachen?\n\nTäglicher Scan und „Alle Hosts prüfen“ überspringen diesen Host.\n„Scannen“ auf der Karte bleibt möglich.'
       )) {
-        if (inputEl) inputEl.checked = true;
+        if (inputEl) {
+          inputEl.checked = true;
+          syncMonitorLabel(inputEl, true);
+        }
         return;
       }
     }
@@ -695,13 +747,19 @@
       });
       const d = await r.json().catch(function () { return {}; });
       if (!r.ok) {
-        if (inputEl) inputEl.checked = !monitored;
+        if (inputEl) {
+          inputEl.checked = !monitored;
+          syncMonitorLabel(inputEl, !monitored);
+        }
         alert(d.detail || 'Speichern fehlgeschlagen');
         return;
       }
       await loadTargets();
     } catch (e) {
-      if (inputEl) inputEl.checked = !monitored;
+      if (inputEl) {
+        inputEl.checked = !monitored;
+        syncMonitorLabel(inputEl, !monitored);
+      }
       alert(String(e));
     }
   }
@@ -801,9 +859,9 @@
     document.getElementById('apply-target-id').value = id;
     document.getElementById('apply-dialog-title').textContent = 'Updates einspielen';
     document.getElementById('apply-target-label').textContent = name + ' (' + id + ')';
-    document.getElementById('apply-confirm-label').textContent = CONFIRM_SINGLE;
     document.getElementById('apply-confirm-label').style.color = '';
     document.getElementById('apply-confirm').checked = false;
+    setRebootAfter(false);
     document.getElementById('apply-dialog').showModal();
   }
 
@@ -814,9 +872,9 @@
     document.getElementById('apply-dialog-title').textContent = 'Ausgewählte Hosts einspielen';
     document.getElementById('apply-target-label').textContent =
       items.length + ' Host(s) nacheinander: ' + items.map(function (h) { return h.name; }).join(', ');
-    document.getElementById('apply-confirm-label').textContent = CONFIRM_BATCH;
     document.getElementById('apply-confirm-label').style.color = '';
     document.getElementById('apply-confirm').checked = false;
+    setRebootAfter(false);
     document.getElementById('apply-dialog').showModal();
   }
 
@@ -824,6 +882,11 @@
     const items = selectedHosts();
     if (!items.length) return;
     openBatchApply(items);
+  });
+
+  document.getElementById('apply-form').addEventListener('change', function (ev) {
+    const t = ev.target;
+    if (t && t.name === 'apply-reboot') syncApplyConfirmLabel();
   });
 
   document.getElementById('apply-form').addEventListener('submit', async function (ev) {
@@ -840,6 +903,7 @@
     const mode = document.getElementById('apply-mode').value || 'single';
     const targetId = document.getElementById('apply-target-id').value;
     const filter = document.getElementById('apply-filter').value;
+    const rebootAfter = rebootAfterChecked();
     const name = document.getElementById('apply-target-label').textContent || targetId;
     document.getElementById('apply-dialog').close();
     if (mode === 'batch') {
@@ -852,6 +916,7 @@
             target_ids: ids,
             confirm: true,
             package_filter: filter,
+            reboot_after: rebootAfter,
           }),
         });
         const j = await r.json();
@@ -877,6 +942,7 @@
           target_id: targetId,
           confirm: true,
           package_filter: filter,
+          reboot_after: rebootAfter,
         }),
       });
       const j = await r.json();
@@ -1033,7 +1099,7 @@
       return;
     }
     if (el.classList.contains('host-monitor-input')) {
-      el.setAttribute('aria-checked', el.checked ? 'true' : 'false');
+      syncMonitorLabel(el, !!el.checked);
       setMonitored(el.dataset.id, el.dataset.name, el.checked, el);
     }
   });

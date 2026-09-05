@@ -74,6 +74,7 @@ async def apply_updates(
     *,
     package_filter: str = "all",
     packages: list[str] | None = None,
+    reboot_after: bool = False,
     progress: ProgressFn | None = None,
     on_log: LogFn | None = None,
 ) -> dict[str, Any]:
@@ -183,13 +184,31 @@ async def apply_updates(
         progress,
         "Reboot-Check",
         90,
-        "Prüfe, ob ein Neustart nötig ist (kein automatischer Reboot)…",
+        (
+            "Prüfe, ob ein Neustart nötig ist…"
+            if reboot_after
+            else "Prüfe, ob ein Neustart nötig ist (kein automatischer Reboot)…"
+        ),
     )
     reboot = await check_reboot_required(
         target, timeout=30.0, connect_timeout=connect_timeout
     )
+    reboot_scheduled = False
+    reboot_error: str | None = None
     done_msg = "Updates eingespielt."
-    if reboot:
+    if reboot_after:
+        await _emit(progress, "Reboot", 93, f"Starte {target.name} neu…")
+        await _emit_log(on_log, f"Reboot nach Einspielen: {target.name}")
+        try:
+            rb = await reboot_host(target, confirm=True)
+            reboot_scheduled = True
+            done_msg = "Updates eingespielt. Reboot wurde geplant."
+            await _emit_log(on_log, rb.get("message") or "Reboot geplant.")
+        except ApplyError as exc:
+            reboot_error = exc.message
+            done_msg = f"Updates eingespielt. Reboot fehlgeschlagen: {exc.message}"
+            await _emit_log(on_log, done_msg)
+    elif reboot:
         done_msg += " Reboot empfohlen — bitte manuell bestätigen."
     await _emit(progress, "Abschluss", 95, done_msg)
     return {
@@ -197,6 +216,9 @@ async def apply_updates(
         "distro": detect.pretty_name,
         "log": log[-8000:],
         "reboot_required": reboot,
+        "reboot_after": reboot_after,
+        "reboot_scheduled": reboot_scheduled,
+        "reboot_error": reboot_error,
         "exit_code": code,
     }
 

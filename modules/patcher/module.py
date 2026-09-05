@@ -88,6 +88,7 @@ class ApplyPayload(BaseModel):
     confirm: bool = False
     package_filter: str = Field(default="all", pattern="^(security|all|selected)$")
     packages: list[str] = Field(default_factory=list)
+    reboot_after: bool = False
     wait: bool = False
 
 
@@ -95,6 +96,7 @@ class ApplyBatchPayload(BaseModel):
     target_ids: list[str] = Field(..., min_length=1)
     confirm: bool = False
     package_filter: str = Field(default="all", pattern="^(security|all)$")
+    reboot_after: bool = False
     wait: bool = False
 
 
@@ -438,6 +440,7 @@ async def _apply_one_target(
     packages: list[str],
     on_progress,
     on_log,
+    reboot_after: bool = False,
 ) -> dict[str, Any]:
     apply_id = await store.create_apply_run(
         target_id=target.id,
@@ -450,6 +453,7 @@ async def _apply_one_target(
             target,
             package_filter=package_filter,
             packages=packages,
+            reboot_after=reboot_after,
             progress=on_progress,
             on_log=on_log,
         )
@@ -479,6 +483,7 @@ async def _run_apply_job(
     snapshot,
     package_filter: str,
     packages: list[str],
+    reboot_after: bool = False,
 ) -> None:
     store = _store
     if store is None:
@@ -495,7 +500,8 @@ async def _run_apply_job(
         )
         JOBS.append_log(
             job_id,
-            f"Apply {package_filter} auf {target.name} ({target.ip})",
+            f"Apply {package_filter} auf {target.name} ({target.ip})"
+            + (" — Reboot nach Einspielen." if reboot_after else ""),
         )
 
         async def on_progress(phase: str, percent: int, message: str) -> None:
@@ -511,6 +517,7 @@ async def _run_apply_job(
             packages=packages,
             on_progress=on_progress,
             on_log=on_log,
+            reboot_after=reboot_after,
         )
         apply_id = result.get("apply_id")
         if apply_id is not None:
@@ -519,7 +526,11 @@ async def _run_apply_job(
             except (TypeError, ValueError):
                 pass
         msg = "Updates eingespielt."
-        if result.get("reboot_required"):
+        if result.get("reboot_scheduled"):
+            msg = "Updates eingespielt. Reboot wurde geplant."
+        elif result.get("reboot_error"):
+            msg = f"Updates eingespielt. Reboot fehlgeschlagen: {result.get('reboot_error')}"
+        elif result.get("reboot_required"):
             msg += " Reboot empfohlen — bitte manuell bestätigen."
         JOBS.finish(
             job_id,
@@ -541,6 +552,7 @@ async def _run_apply_batch_job(
     target_ids: list[str],
     snapshot,
     package_filter: str,
+    reboot_after: bool = False,
 ) -> None:
     store = _store
     if store is None:
@@ -550,7 +562,12 @@ async def _run_apply_batch_job(
     total = len(target_ids)
     JOBS.append_log(
         job_id,
-        f"Stapel: {total} Host(s), Filter {package_filter} — kein automatischer Reboot.",
+        f"Stapel: {total} Host(s), Filter {package_filter}"
+        + (
+            " — Reboot nach erfolgreichem Einspielen."
+            if reboot_after
+            else " — kein automatischer Reboot."
+        ),
     )
     try:
         for idx, tid in enumerate(target_ids, start=1):
@@ -594,6 +611,7 @@ async def _run_apply_batch_job(
                     packages=[],
                     on_progress=on_progress,
                     on_log=on_log,
+                    reboot_after=reboot_after,
                 )
                 entry = {
                     "ok": True,
@@ -601,10 +619,19 @@ async def _run_apply_batch_job(
                     "target_name": target.name,
                     "apply_id": result.get("apply_id"),
                     "reboot_required": bool(result.get("reboot_required")),
+                    "reboot_scheduled": bool(result.get("reboot_scheduled")),
+                    "reboot_error": result.get("reboot_error"),
                     "error": None,
                 }
                 results.append(entry)
-                if entry["reboot_required"]:
+                if entry["reboot_scheduled"]:
+                    JOBS.append_log(job_id, f"{target.name}: Reboot geplant.")
+                elif entry["reboot_error"]:
+                    JOBS.append_log(
+                        job_id,
+                        f"{target.name}: Reboot fehlgeschlagen — {entry['reboot_error']}",
+                    )
+                elif entry["reboot_required"]:
                     JOBS.append_log(
                         job_id,
                         f"{target.name}: Reboot empfohlen (nicht automatisch).",
@@ -619,6 +646,8 @@ async def _run_apply_batch_job(
                         "target_name": target.name,
                         "apply_id": None,
                         "reboot_required": False,
+                        "reboot_scheduled": False,
+                        "reboot_error": None,
                         "error": msg,
                     }
                 )
@@ -632,26 +661,46 @@ async def _run_apply_batch_job(
                         "target_name": getattr(target, "name", tid),
                         "apply_id": None,
                         "reboot_required": False,
+                        "reboot_scheduled": False,
+                        "reboot_error": None,
                         "error": str(exc),
                     }
                 )
 
         ok_n = sum(1 for r in results if r.get("ok"))
         fail_n = len(results) - ok_n
+        rebooted_names = [
+            str(r.get("target_name"))
+            for r in results
+            if r.get("ok") and r.get("reboot_scheduled")
+        ]
+        reboot_fail_names = [
+            str(r.get("target_name"))
+            for r in results
+            if r.get("ok") and r.get("reboot_error")
+        ]
         reboot_names = [
             str(r.get("target_name"))
             for r in results
-            if r.get("ok") and r.get("reboot_required")
+            if r.get("ok") and r.get("reboot_required") and not r.get("reboot_scheduled")
         ]
         msg = f"{ok_n}/{len(results)} Host(s) eingespielt."
         if fail_n:
             msg += f" {fail_n} Fehler."
+        if rebooted_names:
+            msg += " Reboot geplant: " + ", ".join(rebooted_names)
+        if reboot_fail_names:
+            msg += " Reboot fehlgeschlagen: " + ", ".join(reboot_fail_names)
         if reboot_names:
             msg += " Reboot empfohlen: " + ", ".join(reboot_names)
         JOBS.finish(
             job_id,
             status="success" if fail_n == 0 else "failed",
-            result={"hosts": results, "reboot_hosts": reboot_names},
+            result={
+                "hosts": results,
+                "reboot_hosts": reboot_names,
+                "rebooted_hosts": rebooted_names,
+            },
             message=msg,
             phase="Fertig" if fail_n == 0 else "Teilweise fehlgeschlagen",
         )
@@ -827,6 +876,7 @@ async def api_apply(
             snapshot=snap,
             package_filter=payload.package_filter,
             packages=payload.packages,
+            reboot_after=payload.reboot_after,
         )
         done = JOBS.get(job.id)
         return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
@@ -838,6 +888,7 @@ async def api_apply(
         snapshot=snap,
         package_filter=payload.package_filter,
         packages=payload.packages,
+        reboot_after=payload.reboot_after,
     )
     return job.to_dict()
 
@@ -881,6 +932,7 @@ async def api_apply_batch(
             target_ids=ids,
             snapshot=snap,
             package_filter=payload.package_filter,
+            reboot_after=payload.reboot_after,
         )
         done = JOBS.get(job.id)
         return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
@@ -891,6 +943,7 @@ async def api_apply_batch(
         target_ids=ids,
         snapshot=snap,
         package_filter=payload.package_filter,
+        reboot_after=payload.reboot_after,
     )
     return job.to_dict()
 
