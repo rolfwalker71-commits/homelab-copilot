@@ -168,16 +168,32 @@ def normalize_wipe_path(raw: str | None) -> str:
     return posixpath.normpath("/".join(parts)) if parts else "."
 
 
+def is_dest_account_root(raw: str | None) -> bool:
+    """True when dest ``remote_path`` is Storage-Box / SFTP account root ``/home``."""
+    try:
+        path = normalize_wipe_path(raw)
+    except WipeError:
+        return False
+    return (path.rstrip("/") or "/") == "/home"
+
+
 def assert_safe_wipe_path(
     raw: str | None,
     *,
     allowed_root: str | None = None,
     data_dir: str | Path | None = None,
+    dest_contents: bool = False,
 ) -> str:
-    """Jail: only a known backup root; never ``/``, DATA_DIR, or dest home."""
+    """Jail: only a known backup root; never ``/``, DATA_DIR, or Linux ``/home``.
+
+    Dest wipe may pass ``dest_contents=True`` so Storage Box / SFTP ``/home``
+    is allowed as a *contents-only* target (never rmdir the account root).
+    Guest and Copilot wipes must leave this flag off — guest ``/home`` stays forbidden.
+    """
     path = normalize_wipe_path(raw)
     low = path.rstrip("/") or "/"
-    if low in FORBIDDEN_WIPE_PATHS or path in FORBIDDEN_WIPE_PATHS:
+    allow_home = dest_contents and is_dest_account_root(low)
+    if not allow_home and (low in FORBIDDEN_WIPE_PATHS or path in FORBIDDEN_WIPE_PATHS):
         raise WipeError(
             f"Löschpfad „{path}“ ist zu weit (System- oder Datenwurzel) — Abbruch.",
             400,
@@ -196,7 +212,8 @@ def assert_safe_wipe_path(
                 "Löschpfad liegt nicht unter dem konfigurierten Backup-Ziel.",
                 400,
             )
-        if root in FORBIDDEN_WIPE_PATHS:
+        root_home = dest_contents and is_dest_account_root(root)
+        if not root_home and root in FORBIDDEN_WIPE_PATHS:
             raise WipeError(
                 f"Konfiguriertes Ziel „{root}“ ist keine sichere Backup-Wurzel.",
                 400,
@@ -255,7 +272,7 @@ def public_sftp_wipe_target(dest: dict[str, Any]) -> dict[str, Any]:
     safe = True
     reason = ""
     try:
-        assert_safe_wipe_path(path, allowed_root=path)
+        assert_safe_wipe_path(path, allowed_root=path, dest_contents=True)
     except WipeError as exc:
         safe = False
         reason = exc.message
@@ -265,6 +282,7 @@ def public_sftp_wipe_target(dest: dict[str, Any]) -> dict[str, Any]:
         "host": dest.get("host") or "",
         "remote_path": path,
         "hetzner": is_hetzner_storagebox(dest=dest),
+        "contents_only": safe and is_dest_account_root(path),
         "safe": safe,
         "unsafe_reason": reason,
     }
@@ -368,6 +386,22 @@ async def _log(on_log: LogFn | None, line: str) -> None:
     logger.info("backup wipe: %s", line)
 
 
+async def _log_dest_contents_wiped(
+    on_log: LogFn | None,
+    dest: dict[str, Any],
+    path: str,
+    n: int,
+) -> None:
+    if is_dest_account_root(path):
+        prefix = "Hetzner" if is_hetzner_storagebox(dest=dest) else "SFTP"
+        await _log(
+            on_log,
+            f"{prefix}: Inhalt von {path} geleert ({n} Einträge), Wurzel belassen.",
+        )
+        return
+    await _log(on_log, f"SFTP: {n} Einträge unter {path} gelöscht.")
+
+
 async def _wipe_sftp_dest(
     dest: dict[str, Any],
     *,
@@ -378,7 +412,7 @@ async def _wipe_sftp_dest(
     label = _dest_label(dest)
     host = str(dest.get("host") or "").strip()
     raw_path = str(dest.get("remote_path") or "").strip()
-    path = assert_safe_wipe_path(raw_path, allowed_root=raw_path)
+    path = assert_safe_wipe_path(raw_path, allowed_root=raw_path, dest_contents=True)
     if not host:
         raise WipeError(f"{label}: kein Host konfiguriert.", 400)
     auth = resolve_auth(dest, settings)
@@ -394,6 +428,7 @@ async def _wipe_sftp_dest(
 
     # Prefer SSH rm on port 23 (Storage Box) — much faster than per-file SFTP.
     ssh_ok = False
+    ssh_n = 0
     if not (is_hetzner_storagebox(dest=dest) and ssh_port == 22):
         try:
             entries = await sshutil.sftp_listdir(
@@ -405,21 +440,33 @@ async def _wipe_sftp_dest(
                 **auth_kw,
             )
             for ent in entries:
+                name = str(ent.get("name") or "")
+                if name in (".", "..", ""):
+                    continue
                 child = str(ent.get("path") or "")
                 if not child:
                     continue
-                assert_safe_wipe_path(child, allowed_root=path)
+                child_n = assert_safe_wipe_path(
+                    child, allowed_root=path, dest_contents=True
+                )
+                if child_n == path or is_dest_account_root(child_n):
+                    continue
                 await sshutil.ssh_run_ok(
                     settings,
                     host,
-                    f"rm -rf -- {shlex.quote(posixpath.normpath(child))}",
+                    f"rm -rf -- {shlex.quote(posixpath.normpath(child_n))}",
                     timeout=timeout,
                     port=ssh_port,
                     **auth_kw,
                 )
+                ssh_n += 1
                 await _log(on_log, f"  entfernt: {ent.get('name')}")
             ssh_ok = True
         except DockerControlError as exc:
+            low = (exc.message or "").lower()
+            if "nicht gefunden" in low or exc.status_code == 404:
+                await _log_dest_contents_wiped(on_log, dest, path, 0)
+                return
             await _log(
                 on_log,
                 f"SSH-Löschen auf {label} nicht möglich ({exc.message}) — SFTP…",
@@ -428,6 +475,7 @@ async def _wipe_sftp_dest(
             await _log(on_log, f"SSH-Löschen auf {label} fehlgeschlagen ({exc}) — SFTP…")
 
     if ssh_ok:
+        await _log_dest_contents_wiped(on_log, dest, path, ssh_n)
         return
 
     try:
@@ -440,11 +488,11 @@ async def _wipe_sftp_dest(
             port=sftp_port,
             **auth_kw,
         )
-        await _log(on_log, f"SFTP: {n} Einträge unter {path} gelöscht.")
+        await _log_dest_contents_wiped(on_log, dest, path, n)
     except DockerControlError as exc:
         low = (exc.message or "").lower()
         if "nicht gefunden" in low or exc.status_code == 404:
-            await _log(on_log, f"{label}: Pfad fehlt bereits ({path}).")
+            await _log_dest_contents_wiped(on_log, dest, path, 0)
             return
         raise WipeError(f"{label}: {exc.message}", exc.status_code) from exc
 
@@ -489,6 +537,7 @@ async def _wipe_guest(
         await sshutil.ssh_run_ok(
             settings,
             ip,
+            f"if [ ! -d {quoted} ]; then exit 0; fi; "
             "rm -rf -- "
             + " ".join(
                 shlex.quote(f"{path}/{name}")
@@ -499,6 +548,10 @@ async def _wipe_guest(
         )
         await _log(on_log, f"  Guest-Repos auf {guest_name} gelöscht.")
     except DockerControlError as exc:
+        low = (exc.message or "").lower()
+        if "nicht gefunden" in low or "no such file" in low or exc.status_code == 404:
+            await _log(on_log, f"  Guest-Pfad fehlt bereits: {path}")
+            return
         raise WipeError(
             f"Gast {guest_name}: {exc.message}",
             exc.status_code,

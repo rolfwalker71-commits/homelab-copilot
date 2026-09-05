@@ -742,6 +742,64 @@ async def sftp_listdir(
         ) from exc
 
 
+# Linux system roots — never emptied or removed via SFTP except Storage-Box
+# account root ``/home`` as contents-only (never rmdir ``/home`` itself).
+_SFTP_RM_FORBIDDEN_ROOTS = frozenset(
+    {
+        "/",
+        "/data",
+        "/etc",
+        "/var",
+        "/root",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/opt",
+        "/tmp",
+        "/mnt",
+        "/media",
+        "/boot",
+        "/dev",
+        "/proc",
+        "/sys",
+        "/run",
+        "/srv",
+    }
+)
+
+
+def assert_sftp_rm_target(remote_path: str, *, contents_only: bool = False) -> str:
+    """Jail SFTP delete targets. ``/home`` is allowed only as contents-only."""
+    raw = (remote_path or "").replace("\\", "/").strip()
+    if not raw or raw in {".", ".."} or "\x00" in raw:
+        raise DockerControlError("Ungültiger SFTP-Löschpfad.", status_code=400)
+    parts = [part for part in raw.split("/") if part not in ("", ".")]
+    if any(part == ".." for part in parts):
+        raise DockerControlError(
+            "SFTP-Pfad außerhalb des erlaubten Bereichs.",
+            status_code=400,
+        )
+    remote = raw.rstrip("/") or "/"
+    if remote == "/":
+        raise DockerControlError(
+            "SFTP-Löschen von / ist nicht erlaubt.",
+            status_code=400,
+        )
+    if remote in _SFTP_RM_FORBIDDEN_ROOTS:
+        raise DockerControlError(
+            f"SFTP-Löschen von „{remote}“ ist nicht erlaubt.",
+            status_code=400,
+        )
+    if remote == "/home" and not contents_only:
+        raise DockerControlError(
+            "SFTP-Löschen von /home selbst ist nicht erlaubt — nur Inhalt.",
+            status_code=400,
+        )
+    return remote
+
+
 async def sftp_rm_tree(
     settings: Settings,
     ip: str,
@@ -756,12 +814,7 @@ async def sftp_rm_tree(
     port: int | None = None,
 ) -> int:
     """Recursively delete a remote path (or only its children). Returns count."""
-    remote = (remote_path or "").rstrip("/") or "/"
-    if remote == "/" and not contents_only:
-        raise DockerControlError(
-            "SFTP-Löschen von / ist nicht erlaubt.",
-            status_code=400,
-        )
+    remote = assert_sftp_rm_target(remote_path, contents_only=contents_only)
     session = _SftpSession(
         settings,
         ip,
