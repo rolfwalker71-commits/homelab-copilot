@@ -183,8 +183,38 @@ async def health_loop(store: HealthStore) -> None:
             except Exception:
                 topology = None
             await poll_disk_alerts(store, topology)
+            await poll_storage_health(store)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Health-Poll fehlgeschlagen")
         await asyncio.sleep(interval)
+
+
+async def poll_storage_health(store: HealthStore) -> None:
+    """Read-only Proxmox storage/SMART sample for fill projection. No zpool writes."""
+    try:
+        from app.main import app as fastapi_app
+
+        engine = getattr(fastapi_app.state, "discovery_engine", None)
+        snap = getattr(
+            getattr(fastapi_app.state, "topology_store", None), "snapshot", None
+        )
+    except Exception:
+        return
+    if engine is None or snap is None:
+        return
+    nodes = []
+    try:
+        nodes = list(getattr(snap, "nodes", None) or [])
+    except Exception:
+        nodes = []
+    for node in nodes:
+        name = getattr(node, "name", None) or (node.get("name") if isinstance(node, dict) else None)
+        if not name or str(name).startswith("__"):
+            continue
+        try:
+            data = await engine.fetch_node_storage_health(str(name))
+            await store.record_health_snapshot(str(name), data)
+        except Exception:
+            logger.debug("Storage-Health %s nicht lesbar", name, exc_info=True)

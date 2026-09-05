@@ -40,6 +40,20 @@ CREATE TABLE IF NOT EXISTS disk_alerts (
     last_pct REAL,
     last_push_date TEXT
 );
+
+CREATE TABLE IF NOT EXISTS storage_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node TEXT NOT NULL,
+    pool_key TEXT NOT NULL,
+    used REAL,
+    total REAL,
+    pct REAL,
+    sampled_at TEXT NOT NULL,
+    sampled_at_iso TEXT NOT NULL,
+    sampled_at_epoch REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_storage_samples_key
+    ON storage_samples(node, pool_key, sampled_at_epoch);
 """
 
 
@@ -54,6 +68,32 @@ class HealthStore:
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
         await self._db.commit()
+        await self._migrate()
+
+    async def _migrate(self) -> None:
+        db = self._require()
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                node TEXT NOT NULL,
+                pool_key TEXT NOT NULL,
+                used REAL,
+                total REAL,
+                pct REAL,
+                sampled_at TEXT NOT NULL,
+                sampled_at_iso TEXT NOT NULL,
+                sampled_at_epoch REAL NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_storage_samples_key
+            ON storage_samples(node, pool_key, sampled_at_epoch)
+            """
+        )
+        await db.commit()
 
     async def close(self) -> None:
         if self._db:
@@ -237,3 +277,118 @@ class HealthStore:
             (entity_id, pct, push_date),
         )
         await db.commit()
+
+    async def record_storage_sample(
+        self,
+        *,
+        node: str,
+        pool_key: str,
+        used: float | None,
+        total: float | None,
+        pct: float | None,
+    ) -> None:
+        if used is None and pct is None:
+            return
+        db = self._require()
+        stamp, stamp_iso = self._stamp()
+        epoch = now_berlin().timestamp()
+        await db.execute(
+            """
+            INSERT INTO storage_samples (
+                node, pool_key, used, total, pct,
+                sampled_at, sampled_at_iso, sampled_at_epoch
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (node, pool_key, used, total, pct, stamp, stamp_iso, epoch),
+        )
+        await db.commit()
+        await self._downsample_pool(node, pool_key)
+
+    async def _downsample_pool(self, node: str, pool_key: str) -> None:
+        from app.core.storage_health import downsample_samples
+
+        db = self._require()
+        async with db.execute(
+            """
+            SELECT id, used, total, pct, sampled_at_epoch AS ts
+            FROM storage_samples
+            WHERE node = ? AND pool_key = ?
+            ORDER BY sampled_at_epoch ASC
+            """,
+            (node, pool_key),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        kept = downsample_samples(rows)
+        if len(kept) >= len(rows):
+            return
+        keep_ids = {int(r["id"]) for r in kept if r.get("id") is not None}
+        drop = [int(r["id"]) for r in rows if int(r["id"]) not in keep_ids]
+        if not drop:
+            return
+        q = ",".join("?" * len(drop))
+        await db.execute(f"DELETE FROM storage_samples WHERE id IN ({q})", drop)
+        await db.commit()
+
+    async def list_storage_samples(
+        self, node: str, pool_key: str, *, limit: int = 80
+    ) -> list[dict[str, Any]]:
+        db = self._require()
+        async with db.execute(
+            """
+            SELECT used, total, pct, sampled_at_epoch AS ts, sampled_at
+            FROM storage_samples
+            WHERE node = ? AND pool_key = ?
+            ORDER BY sampled_at_epoch ASC
+            LIMIT ?
+            """,
+            (node, pool_key, max(2, min(limit, 120))),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def attach_projections(
+        self, node: str, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        from app.core.storage_health import fill_projection
+
+        out = dict(data)
+        for group, name_key in (
+            ("storage", "storage"),
+            ("zfs", "name"),
+            ("lvmthin", "name"),
+        ):
+            rows = list(out.get(group) or [])
+            enriched = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                copy = dict(row)
+                key = f"{group}:{copy.get(name_key) or ''}"
+                samples = await self.list_storage_samples(node, key)
+                used = copy.get("used") or copy.get("alloc")
+                total = copy.get("total") or copy.get("size")
+                proj = fill_projection(samples, used=used, total=total)
+                if proj:
+                    copy["projection"] = proj
+                enriched.append(copy)
+            out[group] = enriched
+        return out
+
+    async def record_health_snapshot(self, node: str, data: dict[str, Any]) -> None:
+        for group, name_key, used_key, total_key in (
+            ("storage", "storage", "used", "total"),
+            ("zfs", "name", "alloc", "size"),
+            ("lvmthin", "name", "used", "total"),
+        ):
+            for row in data.get(group) or []:
+                if not isinstance(row, dict):
+                    continue
+                name = row.get(name_key)
+                if not name:
+                    continue
+                await self.record_storage_sample(
+                    node=node,
+                    pool_key=f"{group}:{name}",
+                    used=row.get(used_key),
+                    total=row.get(total_key),
+                    pct=row.get("pct"),
+                )

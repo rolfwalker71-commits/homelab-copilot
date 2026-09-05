@@ -79,6 +79,14 @@
       </div>
     </fieldset>
     <label class="flex items-start gap-2 text-sm">
+      <input type="checkbox" id="apply-snap-first" class="mt-1 h-4 w-4" checked />
+      <span>Zuerst Proxmox-Snapshot anlegen (VM/LXC). Manuelle Hosts ohne Proxmox werden übersprungen.</span>
+    </label>
+    <label class="flex items-start gap-2 text-sm">
+      <input type="checkbox" id="apply-snap-anyway" class="mt-1 h-4 w-4" />
+      <span>Trotzdem einspielen, falls der Snapshot fehlschlägt (z. B. fehlendes VM.Snapshot).</span>
+    </label>
+    <label class="flex items-start gap-2 text-sm">
       <input type="checkbox" id="apply-confirm" class="mt-1 h-4 w-4" />
       <span id="apply-confirm-label">Ich bestätige das Einspielen der Updates auf diesem Host. Es erfolgt kein automatischer Neustart.</span>
     </label>
@@ -116,6 +124,14 @@
         </label>
       </div>
     </fieldset>
+    <label class="flex items-start gap-2 text-sm">
+      <input type="checkbox" id="release-snap-first" class="mt-1 h-4 w-4" checked />
+      <span>Zuerst Proxmox-Snapshot anlegen (VM/LXC). Ohne Proxmox wird der Snapshot übersprungen.</span>
+    </label>
+    <label class="flex items-start gap-2 text-sm">
+      <input type="checkbox" id="release-snap-anyway" class="mt-1 h-4 w-4" />
+      <span>Trotzdem einspielen, falls der Snapshot fehlschlägt.</span>
+    </label>
     <label class="flex items-start gap-2 text-sm">
       <input type="checkbox" id="release-confirm" class="mt-1 h-4 w-4" />
       <span id="release-confirm-label">Ich bestätige das Release-Upgrade auf diesem Host. Es erfolgt kein automatischer Schluss-Neustart.</span>
@@ -1123,6 +1139,8 @@
           target_id: targetId,
           confirm: true,
           reboot_after: rebootAfter,
+          snapshot_first: !!document.getElementById('release-snap-first')?.checked,
+          proceed_without_snapshot: !!document.getElementById('release-snap-anyway')?.checked,
         }),
       });
       const j = await r.json();
@@ -1173,6 +1191,8 @@
             confirm: true,
             package_filter: filter,
             reboot_after: rebootAfter,
+            snapshot_first: !!document.getElementById('apply-snap-first')?.checked,
+            proceed_without_snapshot: !!document.getElementById('apply-snap-anyway')?.checked,
           }),
         });
         const j = await r.json();
@@ -1199,6 +1219,8 @@
           confirm: true,
           package_filter: filter,
           reboot_after: rebootAfter,
+          snapshot_first: !!document.getElementById('apply-snap-first')?.checked,
+          proceed_without_snapshot: !!document.getElementById('apply-snap-anyway')?.checked,
         }),
       });
       const j = await r.json();

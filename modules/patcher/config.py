@@ -36,6 +36,8 @@ class PatcherSettings(BaseSettings):
     patcher_daily_hour: int = Field(default=4, ge=0, le=23)
     # Optional 5-field cron: "m h dom mon dow" (e.g. "0 4 * * *")
     patcher_cron: str = ""
+    # Auto-snapshots before apply / release-upgrade. Conservative keep-N.
+    patcher_snap_keep: int = Field(default=3, ge=1, le=50)
 
     # OpenAI-compatible chat API (Ollama: http://127.0.0.1:11434/v1)
     patcher_llm_api_key: str = ""

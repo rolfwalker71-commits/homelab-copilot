@@ -29,6 +29,7 @@ from app.core.locale import format_de, now_berlin
 from app.core.topology import TopologyStore
 
 from patcher.apply import ApplyError, apply_updates, reboot_host
+from patcher.pre_snap import maybe_pre_snapshot
 from patcher.release_upgrade import perform_release_upgrade
 from patcher.config import get_patcher_settings
 from patcher import cron as cron_mod
@@ -95,6 +96,8 @@ class ApplyPayload(BaseModel):
     package_filter: str = Field(default="all", pattern="^(security|all|selected)$")
     packages: list[str] = Field(default_factory=list)
     reboot_after: bool = False
+    snapshot_first: bool = True
+    proceed_without_snapshot: bool = False
     wait: bool = False
 
 
@@ -103,6 +106,8 @@ class ApplyBatchPayload(BaseModel):
     confirm: bool = False
     package_filter: str = Field(default="all", pattern="^(security|all)$")
     reboot_after: bool = False
+    snapshot_first: bool = True
+    proceed_without_snapshot: bool = False
     wait: bool = False
 
 
@@ -165,6 +170,8 @@ class ReleaseUpgradePayload(BaseModel):
     target_id: str = Field(..., min_length=1)
     confirm: bool = False
     reboot_after: bool = False
+    snapshot_first: bool = True
+    proceed_without_snapshot: bool = False
     wait: bool = False
 
 
@@ -713,6 +720,8 @@ async def _apply_one_target(
     on_progress,
     on_log,
     reboot_after: bool = False,
+    snapshot_first: bool = True,
+    proceed_without_snapshot: bool = False,
 ) -> dict[str, Any]:
     apply_id = await store.create_apply_run(
         target_id=target.id,
@@ -721,6 +730,13 @@ async def _apply_one_target(
         packages=packages,
     )
     try:
+        await maybe_pre_snapshot(
+            target,
+            snapshot_first=snapshot_first,
+            proceed_without_snapshot=proceed_without_snapshot,
+            on_log=on_log,
+            reason="Patch",
+        )
         result = await apply_updates(
             target,
             package_filter=package_filter,
@@ -756,6 +772,8 @@ async def _run_apply_job(
     package_filter: str,
     packages: list[str],
     reboot_after: bool = False,
+    snapshot_first: bool = True,
+    proceed_without_snapshot: bool = False,
 ) -> None:
     store = _store
     if store is None:
@@ -790,6 +808,8 @@ async def _run_apply_job(
             on_progress=on_progress,
             on_log=on_log,
             reboot_after=reboot_after,
+            snapshot_first=snapshot_first,
+            proceed_without_snapshot=proceed_without_snapshot,
         )
         apply_id = result.get("apply_id")
         if apply_id is not None:
@@ -825,6 +845,8 @@ async def _run_apply_batch_job(
     snapshot,
     package_filter: str,
     reboot_after: bool = False,
+    snapshot_first: bool = True,
+    proceed_without_snapshot: bool = False,
 ) -> None:
     store = _store
     if store is None:
@@ -884,6 +906,8 @@ async def _run_apply_batch_job(
                     on_progress=on_progress,
                     on_log=on_log,
                     reboot_after=reboot_after,
+                    snapshot_first=snapshot_first,
+                    proceed_without_snapshot=proceed_without_snapshot,
                 )
                 entry = {
                     "ok": True,
@@ -987,6 +1011,8 @@ async def _run_release_upgrade_job(
     target_id: str,
     snapshot,
     reboot_after: bool = False,
+    snapshot_first: bool = True,
+    proceed_without_snapshot: bool = False,
 ) -> None:
     store = _store
     if store is None:
@@ -1019,6 +1045,13 @@ async def _run_release_upgrade_job(
             packages=[],
         )
         try:
+            await maybe_pre_snapshot(
+                target,
+                snapshot_first=snapshot_first,
+                proceed_without_snapshot=proceed_without_snapshot,
+                on_log=on_log,
+                reason="Release-Upgrade",
+            )
             result = await perform_release_upgrade(
                 target,
                 reboot_after=reboot_after,
@@ -1257,6 +1290,8 @@ async def api_apply(
             package_filter=payload.package_filter,
             packages=payload.packages,
             reboot_after=payload.reboot_after,
+            snapshot_first=payload.snapshot_first,
+            proceed_without_snapshot=payload.proceed_without_snapshot,
         )
         done = JOBS.get(job.id)
         return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
@@ -1269,6 +1304,8 @@ async def api_apply(
         package_filter=payload.package_filter,
         packages=payload.packages,
         reboot_after=payload.reboot_after,
+        snapshot_first=payload.snapshot_first,
+        proceed_without_snapshot=payload.proceed_without_snapshot,
     )
     return job.to_dict()
 
@@ -1313,6 +1350,8 @@ async def api_apply_batch(
             snapshot=snap,
             package_filter=payload.package_filter,
             reboot_after=payload.reboot_after,
+            snapshot_first=payload.snapshot_first,
+            proceed_without_snapshot=payload.proceed_without_snapshot,
         )
         done = JOBS.get(job.id)
         return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
@@ -1324,6 +1363,8 @@ async def api_apply_batch(
         snapshot=snap,
         package_filter=payload.package_filter,
         reboot_after=payload.reboot_after,
+        snapshot_first=payload.snapshot_first,
+        proceed_without_snapshot=payload.proceed_without_snapshot,
     )
     return job.to_dict()
 
@@ -1353,6 +1394,8 @@ async def api_release_upgrade(
             target_id=target.id,
             snapshot=snap,
             reboot_after=payload.reboot_after,
+            snapshot_first=payload.snapshot_first,
+            proceed_without_snapshot=payload.proceed_without_snapshot,
         )
         done = JOBS.get(job.id)
         return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
@@ -1363,6 +1406,8 @@ async def api_release_upgrade(
         target_id=target.id,
         snapshot=snap,
         reboot_after=payload.reboot_after,
+        snapshot_first=payload.snapshot_first,
+        proceed_without_snapshot=payload.proceed_without_snapshot,
     )
     return job.to_dict()
 

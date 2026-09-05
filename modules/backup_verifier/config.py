@@ -53,6 +53,12 @@ class BackupSettings(BaseSettings):
     backup_rsync_install: bool = True
     # Wall-clock for apt/apk rsync bootstrap on the LXC (same budget as restic).
     backup_rsync_install_timeout: float = Field(default=600.0, ge=60.0, le=3600.0)
+    # Nightly restore-drill (Europe/Berlin). Default 05:00 — after patcher 04:00.
+    backup_drill_enabled: bool = True
+    backup_drill_hour: int = Field(default=5, ge=0, le=23)
+    # Also stat dest restic/config (SFTP) without downloading packs.
+    backup_drill_dest: bool = True
+    backup_drill_timeout: float = Field(default=600.0, ge=60.0, le=3600.0)
 
     @property
     def copilot_dir(self) -> Path:

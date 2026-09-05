@@ -50,9 +50,12 @@ Default **quiesce**: `docker compose stop` before volume tar, then `up -d` / `st
   - `GET /jobs?active=1` — laufende Jobs (Reconnect nach Navigation)
   - `GET /jobs/{id}` — Fortschritt (percent, phase, log_lines, destination hops, snapshot_id)
   - `GET /history`, `GET /history/{id}`
-  - `POST /history/{id}/restore` — `{confirm: true, source: "<destination id|copilot|synology>", snapshot_id?}`
+  - `POST /history/{id}/restore` — `{confirm: true, source, dest_mode: staging|original, dest_place: copilot|guest, scope: stack|paths, paths?, typed_confirm?, snapshot_id?}` → job. Default **staging** (not live binds). `original` needs typed confirm (`RESTORE` or stack name).
+  - `POST /browse/restore` — same dest fields + `{dest_id, path}` (path jail). From **Durchsuchen**.
+  - `GET /browse/members?dest_id=&path=` — tar members, Copilot local only
   - `GET /restic/snapshots?parent_id=&project=` — restic-Snapshots eines Stacks
-  - `POST /restic/restore` — `{confirm, parent_id, project, snapshot_id, source}`
+  - `POST /restic/restore` — same dest/confirm fields as history restore
+  - `GET /drill` — last restore-drill result; `POST /drill/run` — run now (never from backup cron)
   - `GET|POST /schedules`, `PUT|PATCH /schedules/{id}`, `DELETE /schedules/{id}`, `POST /schedules/sync`
 
 ## Schedule (in-process)
@@ -87,6 +90,7 @@ Optional env seed / paths (see `.env.example`):
 - `RESTIC_INSTALL_TIMEOUT` — wall-clock for apt/apk bootstrap only; default 600s (never `BACKUP_SSH_TIMEOUT`)
 - `BACKUP_RSYNC_INSTALL` — default `true`: if guest `rsync` is missing, apt/apk via nohup+poll, then rsync-over-SSH; SFTP only if that fails
 - `BACKUP_RSYNC_INSTALL_TIMEOUT` — wall-clock for apt/apk rsync bootstrap; default 600s (same as restic)
+- `BACKUP_DRILL_ENABLED` / `BACKUP_DRILL_HOUR` / `BACKUP_DRILL_DEST` / `BACKUP_DRILL_TIMEOUT` — nightly restore-drill (default hour 5)
 - Hetzner Storage Box dest hop: Copilot already has `rsync` in the image. After the guest→Copilot mirror, Copilot→box uses `rsync -e "ssh -p 23"` when possible. In **Hetzner Robot** enable **SSH-Unterstützung**. Port **23** = SSH/rsync/Borg; port **22** = SFTP only (fallback if SSH-23 is off, the key is rejected, or local rsync is missing). An explicit dest port wins; `*.your-storagebox.de` / preset `storage_box` with unset or SFTP-22 defaults rsync to 23. The box already speaks rsync — Copilot does not install packages on the dest.
 
 DB: `$DATA_DIR/backup_verifier.db` (restic repo password lives here, never in git)
@@ -102,7 +106,11 @@ Opt-in on **Backup** / **Zeitplan**: Engine *Incremental (restic)*.
 3. Working repo on the LXC: `$BACKUP_LXC_DIR/restic/{project}`. Durable copy: `$BACKUP_COPILOT_DIR/restic/{parent}/{project}`. Dest hops get the same repo tree (`…/restic/{parent}/{project}`).
 4. Same inventory as tar (compose, named volume mountpoints, readable binds). Quiesce still stops the stack.
 5. Every N days (default 7): `restic forget --keep-last/--keep-weekly --prune` and `restic check`. Restic has no classic full backup — a snapshot is always a complete restore point.
-6. Restore: Verlauf → Snapshots listen → Snapshot wählen → gleiche Ziele wie tar.
+6. Restore (explicit confirm only, never from daily cron): Backup page / Verlauf / Durchsuchen. Default destination is **staging** (Copilot `_restore/…` or guest `$BACKUP_LXC_DIR/restore/…`). Original paths require a second typed confirm. Progress uses the existing Verlaufsbox / jobs. rsync/SFTP hops reverse the backup direction.
+
+## Restore-Drill
+
+In-process nightly check (Europe/Berlin, default **05:00** — after patcher 04:00). `restic check` on Copilot repos; dest restic = SFTP **stat of `config` only** (no pack/archive download). Local tar: list newest archive per stack dir. Results persist in SQLite. Push only on failure and first success after failure (`backup_failure` pref). UI: last result on the Backup page.
 
 **Paperless:** choose the paperless stack, Engine Incremental, Preflight, confirm. First run copies all media (can take hours; raise `BACKUP_ARCHIVE_TIMEOUT` if needed). Later runs send only new/changed chunks.
 

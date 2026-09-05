@@ -1904,7 +1904,11 @@ async def run_restic_restore(
     settings: Settings,
     bsettings: BackupSettings,
     log: LogFn,
-) -> None:
+    apply_original: bool = False,
+    include_paths: list[str] | None = None,
+    staging_override: str | None = None,
+    dest_place: str = "guest",
+) -> str:
     password = await store.get_restic_password(parent_id, project)
     if not password:
         raise ResticError(
@@ -1938,7 +1942,17 @@ async def run_restic_restore(
             bsettings=bsettings,
         )
 
-    if not local and (copilot_repo / "config").is_file():
+    if staging_override:
+        staging = staging_override
+    elif dest_place == "copilot" or local:
+        staging = str(bsettings.copilot_dir / "_restore" / safe_name(project) / snap[:12])
+    else:
+        staging = f"{bsettings.backup_lxc_dir.rstrip('/')}/restore/{safe_name(project)}/{snap[:12]}"
+    run_on_guest = dest_place != "copilot" and not local
+    work = f"{staging}.work"
+    pw_file = f"{work}/.restic-pass"
+
+    if run_on_guest and (copilot_repo / "config").is_file():
         await log("Spiegele Copilot-Repo auf den Host für Restore …")
         await _mirror_copilot_to_lxc(
             settings,
@@ -1960,7 +1974,7 @@ async def run_restic_restore(
     await ensure_restic_installed(
         settings,
         ip=ip,
-        local=local,
+        local=not run_on_guest,
         allow_install=bsettings.restic_install,
         timeout=timeout,
         log=log,
@@ -1969,30 +1983,35 @@ async def run_restic_restore(
         transfer_timeout=transfer_timeout,
     )
 
-    staging = f"{bsettings.backup_lxc_dir.rstrip('/')}/restore/{safe_name(project)}/{snap[:12]}"
-    if local:
-        staging = str(bsettings.copilot_dir / "_restore" / safe_name(project) / snap[:12])
-    work = f"{staging}.work"
-    pw_file = f"{work}/.restic-pass"
-    if local:
-        await sshutil.local_run_ok(f"mkdir -p -- {shlex.quote(work)} {shlex.quote(staging)}", timeout=30)
+    if not run_on_guest:
+        await sshutil.local_run_ok(
+            f"mkdir -p -- {shlex.quote(work)} {shlex.quote(staging)}", timeout=30
+        )
     else:
         assert ip is not None
         await sshutil.ensure_remote_dir(settings, ip, work, timeout=30)
         await sshutil.ensure_remote_dir(settings, ip, staging, timeout=30)
 
     await _write_password_file(
-        settings, ip=ip, local=local, remote_path=pw_file, password=password, timeout=timeout
+        settings,
+        ip=ip,
+        local=not run_on_guest,
+        remote_path=pw_file,
+        password=password,
+        timeout=timeout,
     )
+    repo = str(copilot_repo) if not run_on_guest else lxc_repo
     try:
-        await log(f"restic restore {snap[:12]} → Staging …")
+        await log(f"restic restore {snap[:12]} → Staging {staging}")
         script = _restore_apply_script(
-            repo=lxc_repo if not local else str(copilot_repo),
+            repo=repo,
             password_file=pw_file,
             snapshot_id=snap,
             staging=staging,
             inventory=inventory,
             progress_path=f"{work}/.hc_job_restic_restore.progress",
+            apply_original=apply_original,
+            include_paths=include_paths or [],
         )
         try:
             await sshutil.run_detached_and_poll(
@@ -2001,7 +2020,7 @@ async def run_restic_restore(
                 script,
                 work_dir=work,
                 job_name="restic_restore",
-                local=local,
+                local=not run_on_guest,
                 overall_timeout=archive_timeout,
                 poll_interval=5.0,
                 short_timeout=min(60.0, timeout),
@@ -2010,29 +2029,20 @@ async def run_restic_restore(
             )
         except DockerControlError as exc:
             raise ResticError(translate_restic_error(exc.message)) from exc
-        await log("restic check (Metadaten) …")
-        check_cmd = (
-            f"RESTIC_REPOSITORY={shlex.quote(lxc_repo if not local else str(copilot_repo))} "
-            f"RESTIC_PASSWORD_FILE={shlex.quote(pw_file)} restic check"
+        await log(
+            "Staging bereit"
+            if not apply_original
+            else "Restore auf Originalpfade angewendet"
         )
-        try:
-            if local:
-                await sshutil.local_run_ok(check_cmd, timeout=min(600.0, archive_timeout))
-            else:
-                assert ip is not None
-                await sshutil.ssh_run_ok(
-                    settings, ip, check_cmd, timeout=min(600.0, archive_timeout)
-                )
-            await log("restic check OK")
-        except DockerControlError as exc:
-            await log(
-                "Hinweis: restic check nach Restore: "
-                + translate_restic_error(exc.message)
-            )
     finally:
         await _remove_password_file(
-            settings, ip=ip, local=local, remote_path=pw_file, timeout=timeout
+            settings,
+            ip=ip,
+            local=not run_on_guest,
+            remote_path=pw_file,
+            timeout=timeout,
         )
+    return staging
 
 
 def _restore_apply_script(
@@ -2043,7 +2053,18 @@ def _restore_apply_script(
     staging: str,
     inventory: dict[str, Any],
     progress_path: str,
+    apply_original: bool = False,
+    include_paths: list[str] | None = None,
 ) -> str:
+    includes = ""
+    for rel in include_paths or []:
+        rel = (rel or "").strip().lstrip("/")
+        if not rel:
+            continue
+        includes += f" --include {shlex.quote(rel)} --include {shlex.quote('/' + rel)}"
+    restore_cmd = (
+        f"restic restore {shlex.quote(snapshot_id)} --target \"$ST\"{includes}"
+    )
     lines = [
         "set -euo pipefail",
         f"export RESTIC_REPOSITORY={shlex.quote(repo)}",
@@ -2053,9 +2074,12 @@ def _restore_apply_script(
         _prog_line(progress_path, "restore"),
         'rm -rf "$ST"',
         'mkdir -p "$ST"',
-        f"restic restore {shlex.quote(snapshot_id)} --target \"$ST\"",
-        _prog_line(progress_path, "apply"),
+        restore_cmd,
     ]
+    if not apply_original:
+        lines.append(_prog_line(progress_path, "done"))
+        return "\n".join(lines)
+    lines.append(_prog_line(progress_path, "apply"))
     for vol in inventory.get("named_volumes") or []:
         name = vol.get("name") or ""
         mp = (vol.get("source") or "").strip()
@@ -2119,3 +2143,113 @@ def _restore_apply_script(
         )
     lines.append(_prog_line(progress_path, "done"))
     return "\n".join(lines)
+
+
+def _ls_rows(raw: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            path = line.lstrip("/")
+            if path:
+                out.append({"path": path, "type": "file"})
+            continue
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("name") or "").lstrip("/")
+        if not path:
+            continue
+        kind = str(item.get("type") or "file")
+        out.append({"path": path, "type": kind, "size": item.get("size")})
+    return out[:400]
+
+
+async def list_restic_paths(
+    store: BackupStore,
+    *,
+    parent_id: str,
+    project: str,
+    snapshot_id: str,
+    settings: Settings | None = None,
+    bsettings: BackupSettings | None = None,
+    source: str = "copilot",
+) -> list[dict[str, Any]]:
+    """List members of a restic snapshot (Copilot repo). Path-jail friendly."""
+    settings = settings or get_settings()
+    bsettings = bsettings or get_backup_settings()
+    password = await store.get_restic_password(parent_id, project)
+    if not password:
+        raise ResticError("Kein restic-Passwort für diesen Stack.")
+    snap = (snapshot_id or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{8,64}", snap):
+        raise ResticError("Ungültige Snapshot-ID.")
+    if str(source).isdigit() or source in ("synology", KIND_SFTP):
+        await _ensure_sftp_repo_local(
+            store,
+            source=source,
+            parent_id=parent_id,
+            project=project,
+            settings=settings,
+            bsettings=bsettings,
+        )
+    repo = copilot_repo_path(bsettings.copilot_dir, parent_id, project)
+    if not (repo / "config").is_file():
+        raise ResticError("restic-Repository auf Copilot nicht gefunden.")
+    work = repo / ".hc-ls"
+    work.mkdir(parents=True, exist_ok=True)
+    pw_file = work / ".restic-pass"
+    pw_file.write_text(password, encoding="utf-8")
+    try:
+        cmd = (
+            f"RESTIC_REPOSITORY={shlex.quote(str(repo))} "
+            f"RESTIC_PASSWORD_FILE={shlex.quote(str(pw_file))} "
+            f"restic ls {shlex.quote(snap)} --json"
+        )
+        out, err, code = await sshutil.local_run(
+            cmd, timeout=min(180.0, bsettings.backup_ssh_timeout)
+        )
+        if code != 0:
+            raise ResticError(translate_restic_error(err or out or f"exit {code}"))
+        return _ls_rows(out)
+    finally:
+        try:
+            pw_file.unlink()
+        except OSError:
+            pass
+
+
+async def restic_check_local(
+    repo: Path,
+    password: str,
+    *,
+    timeout: float = 600.0,
+) -> dict[str, Any]:
+    """Read-only ``restic check`` against a local repo. Temp dir cleaned up."""
+    from backup_verifier.drill import evaluate_restic_check
+
+    if not (repo / "config").is_file():
+        return evaluate_restic_check(
+            exit_code=1, stderr="restic-Repository fehlt (keine config)."
+        )
+    work = repo / ".hc-drill"
+    work.mkdir(parents=True, exist_ok=True)
+    pw_file = work / ".restic-pass"
+    pw_file.write_text(password, encoding="utf-8")
+    try:
+        cmd = (
+            f"RESTIC_REPOSITORY={shlex.quote(str(repo))} "
+            f"RESTIC_PASSWORD_FILE={shlex.quote(str(pw_file))} restic check"
+        )
+        out, err, code = await sshutil.local_run(cmd, timeout=timeout)
+        return evaluate_restic_check(exit_code=code, stdout=out, stderr=err)
+    except DockerControlError as exc:
+        return evaluate_restic_check(exit_code=1, stderr=exc.message)
+    finally:
+        try:
+            pw_file.unlink()
+        except OSError:
+            pass

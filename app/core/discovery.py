@@ -258,6 +258,45 @@ class DiscoveryEngine:
         except Exception:
             return None
 
+    async def _proxmox_delete(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        headers: dict[str, str],
+    ) -> Any:
+        url = f"{self.settings.proxmox_base_url}{path}"
+        resp = await client.delete(url, headers=headers)
+        if resp.status_code == 403:
+            raise PermissionError(
+                "Keine Berechtigung für Snapshots (HTTP 403). "
+                "Dem API-Token fehlt VM.Snapshot — "
+                "Rolle PVEVMAdmin oder VM.Snapshot auf `/` (Propagate) zuweisen."
+            )
+        resp.raise_for_status()
+        try:
+            return resp.json().get("data")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _guest_id_parts(guest_id: str) -> tuple[str, str, int]:
+        parts = guest_id.split(":")
+        if len(parts) != 3 or parts[0] not in {"lxc", "qemu"}:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}")
+        try:
+            vmid = int(parts[2])
+        except ValueError as exc:
+            raise ValueError(f"Ungültige Guest-ID: {guest_id}") from exc
+        return parts[0], parts[1], vmid
+
+    @staticmethod
+    def _snapshot_acl_message(status_code: int) -> str:
+        return (
+            f"Keine Berechtigung für Snapshots (HTTP {status_code}). "
+            "Dem API-Token fehlt VM.Snapshot — "
+            "Rolle PVEVMAdmin oder VM.Snapshot auf `/` (Propagate) zuweisen."
+        )
+
     async def _probe_token_acl(
         self, client: httpx.AsyncClient, headers: dict[str, str]
     ) -> list[str]:
@@ -1146,6 +1185,290 @@ class DiscoveryEngine:
             "snapshots": snaps,
             "acl_denied": False,
         }
+
+    async def create_guest_snapshot(
+        self,
+        guest_id: str,
+        *,
+        name: str,
+        description: str = "",
+        prune_keep: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a Proxmox snapshot. Never the node itself."""
+        from app.core.snapshots import (
+            SnapshotNameError,
+            clamp_keep,
+            guest_can_snapshot,
+            snaps_to_delete,
+            validate_snap_name,
+        )
+
+        if not guest_can_snapshot(guest_id):
+            raise ValueError(
+                "Snapshots nur für Proxmox-VM/LXC — nicht für den Node selbst."
+            )
+        try:
+            snapname = validate_snap_name(name)
+        except SnapshotNameError as exc:
+            raise ValueError(exc.message) from exc
+        kind, node, vmid = self._guest_id_parts(guest_id)
+        client, headers = await self._proxmox_authed_client()
+        try:
+            try:
+                upid = await self._proxmox_post(
+                    client,
+                    f"/nodes/{quote(node)}/{kind}/{vmid}/snapshot",
+                    headers,
+                    data={
+                        "snapname": snapname,
+                        "description": (description or "")[:200],
+                    },
+                )
+            except PermissionError:
+                raise PermissionError(self._snapshot_acl_message(403)) from None
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {401, 403}:
+                    raise PermissionError(
+                        self._snapshot_acl_message(exc.response.status_code)
+                    ) from exc
+                detail = (exc.response.text or "")[:200]
+                raise RuntimeError(
+                    f"Snapshot anlegen fehlgeschlagen (HTTP {exc.response.status_code})"
+                    + (f": {detail}" if detail else ".")
+                ) from exc
+            pruned: list[str] = []
+            if prune_keep is not None:
+                listed = await self.fetch_guest_snapshots(guest_id)
+                if listed.get("acl_denied"):
+                    logger.info("Retention übersprungen — keine Snapshot-Leserechte")
+                else:
+                    keep = clamp_keep(prune_keep)
+                    for old in snaps_to_delete(listed.get("snapshots") or [], keep=keep):
+                        try:
+                            await self.delete_guest_snapshot(guest_id, old)
+                            pruned.append(old)
+                        except Exception:
+                            logger.exception("Auto-Snapshot %s nicht gelöscht", old)
+        finally:
+            await client.aclose()
+        kind_label = "LXC" if kind == "lxc" else "VM"
+        return {
+            "ok": True,
+            "guest_id": guest_id,
+            "name": snapname,
+            "description": (description or "").strip(),
+            "upid": upid,
+            "pruned": pruned,
+            "message": f"{kind_label} {vmid}: Snapshot „{snapname}“ wird angelegt…",
+        }
+
+    async def delete_guest_snapshot(self, guest_id: str, snapname: str) -> dict[str, Any]:
+        from app.core.snapshots import SnapshotNameError, guest_can_snapshot, validate_snap_name
+
+        if not guest_can_snapshot(guest_id):
+            raise ValueError(
+                "Snapshots nur für Proxmox-VM/LXC — nicht für den Node selbst."
+            )
+        try:
+            name = validate_snap_name(snapname)
+        except SnapshotNameError as exc:
+            raise ValueError(exc.message) from exc
+        if name == "current":
+            raise ValueError("Der Marker „current“ kann nicht gelöscht werden.")
+        kind, node, vmid = self._guest_id_parts(guest_id)
+        client, headers = await self._proxmox_authed_client()
+        try:
+            try:
+                upid = await self._proxmox_delete(
+                    client,
+                    f"/nodes/{quote(node)}/{kind}/{vmid}/snapshot/{quote(name)}",
+                    headers,
+                )
+            except PermissionError:
+                raise
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {401, 403}:
+                    raise PermissionError(
+                        self._snapshot_acl_message(exc.response.status_code)
+                    ) from exc
+                detail = (exc.response.text or "")[:200]
+                raise RuntimeError(
+                    f"Snapshot löschen fehlgeschlagen (HTTP {exc.response.status_code})"
+                    + (f": {detail}" if detail else ".")
+                ) from exc
+        finally:
+            await client.aclose()
+        return {
+            "ok": True,
+            "guest_id": guest_id,
+            "name": name,
+            "upid": upid,
+            "message": f"Snapshot „{name}“ wird gelöscht…",
+        }
+
+    async def fetch_node_storage_health(self, node: str) -> dict[str, Any]:
+        """ZFS / LVM-thin / SMART summary + existing storage plugins. Read-only."""
+        from app.core.storage_health import (
+            chip_level_from_pct,
+            smart_chip,
+            zfs_chip,
+        )
+
+        node = (node or "").strip()
+        if not node or node.startswith("__"):
+            raise ValueError(f"Ungültiger Node-Name: {node}")
+
+        storage = await self.fetch_node_storage(node)
+        stores = list(storage.get("storage") or [])
+        zfs_pools: list[dict[str, Any]] = []
+        thin_pools: list[dict[str, Any]] = []
+        smart: list[dict[str, Any]] = []
+        acl_notes: list[str] = []
+
+        client, headers = await self._proxmox_authed_client()
+        try:
+            zfs_rows = await self._proxmox_get_optional(
+                client, f"/nodes/{quote(node)}/disks/zfs", headers, acl_notes
+            )
+            for row in zfs_rows or []:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or "").strip()
+                if not name:
+                    continue
+                size = row.get("size")
+                alloc = row.get("alloc")
+                pct = None
+                try:
+                    if alloc is not None and size and float(size) > 0:
+                        pct = round(100.0 * float(alloc) / float(size), 1)
+                except (TypeError, ValueError):
+                    pass
+                health = str(row.get("health") or "").strip()
+                zfs_pools.append(
+                    {
+                        "name": name,
+                        "health": health,
+                        "size": size,
+                        "alloc": alloc,
+                        "free": row.get("free"),
+                        "frag": row.get("frag"),
+                        "pct": pct,
+                        "chip": zfs_chip(health)
+                        if health
+                        else chip_level_from_pct(pct),
+                    }
+                )
+
+            thin_rows = await self._proxmox_get_optional(
+                client, f"/nodes/{quote(node)}/disks/lvmthin", headers, acl_notes
+            )
+            for row in thin_rows or []:
+                if not isinstance(row, dict):
+                    continue
+                lv = str(row.get("lv") or row.get("name") or "").strip()
+                if not lv:
+                    continue
+                used = row.get("used")
+                total = row.get("total") or row.get("size")
+                meta_used = row.get("metadata_used")
+                meta_total = row.get("metadata_size") or row.get("metadata_total")
+                pct = None
+                meta_pct = None
+                try:
+                    if used is not None and total and float(total) > 0:
+                        pct = round(100.0 * float(used) / float(total), 1)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    if meta_used is not None and meta_total and float(meta_total) > 0:
+                        meta_pct = round(100.0 * float(meta_used) / float(meta_total), 1)
+                except (TypeError, ValueError):
+                    pass
+                chip = chip_level_from_pct(
+                    max(p for p in (pct, meta_pct) if p is not None)
+                    if any(p is not None for p in (pct, meta_pct))
+                    else None
+                )
+                thin_pools.append(
+                    {
+                        "name": lv,
+                        "vg": row.get("vg") or "",
+                        "used": used,
+                        "total": total,
+                        "pct": pct,
+                        "metadata_used": meta_used,
+                        "metadata_total": meta_total,
+                        "metadata_pct": meta_pct,
+                        "chip": chip,
+                    }
+                )
+
+            disks = await self._proxmox_get_optional(
+                client, f"/nodes/{quote(node)}/disks/list", headers, acl_notes
+            )
+            for row in disks or []:
+                if not isinstance(row, dict):
+                    continue
+                dev = str(row.get("devpath") or row.get("osdid") or "").strip()
+                if not dev:
+                    continue
+                health = str(row.get("health") or "").strip()
+                wear = row.get("wearout")
+                temp = row.get("temp") or row.get("temperature")
+                failing = str(health).lower() in {"failed", "failing"}
+                prefail = str(health).lower() in {"prefail", "pre-fail", "warning"}
+                if not health and wear is None and temp is None:
+                    continue
+                smart.append(
+                    {
+                        "disk": dev.rsplit("/", 1)[-1],
+                        "model": str(row.get("model") or "").strip(),
+                        "health": health or "—",
+                        "temp": temp,
+                        "wearout": wear,
+                        "chip": smart_chip(health, failing=failing, prefail=prefail),
+                    }
+                )
+        finally:
+            await client.aclose()
+
+        return {
+            "node": node,
+            "storage": stores,
+            "zfs": zfs_pools,
+            "lvmthin": thin_pools,
+            "smart": smart,
+            "acl_notes": acl_notes,
+        }
+
+    async def _proxmox_get_optional(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        headers: dict[str, str],
+        acl_notes: list[str],
+    ) -> list[Any]:
+        try:
+            data = await self._proxmox_get(client, path, headers)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {401, 403}:
+                acl_notes.append(
+                    f"{path}: keine Berechtigung (HTTP {exc.response.status_code})."
+                )
+                return []
+            if exc.response.status_code in {404, 500, 501}:
+                return []
+            logger.debug("Proxmox GET %s: %s", path, exc)
+            return []
+        except Exception:
+            logger.debug("Proxmox GET %s fehlgeschlagen", path, exc_info=True)
+            return []
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return [data]
+        return []
 
     async def guest_power(self, guest_id: str, action: str) -> dict[str, Any]:
         """Start / stop / shutdown / reboot an LXC or QEMU guest via Proxmox.

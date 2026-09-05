@@ -55,6 +55,14 @@
   <p class="text-sm text-[var(--muted)]">Laden…</p>
 </div>
 
+<article class="surface p-4 sm:p-5 mb-6 animate-in" id="storage-health-card">
+  <h2 class="font-display text-lg font-bold">Storage / SMART</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">
+    Proxmox-Node: Pools, ZFS, Thin-Pool, SMART-Kurzstatus. Füllprognose nur bei belastbaren Samples.
+  </p>
+  <div id="storage-health-list" class="mt-3 space-y-3 text-sm text-[var(--muted)]">Laden…</div>
+</article>
+
 <article class="surface p-4 sm:p-5 animate-in">
   <h2 class="font-display text-lg font-bold">Vorschläge aus der Topologie</h2>
   <p class="mt-1 text-sm text-[var(--muted)]">Veröffentlichte HTTP(S)-Ports und NPM — einmal antippen zum Übernehmen.</p>
@@ -206,6 +214,7 @@
     if (!r.ok) { msg(d.detail || 'Fehler', false); return; }
     msg((d.checked || 0) + ' geprüft, ' + (d.down || 0) + ' down', true);
     loadChecks();
+    loadStorageHealth();
   });
 
   async function loadPrefs() {
@@ -231,9 +240,69 @@
     msg(r.ok ? (d.message || 'Gespeichert') : (d.detail || 'Fehler'), r.ok);
   });
 
+  function storageChip(level, text) {
+    const cls = level === 'danger' ? 'chip-stopped' : (level === 'warn' ? 'chip-partial' : (level === 'ok' ? 'chip-running' : 'chip-unknown'));
+    return '<span class="chip ' + cls + '">' + esc(text) + '</span>';
+  }
+  async function loadStorageHealth() {
+    const root = document.getElementById('storage-health-list');
+    if (!root) return;
+    try {
+      const r = await fetch(API + '/storage');
+      const d = await r.json();
+      const nodes = d.nodes || [];
+      if (!nodes.length) {
+        root.textContent = 'Keine Node-Storage-Daten.';
+        return;
+      }
+      root.innerHTML = nodes.map(function (n) {
+        if (n.error) {
+          return '<article class="entity-card"><h3 class="font-semibold">' + esc(n.node || 'Node') +
+            '</h3><p class="text-xs text-[var(--muted)]">' + esc(n.error) + '</p></article>';
+        }
+        const bits = [];
+        (n.storage || []).forEach(function (s) {
+          bits.push('<div class="flex flex-wrap items-center gap-2">' +
+            '<span>' + esc(s.storage || 'Storage') + '</span>' +
+            storageChip(s.pct >= 90 ? 'danger' : (s.pct >= 70 ? 'warn' : 'ok'), s.pct != null ? Number(s.pct).toFixed(1) + '%' : '—') +
+            (s.projection && s.projection.label ? '<span class="text-xs text-[var(--muted)]">' + esc(s.projection.label) + '</span>' : '') +
+            '</div>');
+        });
+        (n.zfs || []).forEach(function (z) {
+          bits.push('<div class="flex flex-wrap items-center gap-2"><span>ZFS ' + esc(z.name || '') + '</span>' +
+            storageChip(z.chip, z.health || (z.pct != null ? z.pct + '%' : '—')) +
+            (z.projection && z.projection.label ? '<span class="text-xs text-[var(--muted)]">' + esc(z.projection.label) + '</span>' : '') +
+            '</div>');
+        });
+        (n.lvmthin || []).forEach(function (t) {
+          bits.push('<div class="flex flex-wrap items-center gap-2"><span>Thin ' + esc(t.name || '') + '</span>' +
+            storageChip(t.chip, t.pct != null ? Number(t.pct).toFixed(1) + '%' : '—') +
+            (t.metadata_pct != null ? '<span class="text-xs text-[var(--muted)]">Meta ' + Number(t.metadata_pct).toFixed(1) + '%</span>' : '') +
+            (t.projection && t.projection.label ? '<span class="text-xs text-[var(--muted)]">' + esc(t.projection.label) + '</span>' : '') +
+            '</div>');
+        });
+        (n.smart || []).forEach(function (s) {
+          bits.push('<div class="flex flex-wrap items-center gap-2"><span>SMART ' + esc(s.disk || '') + '</span>' +
+            storageChip(s.chip, s.health || '—') +
+            (s.temp != null ? '<span class="text-xs text-[var(--muted)]">' + esc(String(s.temp)) + ' °C</span>' : '') +
+            '</div>');
+        });
+        const notes = (n.acl_notes || []).length
+          ? '<p class="mt-2 text-xs text-[var(--muted)]">' + esc(n.acl_notes.join(' · ')) + '</p>'
+          : '';
+        return '<article class="entity-card"><h3 class="font-semibold break-words">' + esc(n.node || 'Node') +
+          '</h3><div class="mt-2 space-y-1">' + (bits.join('') || '<p class="text-xs">Keine Pools.</p>') +
+          '</div>' + notes + '</article>';
+      }).join('');
+    } catch (err) {
+      root.textContent = 'Storage-Status nicht lesbar.';
+    }
+  }
+
   loadChecks().catch(function (e) { msg(String(e), false); });
   loadSuggestions().catch(function () {});
   loadPrefs().catch(function () {});
+  loadStorageHealth().catch(function () {});
 })();
 </script>
 {% endblock %}

@@ -14,6 +14,7 @@ class BackupJob:
     id: str
     parent_id: str
     project: str
+    kind: str = "backup"  # backup | restore
     status: str = "queued"  # queued | running | success | partial | failed
     phase: str = "Warteschlange"
     percent: int = 0
@@ -73,6 +74,7 @@ class BackupJob:
             "history_run_url": f"{hist}?run={self.run_id}" if self.run_id else hist,
             "done": self.status in ("success", "partial", "failed"),
             "ok": self.status in ("success", "partial"),
+            "kind": self.kind,
             "engine": str(run.get("engine") or ""),
             "snapshot_id": run.get("snapshot_id") or "",
             "bytes_added": run.get("bytes_added"),
@@ -89,15 +91,17 @@ class JobRegistry:
         self._lock = threading.Lock()
         self._max_jobs = max_jobs
 
-    def create(self, *, parent_id: str, project: str) -> BackupJob:
+    def create(self, *, parent_id: str, project: str, kind: str = "backup") -> BackupJob:
+        kind_n = "restore" if kind == "restore" else "backup"
         job = BackupJob(
             id=str(uuid.uuid4()),
             parent_id=parent_id,
             project=project,
+            kind=kind_n,
             status="queued",
             phase="Warteschlange",
             percent=0,
-            message="Backup läuft…",
+            message="Restore läuft…" if kind_n == "restore" else "Backup läuft…",
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -194,16 +198,17 @@ class JobRegistry:
                 if status in ("success", "partial")
                 else "Fehler"
             )
+            noun = "Restore" if job.kind == "restore" else "Backup"
             if message:
                 job.message = message
             elif status == "success":
-                job.message = "Backup erfolgreich abgeschlossen."
+                job.message = f"{noun} erfolgreich abgeschlossen."
             elif status == "partial":
-                job.message = "Backup teilweise erfolgreich (Ziele prüfen)."
+                job.message = f"{noun} teilweise erfolgreich (Ziele prüfen)."
             elif error:
                 job.message = error
             else:
-                job.message = "Backup fehlgeschlagen."
+                job.message = f"{noun} fehlgeschlagen."
             job.updated_at = time.time()
 
     def _prune_locked(self) -> None:

@@ -57,9 +57,39 @@ CREATE TABLE IF NOT EXISTS restore_runs (
     finished_at TEXT,
     finished_at_iso TEXT,
     source TEXT,
+    dest_mode TEXT NOT NULL DEFAULT 'staging',
+    dest_place TEXT NOT NULL DEFAULT 'copilot',
+    scope TEXT NOT NULL DEFAULT 'stack',
+    paths_json TEXT,
+    staging_path TEXT,
     log_text TEXT,
     error_message TEXT,
     FOREIGN KEY (backup_run_id) REFERENCES backup_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS drill_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    created_at_iso TEXT NOT NULL,
+    finished_at TEXT,
+    finished_at_iso TEXT,
+    status TEXT NOT NULL,
+    engine TEXT NOT NULL DEFAULT '',
+    target_key TEXT NOT NULL DEFAULT '',
+    dest_label TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    duration_s REAL
+);
+CREATE INDEX IF NOT EXISTS idx_drill_runs_created ON drill_runs(created_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS drill_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_fired_date TEXT NOT NULL DEFAULT '',
+    last_status TEXT NOT NULL DEFAULT '',
+    last_finished_at TEXT NOT NULL DEFAULT '',
+    last_finished_at_iso TEXT NOT NULL DEFAULT '',
+    last_summary_json TEXT,
+    last_push_kind TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS schedules (
@@ -172,6 +202,53 @@ class BackupStore:
             await db.execute(
                 "ALTER TABLE backup_runs ADD COLUMN bytes_processed INTEGER"
             )
+        async with db.execute("PRAGMA table_info(restore_runs)") as cur:
+            restore_cols = {row[1] for row in await cur.fetchall()}
+        for col, spec in (
+            ("dest_mode", "TEXT NOT NULL DEFAULT 'staging'"),
+            ("dest_place", "TEXT NOT NULL DEFAULT 'copilot'"),
+            ("scope", "TEXT NOT NULL DEFAULT 'stack'"),
+            ("paths_json", "TEXT"),
+            ("staging_path", "TEXT"),
+        ):
+            if col not in restore_cols:
+                await db.execute(f"ALTER TABLE restore_runs ADD COLUMN {col} {spec}")
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS drill_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                created_at_iso TEXT NOT NULL,
+                finished_at TEXT,
+                finished_at_iso TEXT,
+                status TEXT NOT NULL,
+                engine TEXT NOT NULL DEFAULT '',
+                target_key TEXT NOT NULL DEFAULT '',
+                dest_label TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                duration_s REAL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_drill_runs_created
+            ON drill_runs(created_at_iso DESC)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS drill_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_fired_date TEXT NOT NULL DEFAULT '',
+                last_status TEXT NOT NULL DEFAULT '',
+                last_finished_at TEXT NOT NULL DEFAULT '',
+                last_finished_at_iso TEXT NOT NULL DEFAULT '',
+                last_summary_json TEXT,
+                last_push_kind TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
 
     async def close(self) -> None:
         if self._db:
@@ -186,7 +263,7 @@ class BackupStore:
     @staticmethod
     def _row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
         data = dict(row)
-        for key in ("preflight_json", "manifest_json", "destinations_json"):
+        for key in ("preflight_json", "manifest_json", "destinations_json", "paths_json"):
             raw = data.get(key)
             short = key.replace("_json", "")
             if isinstance(raw, str) and raw:
@@ -397,16 +474,37 @@ class BackupStore:
             rows = await cur.fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    async def create_restore(self, *, backup_run_id: int, source: str) -> int:
+    async def create_restore(
+        self,
+        *,
+        backup_run_id: int,
+        source: str,
+        dest_mode: str = "staging",
+        dest_place: str = "copilot",
+        scope: str = "stack",
+        paths: list[str] | None = None,
+        staging_path: str | None = None,
+    ) -> int:
         db = self._require()
         now = now_berlin()
         cur = await db.execute(
             """
             INSERT INTO restore_runs (
-                backup_run_id, status, created_at, created_at_iso, source
-            ) VALUES (?, 'running', ?, ?, ?)
+                backup_run_id, status, created_at, created_at_iso, source,
+                dest_mode, dest_place, scope, paths_json, staging_path
+            ) VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (backup_run_id, format_de(now), iso_utc(now), source),
+            (
+                backup_run_id,
+                format_de(now),
+                iso_utc(now),
+                source,
+                dest_mode,
+                dest_place,
+                scope,
+                json.dumps(paths or [], ensure_ascii=False),
+                staging_path or "",
+            ),
         )
         await db.commit()
         return int(cur.lastrowid)
@@ -420,12 +518,19 @@ class BackupStore:
             "log_text",
             "error_message",
             "source",
+            "dest_mode",
+            "dest_place",
+            "scope",
+            "paths_json",
+            "staging_path",
         }
         cols: list[str] = []
         vals: list[Any] = []
         for key, value in fields.items():
             if key not in allowed:
                 continue
+            if key.endswith("_json") and not isinstance(value, str):
+                value = json.dumps(value, ensure_ascii=False)
             cols.append(f"{key} = ?")
             vals.append(value)
         if not cols:
@@ -455,7 +560,118 @@ class BackupStore:
             (limit,),
         ) as cur:
             rows = await cur.fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    async def create_drill_run(
+        self,
+        *,
+        engine: str,
+        target_key: str,
+        dest_label: str = "",
+    ) -> int:
+        db = self._require()
+        now = now_berlin()
+        cur = await db.execute(
+            """
+            INSERT INTO drill_runs (
+                created_at, created_at_iso, status, engine, target_key, dest_label
+            ) VALUES (?, ?, 'running', ?, ?, ?)
+            """,
+            (format_de(now), iso_utc(now), engine, target_key, dest_label),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+
+    async def finish_drill_run(
+        self,
+        drill_id: int,
+        *,
+        status: str,
+        detail: str = "",
+        duration_s: float | None = None,
+    ) -> None:
+        db = self._require()
+        now = now_berlin()
+        await db.execute(
+            """
+            UPDATE drill_runs SET
+                status = ?, detail = ?, duration_s = ?,
+                finished_at = ?, finished_at_iso = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                detail,
+                duration_s,
+                format_de(now),
+                iso_utc(now),
+                drill_id,
+            ),
+        )
+        await db.commit()
+
+    async def list_drill_runs(self, *, limit: int = 30) -> list[dict[str, Any]]:
+        db = self._require()
+        limit = max(1, min(limit, 100))
+        async with db.execute(
+            "SELECT * FROM drill_runs ORDER BY created_at_iso DESC LIMIT ?",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    async def latest_drill_summary(self) -> dict[str, Any] | None:
+        db = self._require()
+        async with db.execute("SELECT * FROM drill_state WHERE id = 1") as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        raw = data.get("last_summary_json")
+        if isinstance(raw, str) and raw:
+            try:
+                data["summary"] = json.loads(raw)
+            except json.JSONDecodeError:
+                data["summary"] = None
+        else:
+            data["summary"] = None
+        return data
+
+    async def set_drill_state(
+        self,
+        *,
+        fired_date: str,
+        status: str,
+        summary: dict[str, Any] | None = None,
+        push_kind: str = "",
+    ) -> None:
+        db = self._require()
+        now = now_berlin()
+        await db.execute(
+            """
+            INSERT INTO drill_state (
+                id, last_fired_date, last_status,
+                last_finished_at, last_finished_at_iso,
+                last_summary_json, last_push_kind
+            ) VALUES (1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                last_fired_date = excluded.last_fired_date,
+                last_status = excluded.last_status,
+                last_finished_at = excluded.last_finished_at,
+                last_finished_at_iso = excluded.last_finished_at_iso,
+                last_summary_json = excluded.last_summary_json,
+                last_push_kind = excluded.last_push_kind
+            """,
+            (
+                fired_date,
+                status,
+                format_de(now),
+                iso_utc(now),
+                json.dumps(summary or {}, ensure_ascii=False),
+                push_kind,
+            ),
+        )
+        await db.commit()
 
     async def list_schedules(self) -> list[dict[str, Any]]:
         db = self._require()

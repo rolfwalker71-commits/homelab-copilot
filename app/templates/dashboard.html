@@ -41,11 +41,18 @@
 <section class="topo-snapshots" aria-labelledby="snap-{{ guest_id }}">
   <div class="topo-node-section-head">
     <h4 id="snap-{{ guest_id }}" class="topo-node-section-title">Snapshots</h4>
-    <p class="topo-node-section-hint">Proxmox, nur Anzeige</p>
+    <p class="topo-node-section-hint">Proxmox — anlegen, behalten, löschen</p>
   </div>
   <div class="topo-snapshot-list" data-guest-snapshots="{{ guest_id }}">
     <p class="topo-node-loading text-sm text-[var(--muted)]">Snapshots werden geladen…</p>
   </div>
+  <form class="topo-snap-form mt-3 space-y-2" data-snap-create="{{ guest_id }}" hidden>
+    <label class="label" for="snap-name-{{ guest_id }}">Neuer Snapshot</label>
+    <input id="snap-name-{{ guest_id }}" class="field" maxlength="40" placeholder="z. B. vor-upgrade" data-snap-name />
+    <input class="field" maxlength="200" placeholder="Beschreibung (optional)" data-snap-desc />
+    <button type="submit" class="btn btn-primary btn-sm">Snapshot anlegen</button>
+    <p class="text-sm text-[var(--muted)]" data-snap-status role="status"></p>
+  </form>
 </section>
 {%- endmacro %}
 
@@ -506,7 +513,7 @@
     <section class="topo-node-storage" aria-labelledby="node-storage-{{ node_block.name }}">
       <div class="topo-node-section-head">
         <h4 id="node-storage-{{ node_block.name }}" class="topo-node-section-title">Storage</h4>
-        <p class="topo-node-section-hint">Pools auf diesem Node</p>
+        <p class="topo-node-section-hint">Pools, ZFS / Thin-Pool, SMART</p>
       </div>
       <div class="topo-storage-list" data-node-storage="{{ node_block.name }}">
         <p class="topo-node-loading text-sm text-[var(--muted)]">Storage wird geladen…</p>
@@ -1592,9 +1599,16 @@
     });
   }
 
-  function renderNodeStorage(listEl, stores) {
+  function storageChip(level, text) {
+    const cls = level === 'danger' ? 'chip-stopped' : (level === 'warn' ? 'chip-partial' : (level === 'ok' ? 'chip-running' : 'chip-unknown'));
+    return '<span class="chip ' + cls + '">' + escapeHtml(text) + '</span>';
+  }
+
+  function renderNodeStorage(listEl, payload) {
     if (!listEl) return;
-    if (!stores || !stores.length) {
+    const stores = Array.isArray(payload) ? payload : ((payload && payload.storage) || []);
+    const health = Array.isArray(payload) ? {} : (payload || {});
+    if (!stores.length && !(health.zfs || []).length && !(health.lvmthin || []).length && !(health.smart || []).length) {
       listEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Keine Storage-Pools gefunden.</p>';
       return;
     }
@@ -1624,6 +1638,52 @@
             '<span class="topo-sep" aria-hidden="true">·</span>' +
             '<span>frei ' + avail + '</span>' +
             (inactive ? '<span class="topo-sep" aria-hidden="true">·</span><span>inaktiv</span>' : '') +
+            (s.projection && s.projection.label
+              ? '<span class="topo-sep" aria-hidden="true">·</span><span>' + escapeHtml(s.projection.label) + '</span>'
+              : '') +
+          '</div>' +
+        '</div>'
+      );
+    });
+    (health.zfs || []).forEach((z) => {
+      parts.push(
+        '<div class="topo-storage-row level-' + (z.chip || 'unknown') + '">' +
+          '<div class="topo-storage-top">' +
+            '<span class="topo-storage-name break-words">ZFS ' + escapeHtml(z.name || '') + '</span>' +
+            storageChip(z.chip, z.health || (z.pct != null ? z.pct + '%' : '—')) +
+          '</div>' +
+          '<div class="topo-storage-meta">' +
+            (z.pct != null ? '<span>Belegt ' + Number(z.pct).toFixed(1) + '%</span>' : '') +
+            (z.frag != null ? '<span class="topo-sep" aria-hidden="true">·</span><span>Frag ' + escapeHtml(String(z.frag)) + '</span>' : '') +
+            (z.projection && z.projection.label ? '<span class="topo-sep" aria-hidden="true">·</span><span>' + escapeHtml(z.projection.label) + '</span>' : '') +
+          '</div>' +
+        '</div>'
+      );
+    });
+    (health.lvmthin || []).forEach((t) => {
+      parts.push(
+        '<div class="topo-storage-row level-' + (t.chip || 'unknown') + '">' +
+          '<div class="topo-storage-top">' +
+            '<span class="topo-storage-name break-words">Thin ' + escapeHtml(t.name || '') + '</span>' +
+            storageChip(t.chip, t.pct != null ? Number(t.pct).toFixed(1) + '%' : '—') +
+          '</div>' +
+          '<div class="topo-storage-meta">' +
+            (t.metadata_pct != null ? '<span>Meta ' + Number(t.metadata_pct).toFixed(1) + '%</span>' : '') +
+            (t.projection && t.projection.label ? '<span class="topo-sep" aria-hidden="true">·</span><span>' + escapeHtml(t.projection.label) + '</span>' : '') +
+          '</div>' +
+        '</div>'
+      );
+    });
+    (health.smart || []).forEach((s) => {
+      parts.push(
+        '<div class="topo-storage-row">' +
+          '<div class="topo-storage-top">' +
+            '<span class="topo-storage-name break-words">SMART ' + escapeHtml(s.disk || '') + '</span>' +
+            storageChip(s.chip, s.health || '—') +
+          '</div>' +
+          '<div class="topo-storage-meta">' +
+            (s.temp != null ? '<span>' + escapeHtml(String(s.temp)) + ' °C</span>' : '') +
+            (s.model ? '<span class="topo-sep" aria-hidden="true">·</span><span>' + escapeHtml(s.model) + '</span>' : '') +
           '</div>' +
         '</div>'
       );
@@ -1722,6 +1782,8 @@
 
   function renderSnapshots(listEl, data) {
     if (!listEl) return;
+    const form = listEl.parentElement && listEl.parentElement.querySelector('[data-snap-create]');
+    if (form) form.hidden = !!(data && data.acl_denied);
     if (data && data.acl_denied) {
       listEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">' +
         escapeHtml(data.message || 'Keine Berechtigung für Snapshots.') + '</p>';
@@ -1729,6 +1791,7 @@
     }
     const snaps = (data && data.snapshots) || [];
     const useful = snaps.filter((s) => s && s.name && s.name !== 'current');
+    const guestId = listEl.getAttribute('data-guest-snapshots') || '';
     if (!useful.length) {
       listEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Keine Snapshots.</p>';
       return;
@@ -1742,6 +1805,11 @@
         (s.description
           ? '<div class="topo-storage-meta">' + escapeHtml(s.description) + '</div>'
           : '') +
+        '<div class="mt-2">' +
+          '<button type="button" class="btn btn-ghost btn-sm" data-snap-delete="' +
+            escapeHtml(s.name) + '" data-guest-id="' + escapeHtml(guestId) +
+            '">Löschen</button>' +
+        '</div>' +
       '</div>'
     )).join('');
   }
@@ -2008,7 +2076,7 @@
     }
 
     if (storageRes.status === 'fulfilled') {
-      renderNodeStorage(storageEl, (storageRes.value && storageRes.value.storage) || []);
+      renderNodeStorage(storageEl, storageRes.value || {});
     } else if (!(storageRes.reason && storageRes.reason.name === 'AbortError')) {
       if (storageEl) {
         storageEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Live-Daten fehlgeschlagen.</p>';
@@ -2455,6 +2523,30 @@
       );
       return;
     }
+    const snapDel = e.target.closest('[data-snap-delete]');
+    if (snapDel) {
+      e.preventDefault();
+      const name = snapDel.getAttribute('data-snap-delete') || '';
+      const gid = snapDel.getAttribute('data-guest-id') || '';
+      if (!name || !gid) return;
+      if (!confirm('Snapshot „' + name + '“ wirklich löschen? Das ist nicht umkehrbar.')) return;
+      snapDel.disabled = true;
+      try {
+        const res = await fetch(
+          '/api/guests/' + encodeURIComponent(gid) + '/snapshots/' + encodeURIComponent(name) + '?confirm=true',
+          { method: 'DELETE' }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Löschen fehlgeschlagen');
+        showToast(data.message || 'Snapshot wird gelöscht');
+        loadGuestSparks(gid);
+      } catch (err) {
+        showToast(String(err.message || err), true);
+      } finally {
+        snapDel.disabled = false;
+      }
+      return;
+    }
     const imgBtn = e.target.closest('[data-image-scan]');
     if (imgBtn) {
       e.preventDefault();
@@ -2527,5 +2619,39 @@
       if (btn) btn.disabled = false;
     }
   }
+
+  document.addEventListener('submit', async (e) => {
+    const form = e.target.closest('[data-snap-create]');
+    if (!form) return;
+    e.preventDefault();
+    const guestId = form.getAttribute('data-snap-create');
+    const nameEl = form.querySelector('[data-snap-name]');
+    const descEl = form.querySelector('[data-snap-desc]');
+    const status = form.querySelector('[data-snap-status]');
+    const name = nameEl ? nameEl.value.trim() : '';
+    if (!guestId || !name) {
+      if (status) status.textContent = 'Name fehlt.';
+      return;
+    }
+    if (status) status.textContent = 'Lege Snapshot an…';
+    try {
+      const res = await fetch('/api/guests/' + encodeURIComponent(guestId) + '/snapshots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name,
+          description: descEl ? descEl.value.trim() : '',
+          confirm: true,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Anlegen fehlgeschlagen');
+      if (status) status.textContent = data.message || 'Angelegt';
+      if (nameEl) nameEl.value = '';
+      loadGuestSparks(guestId);
+    } catch (err) {
+      if (status) status.textContent = String(err.message || err);
+    }
+  });
 </script>
 {% endblock %}

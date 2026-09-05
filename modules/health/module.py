@@ -24,7 +24,13 @@ from app.core.app_store import DEFAULT_PUSH_PREFS
 
 from health.checker import suggest_urls_from_topology
 from health.config import get_health_settings
-from health.scheduler import health_loop, poll_all_checks, poll_disk_alerts, run_one_check
+from health.scheduler import (
+    health_loop,
+    poll_all_checks,
+    poll_disk_alerts,
+    poll_storage_health,
+    run_one_check,
+)
 from health.store import HealthStore
 
 logger = logging.getLogger(__name__)
@@ -129,7 +135,32 @@ async def api_run_all(request: Request) -> dict[str, Any]:
     summary = await poll_all_checks(store)
     snap = getattr(request.app.state.topology_store, "snapshot", None)
     await poll_disk_alerts(store, snap.model_dump() if snap else None)
+    await poll_storage_health(store)
     return {"ok": True, **summary, "checks": await store.list_checks()}
+
+
+@router.get("/storage")
+async def api_storage_health(request: Request) -> dict[str, Any]:
+    store = _get_store()
+    snap = getattr(request.app.state.topology_store, "snapshot", None)
+    engine = getattr(request.app.state, "discovery_engine", None)
+    nodes: list[dict[str, Any]] = []
+    names: list[str] = []
+    if snap is not None:
+        for n in snap.nodes or []:
+            name = getattr(n, "name", None)
+            if name:
+                names.append(str(name))
+    for name in names:
+        if engine is None:
+            continue
+        try:
+            data = await engine.fetch_node_storage_health(name)
+            data = await store.attach_projections(name, data)
+            nodes.append(data)
+        except Exception as exc:
+            nodes.append({"node": name, "error": str(exc)})
+    return {"ok": True, "nodes": nodes, "time": format_de(now_berlin())}
 
 
 @router.get("/suggestions")

@@ -61,11 +61,7 @@
       <button type="submit" class="btn btn-ghost btn-sm" value="cancel">Abbrechen</button>
     </header>
     <div class="p-4 space-y-3 text-sm">
-      <p id="restore-text">Stack wird gestoppt und Volumes überschrieben.</p>
-      <label class="flex items-center gap-2">
-        <input type="checkbox" id="restore-confirm" class="h-5 w-5" />
-        Ich bestätige den Restore
-      </label>
+      <p id="restore-text">Standard: nach Staging. Originalpfad nur mit zweiter Bestätigung.</p>
       <div id="restore-snap-wrap" class="hidden space-y-1">
         <label class="label" for="restore-snapshot">restic-Snapshot</label>
         <select id="restore-snapshot" class="field"></select>
@@ -74,8 +70,44 @@
       <select id="restore-source" class="field">
         <option value="copilot">Copilot</option>
       </select>
+      <fieldset class="m-0 border-0 p-0">
+        <legend class="label">Ziel</legend>
+        <div class="choice-track" role="radiogroup">
+          <label class="choice-opt inline-flex items-center gap-2">
+            <input type="radio" name="hist-restore-dest" id="hist-dest-staging" value="staging" checked />
+            <span>nach Staging</span>
+          </label>
+          <label class="choice-opt inline-flex items-center gap-2">
+            <input type="radio" name="hist-restore-dest" id="hist-dest-original" value="original" />
+            <span>an Originalpfad</span>
+          </label>
+        </div>
+      </fieldset>
+      <fieldset class="m-0 border-0 p-0" id="hist-place-wrap">
+        <legend class="label">Staging-Ort</legend>
+        <div class="choice-track" role="radiogroup">
+          <label class="choice-opt inline-flex items-center gap-2">
+            <input type="radio" name="hist-restore-place" id="hist-place-copilot" value="copilot" checked />
+            <span>Copilot</span>
+          </label>
+          <label class="choice-opt inline-flex items-center gap-2">
+            <input type="radio" name="hist-restore-place" id="hist-place-guest" value="guest" />
+            <span>Gast (LXC)</span>
+          </label>
+        </div>
+      </fieldset>
+      <div id="hist-typed-wrap" class="hidden">
+        <label class="label" for="hist-typed">Zweite Bestätigung (Stack-Name oder RESTORE)</label>
+        <input id="hist-typed" class="field" maxlength="64" autocomplete="off" />
+        <p class="mt-1 text-xs text-[var(--danger,#c44)]">Überschreibt Live-Daten. Nicht umkehrbar.</p>
+      </div>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="restore-confirm" class="h-5 w-5" />
+        Ich bestätige Quelle → Ziel. Staging überschreibt keine Live-Binds.
+      </label>
       <button type="button" id="restore-go" class="btn btn-primary">Restore starten</button>
       <p id="restore-msg" class="text-[var(--muted)]" role="status"></p>
+      <pre id="restore-job-log" class="job-log mt-2 max-h-40 hidden"></pre>
     </div>
   </form>
 </dialog>
@@ -90,6 +122,7 @@
   let restoreParent = '';
   let restoreStack = '';
   let stacksCache = [];
+  let restorePoll = null;
 
   function toast(el, msg, ok) {
     if (!el) return;
@@ -188,9 +221,8 @@
       const presetSnap = restore.getAttribute('data-snapshot') || '';
       const where = restoreGuest ? ' auf „' + restoreGuest + '“' : '';
       document.getElementById('restore-text').textContent =
-        'Restore für Stack „' + restoreStack + '“' + where + ' (Lauf #' + restoreRunId + '). Stack wird gestoppt.';
-      document.getElementById('restore-confirm').checked = false;
-      document.getElementById('restore-msg').textContent = '';
+        'Restore für Stack „' + restoreStack + '“' + where + ' (Lauf #' + restoreRunId + '). Standard: Staging.';
+      resetRestoreDialog();
       const wrap = document.getElementById('restore-snap-wrap');
       if (wrap) wrap.classList.toggle('hidden', restoreEngine !== 'restic');
       if (restoreEngine === 'restic' && restoreParent && restoreStack) {
@@ -200,27 +232,92 @@
     }
   });
 
+  function histDestMode() {
+    return document.getElementById('hist-dest-original')?.checked ? 'original' : 'staging';
+  }
+  function histPlace() {
+    return document.getElementById('hist-place-guest')?.checked ? 'guest' : 'copilot';
+  }
+  function syncHistRestoreUi() {
+    const orig = histDestMode() === 'original';
+    document.getElementById('hist-typed-wrap')?.classList.toggle('hidden', !orig);
+    document.getElementById('hist-place-wrap')?.classList.toggle('hidden', orig);
+  }
+  function resetRestoreDialog() {
+    document.getElementById('restore-confirm').checked = false;
+    document.getElementById('restore-msg').textContent = '';
+    document.getElementById('hist-typed').value = '';
+    document.getElementById('hist-dest-staging').checked = true;
+    document.getElementById('hist-place-copilot').checked = true;
+    const log = document.getElementById('restore-job-log');
+    if (log) { log.classList.add('hidden'); log.textContent = ''; }
+    syncHistRestoreUi();
+  }
+  document.querySelectorAll('input[name="hist-restore-dest"]').forEach((el) => {
+    el.addEventListener('change', syncHistRestoreUi);
+  });
+
+  function pollRestoreJob(jobId) {
+    if (restorePoll) clearTimeout(restorePoll);
+    const log = document.getElementById('restore-job-log');
+    const msg = document.getElementById('restore-msg');
+    if (log) log.classList.remove('hidden');
+    (async function tick() {
+      try {
+        const res = await fetch(API + '/jobs/' + encodeURIComponent(jobId));
+        const data = await res.json().catch(() => ({}));
+        const job = data.job || {};
+        if (log) log.textContent = (job.log_lines || []).join('\n') || (job.message || '');
+        toast(msg, (job.phase || 'Restore') + ' · ' + (job.percent || 0) + '% · ' + (job.message || ''));
+        if (job.done) {
+          toast(msg, job.error || job.message || (job.ok ? 'Restore fertig' : 'Restore fehlgeschlagen'), !!job.ok);
+          return;
+        }
+      } catch (err) {
+        toast(msg, String(err.message || err), false);
+        return;
+      }
+      restorePoll = setTimeout(tick, 900);
+    })();
+  }
+
   document.getElementById('restore-go')?.addEventListener('click', async () => {
     const msg = document.getElementById('restore-msg');
     if (!document.getElementById('restore-confirm').checked) {
       toast(msg, 'Bitte bestätigen', false);
       return;
     }
-    toast(msg, 'Restore läuft…');
+    const mode = histDestMode();
+    if (mode === 'original') {
+      const typed = (document.getElementById('hist-typed')?.value || '').trim();
+      if (typed !== restoreStack && typed.toUpperCase() !== 'RESTORE') {
+        toast(msg, 'Originalpfad: Stack-Name oder RESTORE eintippen', false);
+        return;
+      }
+    }
+    toast(msg, 'Restore wird gestartet…');
     const snap = restoreEngine === 'restic'
       ? (document.getElementById('restore-snapshot')?.value || null)
       : null;
+    const extra = {
+      dest_mode: mode,
+      dest_place: mode === 'original' ? 'guest' : histPlace(),
+      scope: 'stack',
+      paths: [],
+      typed_confirm: document.getElementById('hist-typed')?.value || '',
+    };
     const url = restoreRunId
       ? (API + '/history/' + restoreRunId + '/restore')
       : (API + '/restic/restore');
     const body = restoreRunId
-      ? { confirm: true, source: document.getElementById('restore-source').value, snapshot_id: snap }
+      ? { confirm: true, source: document.getElementById('restore-source').value, snapshot_id: snap, ...extra }
       : {
           confirm: true,
           parent_id: restoreParent,
           project: restoreStack,
           snapshot_id: snap,
           source: document.getElementById('restore-source').value,
+          ...extra,
         };
     const res = await fetch(url, {
       method: 'POST',
@@ -229,7 +326,8 @@
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast(msg, data.detail || 'Fehler', false);
-    toast(msg, data.message || 'OK');
+    toast(msg, data.message || 'Restore gestartet');
+    if (data.job_id) pollRestoreJob(data.job_id);
   });
 
   async function loadRestoreSources() {
@@ -348,9 +446,8 @@
     const sid = btn.getAttribute('data-snap-restore') || '';
     const where = snapGuest ? ' auf „' + snapGuest + '“' : '';
     document.getElementById('restore-text').textContent =
-      'Restore für Stack „' + restoreStack + '“' + where + ' aus Snapshot ' + sid.slice(0, 12) + '. Stack wird gestoppt.';
-    document.getElementById('restore-confirm').checked = false;
-    document.getElementById('restore-msg').textContent = '';
+      'Restore für Stack „' + restoreStack + '“' + where + ' aus Snapshot ' + sid.slice(0, 12) + '. Standard: Staging.';
+    resetRestoreDialog();
     const wrap = document.getElementById('restore-snap-wrap');
     if (wrap) wrap.classList.remove('hidden');
     const sel = document.getElementById('restore-snapshot');

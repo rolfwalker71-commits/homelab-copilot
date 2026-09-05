@@ -86,6 +86,77 @@
   <div id="preflight-box" class="mt-4 hidden text-sm" aria-live="polite"></div>
   <p id="run-msg" class="mt-3 text-sm text-[var(--muted)]" role="status"></p>
 </article>
+
+<article class="surface p-4 sm:p-5 mt-6 animate-in" id="drill-card">
+  <h2 class="font-display text-lg font-bold">Restore-Drill</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">
+    Nächtliche Prüfung (Europe/Berlin, Standard 05:00): restic check lokal, tar-Liste nur auf Copilot — kein Hetzner-Download.
+    Push nur bei Fehler und nach der ersten Erholung.
+  </p>
+  <p id="drill-status" class="mt-3 text-sm" role="status">Lade letzten Drill…</p>
+  <button type="button" id="btn-drill-now" class="btn btn-ghost mt-3">Drill jetzt</button>
+</article>
+
+<article class="surface p-4 sm:p-5 mt-6 animate-in">
+  <h2 class="font-display text-lg font-bold">Wiederherstellen</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">
+    Standard: nach Staging (Copilot oder Restore-Ordner auf dem Gast). Originalpfad nur mit zweiter Bestätigung (Stack-Name oder RESTORE).
+    Nie aus dem täglichen Backup-Zeitplan.
+  </p>
+  <form id="restore-start-form" class="mt-4 space-y-3" novalidate>
+    <div>
+      <label class="label" for="restore-stack">Stack</label>
+      <select id="restore-stack" class="field"></select>
+    </div>
+    <div>
+      <label class="label" for="restore-source-main">Quelle</label>
+      <select id="restore-source-main" class="field">
+        <option value="copilot">Copilot</option>
+      </select>
+    </div>
+    <fieldset class="m-0 border-0 p-0">
+      <legend class="label">Ziel</legend>
+      <div class="choice-track" role="radiogroup" aria-label="Restore-Ziel">
+        <label class="choice-opt inline-flex items-center gap-2">
+          <input type="radio" name="restore-dest" id="restore-dest-staging" value="staging" checked />
+          <span>nach Staging</span>
+        </label>
+        <label class="choice-opt inline-flex items-center gap-2">
+          <input type="radio" name="restore-dest" id="restore-dest-original" value="original" />
+          <span>an Originalpfad</span>
+        </label>
+      </div>
+    </fieldset>
+    <fieldset class="m-0 border-0 p-0" id="restore-place-wrap">
+      <legend class="label">Staging-Ort</legend>
+      <div class="choice-track" role="radiogroup">
+        <label class="choice-opt inline-flex items-center gap-2">
+          <input type="radio" name="restore-place" id="restore-place-copilot" value="copilot" checked />
+          <span>Copilot</span>
+        </label>
+        <label class="choice-opt inline-flex items-center gap-2">
+          <input type="radio" name="restore-place" id="restore-place-guest" value="guest" />
+          <span>Gast (LXC)</span>
+        </label>
+      </div>
+    </fieldset>
+    <label class="flex items-start gap-2 text-sm">
+      <input type="checkbox" id="restore-scope-stack" class="mt-1 h-4 w-4" checked />
+      <span>Ganzer Stack / enthaltene Binds</span>
+    </label>
+    <div id="restore-typed-wrap" class="hidden">
+      <label class="label" for="restore-typed">Zweite Bestätigung (Stack-Name oder RESTORE)</label>
+      <input id="restore-typed" class="field" maxlength="64" autocomplete="off" />
+      <p class="mt-1 text-xs text-[var(--danger,#c44)]">Überschreibt Live-Daten. Nicht umkehrbar.</p>
+    </div>
+    <label class="flex items-start gap-2 text-sm">
+      <input type="checkbox" id="restore-confirm-main" class="mt-1 h-4 w-4" />
+      <span>Ich bestätige Quelle → Ziel. Staging überschreibt keine Live-Binds.</span>
+    </label>
+    <button type="submit" class="btn btn-primary">Restore starten</button>
+    <p id="restore-start-msg" class="text-sm text-[var(--muted)]" role="status"></p>
+  </form>
+</article>
 {% endblock %}
 
 {% block scripts %}
@@ -197,7 +268,7 @@
     if (pct) pct.textContent = '0 %';
     const title = document.getElementById('bp-title');
     if (title) {
-      title.textContent = 'Backup läuft…';
+      title.textContent = 'Vorgang läuft…';
       title.style.color = '';
     }
     const phase = document.getElementById('bp-phase');
@@ -257,14 +328,15 @@
       if (panel) panel.setAttribute('aria-busy', 'false');
       if (spin) spin.classList.add('hidden');
       if (title) {
+        const noun = job.kind === 'restore' ? 'Restore' : 'Backup';
         if (failed) {
-          title.textContent = 'Backup fehlgeschlagen';
+          title.textContent = noun + ' fehlgeschlagen';
           title.style.color = 'var(--danger, #c44)';
         } else if (job.status === 'partial') {
-          title.textContent = 'Backup teilweise erfolgreich';
+          title.textContent = noun + ' teilweise erfolgreich';
           title.style.color = '';
         } else {
-          title.textContent = 'Backup erfolgreich';
+          title.textContent = noun + ' erfolgreich';
           title.style.color = 'var(--chip-running, #2e7d32)';
         }
       }
@@ -303,7 +375,7 @@
         panel.setAttribute('aria-busy', 'true');
       }
       if (title) {
-        title.textContent = 'Backup läuft…';
+        title.textContent = (job.kind === 'restore' ? 'Restore' : 'Backup') + ' läuft…';
         title.style.color = '';
       }
       if (spin) spin.classList.remove('hidden');
@@ -708,8 +780,139 @@
     } catch (_) {}
   }
 
+  function restoreDestMode() {
+    const orig = document.getElementById('restore-dest-original');
+    return orig && orig.checked ? 'original' : 'staging';
+  }
+  function restorePlace() {
+    const guest = document.getElementById('restore-place-guest');
+    return guest && guest.checked ? 'guest' : 'copilot';
+  }
+  function syncRestoreUi() {
+    const orig = restoreDestMode() === 'original';
+    const typed = document.getElementById('restore-typed-wrap');
+    const place = document.getElementById('restore-place-wrap');
+    if (typed) typed.classList.toggle('hidden', !orig);
+    if (place) place.classList.toggle('hidden', orig);
+  }
+  document.querySelectorAll('input[name="restore-dest"]').forEach((el) => {
+    el.addEventListener('change', syncRestoreUi);
+  });
+
+  async function loadRestoreSourcesMain() {
+    const sel = document.getElementById('restore-source-main');
+    const stackSel = document.getElementById('restore-stack');
+    if (stackSel) {
+      stackSel.innerHTML = (stacks || []).map((s) => {
+        const val = encodeURIComponent(s.parent_id) + '|' + encodeURIComponent(s.stack);
+        return `<option value="${val}">${esc(s.guest_name)} · ${esc(s.stack)}</option>`;
+      }).join('') || '<option value="">Kein Stack</option>';
+    }
+    if (!sel) return;
+    try {
+      const res = await fetch(API + '/destinations');
+      const data = await res.json();
+      const durable = (data.destinations || []).filter((d) => d.enabled && d.kind !== 'host_staging');
+      if (!durable.length) return;
+      sel.innerHTML = durable.map((d) => {
+        const val = d.kind === 'copilot' ? 'copilot' : (d.id || d.kind);
+        return `<option value="${val}">${esc(d.label || d.kind)}</option>`;
+      }).join('');
+    } catch (_) {}
+  }
+
+  async function loadDrill() {
+    const el = document.getElementById('drill-status');
+    if (!el) return;
+    try {
+      const res = await fetch(API + '/drill');
+      const data = await res.json();
+      const last = data.last || {};
+      const status = last.last_status || '';
+      const when = last.last_finished_at || '';
+      let chip = 'unbekannt';
+      let cls = 'chip-unknown';
+      if (status === 'success') { chip = 'ok'; cls = 'chip-running'; }
+      else if (status === 'failed') { chip = 'fehlgeschlagen'; cls = 'chip-stopped'; }
+      else if (status === 'skipped') { chip = 'übersprungen'; cls = 'chip-partial'; }
+      const age = when ? (' · ' + when) : ' · noch kein Lauf';
+      el.innerHTML = '<span class="chip ' + cls + '">' + chip + '</span>' +
+        '<span class="ml-2 text-[var(--muted)]">letzter Drill' + esc(age) +
+        (data.hour != null ? ' · geplant ' + String(data.hour).padStart(2, '0') + ':00' : '') +
+        '</span>';
+    } catch (err) {
+      el.textContent = 'Drill-Status nicht lesbar.';
+    }
+  }
+
+  document.getElementById('btn-drill-now')?.addEventListener('click', async () => {
+    const el = document.getElementById('drill-status');
+    if (el) el.textContent = 'Drill läuft…';
+    const res = await fetch(API + '/drill/run', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (el) el.textContent = data.detail || 'Drill fehlgeschlagen';
+      return;
+    }
+    setTimeout(loadDrill, 4000);
+  });
+
+  document.getElementById('restore-start-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById('restore-start-msg');
+    if (!document.getElementById('restore-confirm-main')?.checked) {
+      return toast(msg, 'Bitte Restore bestätigen', false);
+    }
+    const parsed = parseStackVal(document.getElementById('restore-stack').value);
+    if (!parsed) return toast(msg, 'Bitte Stack wählen', false);
+    const mode = restoreDestMode();
+    if (mode === 'original') {
+      const typed = (document.getElementById('restore-typed')?.value || '').trim();
+      if (typed !== parsed.project && typed.toUpperCase() !== 'RESTORE') {
+        return toast(msg, 'Originalpfad: Stack-Name oder RESTORE eintippen', false);
+      }
+    }
+    toast(msg, 'Suche letzten erfolgreichen Lauf…');
+    const hist = await fetch(API + '/history?stack=' + encodeURIComponent(parsed.project));
+    const histData = await hist.json().catch(() => ({}));
+    const run = (histData.runs || []).find((r) =>
+      r.parent_id === parsed.parent_id && (r.status === 'success' || r.status === 'partial')
+    );
+    if (!run) return toast(msg, 'Kein erfolgreicher Backup-Lauf für diesen Stack.', false);
+    const body = {
+      confirm: true,
+      source: document.getElementById('restore-source-main').value,
+      dest_mode: mode,
+      dest_place: mode === 'original' ? 'guest' : restorePlace(),
+      scope: document.getElementById('restore-scope-stack')?.checked ? 'stack' : 'paths',
+      paths: [],
+      typed_confirm: document.getElementById('restore-typed')?.value || '',
+      snapshot_id: run.snapshot_id || null,
+    };
+    backupBusy = true;
+    setBackupEnabled(false);
+    showProgressPanel();
+    const res = await fetch(API + '/history/' + run.id + '/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      backupBusy = false;
+      setBackupEnabled(true);
+      return toast(msg, data.detail || 'Restore fehlgeschlagen', false);
+    }
+    toast(msg, data.message || 'Restore gestartet');
+    const title = document.getElementById('bp-title');
+    if (title) title.textContent = 'Restore läuft…';
+    if (data.job_id) pollJob(data.job_id);
+  });
+
   async function refreshAll() {
     await Promise.all([loadStatus(), loadStacks()]);
+    await loadRestoreSourcesMain();
+    await loadDrill();
     await resumeActiveBackup();
   }
   document.getElementById('btn-refresh-all')?.addEventListener('click', refreshAll);

@@ -34,8 +34,24 @@ from backup_verifier import destinations as dest_mod
 from backup_verifier import sshutil
 from backup_verifier.inventory import build_inventory, resolve_guest
 from backup_verifier.jobs import JOBS
-from backup_verifier.restic import ENGINE_RESTIC, ResticError, list_restic_snapshots
-from backup_verifier.restore import RestoreError, run_restore
+from backup_verifier.drill_run import notify_drill_finished, run_nightly_drill
+from backup_verifier.restic import (
+    ENGINE_RESTIC,
+    ResticError,
+    list_restic_paths,
+    list_restic_snapshots,
+    safe_name,
+)
+from backup_verifier.restore import RestoreError, list_tar_members, run_restore
+from backup_verifier.restore_paths import (
+    DEST_STAGING,
+    PLACE_COPILOT,
+    RestorePlanError,
+    infer_stack_from_browse_path,
+    normalize_dest_mode,
+    normalize_dest_place,
+    normalize_scope,
+)
 from backup_verifier.scheduler import (
     next_run_after,
     run_schedule_loop,
@@ -49,6 +65,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 _store: BackupStore | None = None
 _sched_task: asyncio.Task[None] | None = None
+_drill_task: asyncio.Task[None] | None = None
 
 _PUSH_BODY_MAX = 200
 
@@ -392,6 +409,127 @@ def _enqueue_backup(
     return job, _bg
 
 
+async def _run_enqueued_restore(
+    job_id: str,
+    *,
+    store: BackupStore,
+    run_id: int,
+    snapshot: Any,
+    confirm: bool,
+    source: str,
+    snapshot_id: str | None,
+    dest_mode: str,
+    dest_place: str,
+    scope: str,
+    paths: list[str],
+    typed_confirm: str | None,
+    project: str,
+) -> None:
+    JOBS.set_running(job_id)
+    JOBS.set_progress(job_id, phase="Restore", percent=3, message="Restore wird vorbereitet…")
+
+    async def on_progress(
+        *,
+        phase: str,
+        percent: int,
+        message: str,
+        run_id: int | None = None,
+    ) -> None:
+        JOBS.set_progress(
+            job_id, phase=phase, percent=percent, message=message, run_id=run_id
+        )
+
+    async def on_log(line: str) -> None:
+        JOBS.append_log(job_id, line)
+
+    try:
+        result = await run_restore(
+            store,
+            run_id=run_id,
+            snapshot=snapshot,
+            confirm=confirm,
+            source=source,
+            snapshot_id=snapshot_id,
+            dest_mode=dest_mode,
+            dest_place=dest_place,
+            scope=scope,
+            paths=paths,
+            typed_confirm=typed_confirm,
+            on_progress=on_progress,
+            on_log=on_log,
+        )
+        JOBS.finish(job_id, status="success", result=result, message=result.get("message"))
+    except RestoreError as exc:
+        JOBS.finish(job_id, status="failed", error=exc.message, phase="Fehler")
+    except DockerControlError as exc:
+        JOBS.finish(job_id, status="failed", error=exc.message, phase="Fehler")
+    except Exception as exc:
+        logger.exception("Background restore failed")
+        JOBS.finish(job_id, status="failed", error=str(exc) or "Restore fehlgeschlagen.")
+
+
+def _enqueue_restore(
+    *,
+    store: BackupStore,
+    run_id: int,
+    snapshot: Any,
+    payload: RestorePayload,
+    project: str,
+    parent_id: str,
+):
+    job = JOBS.create(parent_id=parent_id, project=project, kind="restore")
+
+    async def _bg() -> None:
+        await _run_enqueued_restore(
+            job.id,
+            store=store,
+            run_id=run_id,
+            snapshot=snapshot,
+            confirm=payload.confirm,
+            source=payload.source,
+            snapshot_id=payload.snapshot_id,
+            dest_mode=payload.dest_mode,
+            dest_place=payload.dest_place,
+            scope=payload.scope,
+            paths=list(payload.paths or []),
+            typed_confirm=payload.typed_confirm,
+            project=project,
+        )
+
+    return job, _bg
+
+
+async def _match_restore_run(
+    store: BackupStore,
+    *,
+    project: str,
+    parent_id: str = "",
+    archive_name: str = "",
+    engine: str | None = None,
+) -> dict[str, Any] | None:
+    runs = await store.list_runs(limit=80, stack=project)
+    ok = [r for r in runs if r.get("status") in ("success", "partial")]
+    if parent_id:
+        parent_safe = safe_name(parent_id)
+        by_parent = [
+            r
+            for r in ok
+            if str(r.get("parent_id") or "") == parent_id
+            or safe_name(str(r.get("parent_id") or "")) == parent_safe
+        ]
+        if by_parent:
+            ok = by_parent
+    if archive_name:
+        by_arch = [r for r in ok if str(r.get("archive_name") or "") == archive_name]
+        if by_arch:
+            return by_arch[0]
+    if engine:
+        by_eng = [r for r in ok if str(r.get("engine") or "tar") == engine]
+        if by_eng:
+            return by_eng[0]
+    return ok[0] if ok else None
+
+
 async def _fire_scheduled_backup(app: FastAPI, schedule: dict[str, Any]) -> None:
     store = _get_store()
     topo: TopologyStore = app.state.topology_store
@@ -426,6 +564,11 @@ class RestorePayload(BaseModel):
     # Destination id (int as string), "copilot", "synology", or kind/label
     source: str = Field(default="copilot", min_length=1, max_length=64)
     snapshot_id: str | None = Field(default=None, max_length=64)
+    dest_mode: str = Field(default=DEST_STAGING, max_length=32)
+    dest_place: str = Field(default=PLACE_COPILOT, max_length=32)
+    scope: str = Field(default="stack", max_length=32)
+    paths: list[str] = Field(default_factory=list)
+    typed_confirm: str | None = Field(default=None, max_length=64)
 
 
 class DestinationsPayload(BaseModel):
@@ -494,6 +637,9 @@ async def module_status() -> dict[str, Any]:
         or (Path(s.data_dir) / "ssh" / "id_ed25519").is_file(),
         "scheduler": "in_process",
         "scheduler_running": bool(_sched_task and not _sched_task.done()),
+        "drill_hour": bs.backup_drill_hour,
+        "drill_enabled": bs.backup_drill_enabled,
+        "drill_running": bool(_drill_task and not _drill_task.done()),
         "timezone": "Europe/Berlin",
         "crontab_available": cron_mod.crontab_available(),
         "api_base": bs.backup_api_base,
@@ -783,22 +929,34 @@ async def restore_endpoint(
     run_id: int,
     payload: RestorePayload,
     request: Request,
+    background: BackgroundTasks,
 ) -> dict[str, Any]:
     store = _get_store()
+    run = await store.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Lauf nicht gefunden.")
     try:
-        result = await run_restore(
-            store,
-            run_id=run_id,
-            snapshot=_snapshot(request),
-            confirm=payload.confirm,
-            source=payload.source,
-            snapshot_id=payload.snapshot_id,
-        )
-        return result
-    except RestoreError as exc:
+        normalize_dest_mode(payload.dest_mode)
+        normalize_dest_place(payload.dest_place, dest_mode=payload.dest_mode)
+        normalize_scope(payload.scope, payload.paths)
+    except RestorePlanError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
-    except DockerControlError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    job, _bg = _enqueue_restore(
+        store=store,
+        run_id=run_id,
+        snapshot=_snapshot(request),
+        payload=payload,
+        project=str(run.get("stack") or ""),
+        parent_id=str(run.get("parent_id") or ""),
+    )
+    background.add_task(_bg)
+    return {
+        "ok": True,
+        "started": True,
+        "job_id": job.id,
+        "message": "Restore gestartet. Fortschritt in der Verlaufsbox.",
+        "job_url": f"/api/modules/backup_verifier/jobs/{job.id}",
+    }
 
 
 class ResticRestorePayload(BaseModel):
@@ -807,6 +965,11 @@ class ResticRestorePayload(BaseModel):
     snapshot_id: str = Field(..., min_length=8, max_length=64)
     confirm: bool = False
     source: str = Field(default="copilot", min_length=1, max_length=64)
+    dest_mode: str = Field(default=DEST_STAGING, max_length=32)
+    dest_place: str = Field(default=PLACE_COPILOT, max_length=32)
+    scope: str = Field(default="stack", max_length=32)
+    paths: list[str] = Field(default_factory=list)
+    typed_confirm: str | None = Field(default=None, max_length=64)
 
 
 @router.get("/restic/snapshots")
@@ -865,6 +1028,7 @@ async def restic_snapshots(
 async def restic_restore_endpoint(
     payload: ResticRestorePayload,
     request: Request,
+    background: BackgroundTasks,
 ) -> dict[str, Any]:
     """Restore a restic snapshot (uses latest matching run for history linkage)."""
     store = _get_store()
@@ -887,26 +1051,202 @@ async def restic_restore_endpoint(
                 "zuerst ein Incremental-Backup ausführen."
             ),
         )
-    try:
-        result = await run_restore(
-            store,
-            run_id=int(run["id"]),
-            snapshot=_snapshot(request),
+    job, _bg = _enqueue_restore(
+        store=store,
+        run_id=int(run["id"]),
+        snapshot=_snapshot(request),
+        payload=RestorePayload(
             confirm=payload.confirm,
             source=payload.source,
             snapshot_id=payload.snapshot_id,
-        )
-        return result
-    except RestoreError as exc:
-        raise HTTPException(status_code=400, detail=exc.message) from exc
-    except DockerControlError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+            dest_mode=payload.dest_mode,
+            dest_place=payload.dest_place,
+            scope=payload.scope,
+            paths=list(payload.paths or []),
+            typed_confirm=payload.typed_confirm,
+        ),
+        project=payload.project,
+        parent_id=payload.parent_id,
+    )
+    background.add_task(_bg)
+    return {
+        "ok": True,
+        "started": True,
+        "job_id": job.id,
+        "message": "restic-Restore gestartet. Fortschritt in der Verlaufsbox.",
+        "job_url": f"/api/modules/backup_verifier/jobs/{job.id}",
+    }
 
 
 @router.get("/restores")
 async def restores(limit: int = Query(30, ge=1, le=100)) -> dict[str, Any]:
     store = _get_store()
     return {"restores": await store.list_restores(limit=limit)}
+
+
+@router.get("/browse/members")
+async def browse_members(
+    dest_id: int = Query(..., ge=1),
+    path: str = Query(..., min_length=1, max_length=1024),
+) -> dict[str, Any]:
+    """List tar archive members (local Copilot only — no Hetzner download)."""
+    dest = await _load_browse_dest(dest_id)
+    if dest.get("kind") != dest_mod.KIND_COPILOT:
+        raise HTTPException(
+            status_code=400,
+            detail="Archiv-Inhalt nur lokal auf Copilot listbar (kein Dest-Download).",
+        )
+    try:
+        rel = browse_mod.normalize_rel(path)
+        root = browse_mod.dest_root(dest)
+        local = browse_mod.resolve_local_file(root, rel)
+        members = list_tar_members(local)
+        inferred = infer_stack_from_browse_path(rel)
+        return {
+            "ok": True,
+            "path": rel,
+            "members": members,
+            "inferred": inferred,
+        }
+    except browse_mod.BrowserError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    except RestoreError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+
+
+class BrowseRestorePayload(BaseModel):
+    dest_id: int = Field(..., ge=1)
+    path: str = Field(..., min_length=1, max_length=1024)
+    confirm: bool = False
+    dest_mode: str = Field(default=DEST_STAGING, max_length=32)
+    dest_place: str = Field(default=PLACE_COPILOT, max_length=32)
+    scope: str = Field(default="stack", max_length=32)
+    paths: list[str] = Field(default_factory=list)
+    typed_confirm: str | None = Field(default=None, max_length=64)
+    parent_id: str = Field(default="", max_length=128)
+    project: str = Field(default="", max_length=128)
+    snapshot_id: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/browse/restore")
+async def browse_restore(
+    payload: BrowseRestorePayload,
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, Any]:
+    """Restore a browsed archive or restic repo after confirm (path-jailed)."""
+    dest = await _load_browse_dest(payload.dest_id)
+    try:
+        rel = browse_mod.normalize_rel(payload.path)
+        normalize_dest_mode(payload.dest_mode)
+        normalize_dest_place(payload.dest_place, dest_mode=payload.dest_mode)
+        normalize_scope(payload.scope, payload.paths)
+    except browse_mod.BrowserError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    except RestorePlanError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    inferred = infer_stack_from_browse_path(rel)
+    project = (payload.project or inferred.get("project") or "").strip()
+    parent_id = (payload.parent_id or inferred.get("parent_id") or "").strip()
+    if not project:
+        raise HTTPException(
+            status_code=400,
+            detail="Kein Stack aus dem Pfad ableitbar — bitte Stack wählen.",
+        )
+    kind = inferred.get("kind") or ""
+    archive_name = Path(rel).name if kind == "tar" else ""
+    engine = ENGINE_RESTIC if kind == "restic" else ("tar" if kind == "tar" else None)
+    store = _get_store()
+    run = await _match_restore_run(
+        store,
+        project=project,
+        parent_id=parent_id,
+        archive_name=archive_name,
+        engine=engine,
+    )
+    if not run:
+        raise HTTPException(
+            status_code=400,
+            detail="Kein erfolgreicher Backup-Lauf zu diesem Archiv/Repo.",
+        )
+    source = "copilot" if dest.get("kind") == dest_mod.KIND_COPILOT else str(dest.get("id"))
+    job, _bg = _enqueue_restore(
+        store=store,
+        run_id=int(run["id"]),
+        snapshot=_snapshot(request),
+        payload=RestorePayload(
+            confirm=payload.confirm,
+            source=source,
+            snapshot_id=payload.snapshot_id or run.get("snapshot_id"),
+            dest_mode=payload.dest_mode,
+            dest_place=payload.dest_place,
+            scope=payload.scope,
+            paths=list(payload.paths or []),
+            typed_confirm=payload.typed_confirm,
+        ),
+        project=str(run.get("stack") or project),
+        parent_id=str(run.get("parent_id") or parent_id),
+    )
+    background.add_task(_bg)
+    return {
+        "ok": True,
+        "started": True,
+        "job_id": job.id,
+        "message": "Restore gestartet. Fortschritt in der Verlaufsbox.",
+        "job_url": f"/api/modules/backup_verifier/jobs/{job.id}",
+        "inferred": inferred,
+    }
+
+
+@router.get("/restic/ls")
+async def restic_ls(
+    parent_id: str = Query(..., min_length=1),
+    project: str = Query(..., min_length=1),
+    snapshot_id: str = Query(..., min_length=8, max_length=64),
+    source: str = Query("copilot", min_length=1, max_length=64),
+) -> dict[str, Any]:
+    store = _get_store()
+    try:
+        paths = await list_restic_paths(
+            store,
+            parent_id=parent_id,
+            project=project,
+            snapshot_id=snapshot_id,
+            source=source,
+        )
+    except ResticError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    return {"ok": True, "paths": paths}
+
+
+@router.get("/drill")
+async def drill_status() -> dict[str, Any]:
+    store = _get_store()
+    bs = get_backup_settings()
+    last = await store.latest_drill_summary()
+    return {
+        "ok": True,
+        "enabled": bs.backup_drill_enabled,
+        "hour": bs.backup_drill_hour,
+        "timezone": "Europe/Berlin",
+        "last": last,
+        "runs": await store.list_drill_runs(limit=20),
+    }
+
+
+@router.post("/drill/run")
+async def drill_run_now(background: BackgroundTasks) -> dict[str, Any]:
+    store = _get_store()
+
+    async def _bg() -> None:
+        try:
+            result = await run_nightly_drill(store)
+            await notify_drill_finished(result)
+        except Exception:
+            logger.exception("Restore-Drill fehlgeschlagen")
+
+    background.add_task(_bg)
+    return {"ok": True, "started": True, "message": "Restore-Drill gestartet."}
 
 
 @router.get("/schedules")
@@ -1114,11 +1454,39 @@ class BackupVerifierModule:
                 snapshot_ready=snapshot_ready,
             )
 
-        global _sched_task
+        global _sched_task, _drill_task
         _sched_task = asyncio.create_task(
             _sched_runner(), name="backup-verifier-scheduler"
         )
         app.state.backup_scheduler_task = _sched_task
+
+        async def _drill_runner() -> None:
+            bs = get_backup_settings()
+            if not bs.backup_drill_enabled:
+                logger.info("Restore-Drill deaktiviert (BACKUP_DRILL_ENABLED=false)")
+                return
+            logger.info(
+                "Restore-Drill aktiv — täglich %02d:00 Europe/Berlin",
+                bs.backup_drill_hour,
+            )
+            await asyncio.sleep(20)
+            while True:
+                try:
+                    now = now_berlin()
+                    today = now.strftime("%Y-%m-%d")
+                    last = await _store.latest_drill_summary() if _store else None
+                    fired = str((last or {}).get("last_fired_date") or "")
+                    if now.hour == bs.backup_drill_hour and fired != today:
+                        result = await run_nightly_drill(_store)
+                        await notify_drill_finished(result)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Restore-Drill-Tick fehlgeschlagen")
+                await asyncio.sleep(30)
+
+        _drill_task = asyncio.create_task(_drill_runner(), name="backup-verifier-drill")
+        app.state.backup_drill_task = _drill_task
 
         logger.info(
             "backup_verifier ready — DB %s, backups %s, scheduler=in_process",
@@ -1127,17 +1495,22 @@ class BackupVerifierModule:
         )
 
     async def on_shutdown(self, app: FastAPI) -> None:
-        global _store, _sched_task
-        task = getattr(app.state, "backup_scheduler_task", None) or _sched_task
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-            _sched_task = None
+        global _store, _sched_task, _drill_task
+        for attr, holder in (
+            ("backup_scheduler_task", "_sched_task"),
+            ("backup_drill_task", "_drill_task"),
+        ):
+            task = getattr(app.state, attr, None) or globals().get(holder)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+        _sched_task = None
+        _drill_task = None
         if _store:
             await _store.close()
             _store = None

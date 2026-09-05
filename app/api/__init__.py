@@ -72,6 +72,16 @@ class ImageUpdateApplyPayload(BaseModel):
     confirm: bool = False
 
 
+class SnapshotCreatePayload(BaseModel):
+    name: str = Field(..., min_length=1, max_length=40)
+    description: str = Field(default="", max_length=200)
+    confirm: bool = False
+
+
+class SnapshotDeletePayload(BaseModel):
+    confirm: bool = False
+
+
 @router.get("/health")
 async def health() -> dict[str, Any]:
     settings = get_settings()
@@ -331,6 +341,73 @@ async def guest_storage(guest_id: str, request: Request) -> dict[str, Any]:
         ) from exc
 
 
+@router.post("/guests/{guest_id}/snapshots")
+async def create_guest_snapshot(
+    guest_id: str,
+    payload: SnapshotCreatePayload,
+    request: Request,
+) -> dict[str, Any]:
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Snapshot anlegen erfordert confirm=true.",
+        )
+    engine = request.app.state.discovery_engine
+    keep = 3
+    try:
+        from patcher.config import get_patcher_settings
+
+        keep = get_patcher_settings().patcher_snap_keep
+    except Exception:
+        keep = 3
+    try:
+        return await engine.create_guest_snapshot(
+            guest_id,
+            name=payload.name,
+            description=payload.description,
+            prune_keep=keep,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Proxmox-Snapshot anlegen fehlgeschlagen: {exc}",
+        ) from exc
+
+
+@router.delete("/guests/{guest_id}/snapshots/{snapname}")
+async def delete_guest_snapshot(
+    guest_id: str,
+    snapname: str,
+    request: Request,
+    confirm: bool = Query(False),
+) -> dict[str, Any]:
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Snapshot löschen erfordert confirm=true.",
+        )
+    engine = request.app.state.discovery_engine
+    try:
+        return await engine.delete_guest_snapshot(guest_id, snapname)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Proxmox-Snapshot löschen fehlgeschlagen: {exc}",
+        ) from exc
+
+
 @router.post("/guests/{guest_id}/power/{action}")
 async def guest_power(
     guest_id: str,
@@ -388,12 +465,19 @@ async def node_rrd(
 
 @router.get("/nodes/{node}/storage")
 async def node_storage(node: str, request: Request) -> dict[str, Any]:
-    """Storage pools on a Proxmox node (used / total / avail)."""
+    """Storage plugins, ZFS/LVM-thin, SMART summary, optional fill projection."""
     engine = request.app.state.discovery_engine
     try:
-        return await engine.fetch_node_storage(node)
+        data = await engine.fetch_node_storage_health(node)
     except Exception as exc:
         raise _proxmox_node_http_error(exc, label="Proxmox-Storage fehlgeschlagen") from exc
+    health_store = getattr(request.app.state, "health_store", None)
+    if health_store is not None and hasattr(health_store, "attach_projections"):
+        try:
+            data = await health_store.attach_projections(node, data)
+        except Exception:
+            pass
+    return data
 
 
 @router.post("/docker/compose/restart")

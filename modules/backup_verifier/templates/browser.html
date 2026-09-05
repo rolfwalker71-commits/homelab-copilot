@@ -10,6 +10,7 @@
     Voll-Backups liegen als <code>.tar.gz</code> im Stack-Ordner,
     Incremental unter <code>restic/&lt;host&gt;/&lt;stack&gt;</code>.
     Es werden nur Namen, Größe und Datum angezeigt — keine Archivinhalte.
+    Restore startet aus einem Archiv oder restic-Ordner (Standard: Staging).
   </p>
 </section>
 
@@ -49,6 +50,60 @@
     </table>
   </div>
 </section>
+
+<dialog id="browse-restore-dialog" class="logs-dialog">
+  <form method="dialog" class="logs-dialog-form">
+    <header class="logs-dialog-head">
+      <h2 class="logs-dialog-title">Wiederherstellen</h2>
+      <button type="submit" class="btn btn-ghost btn-sm" value="cancel">Abbrechen</button>
+    </header>
+    <div class="p-4 space-y-3 text-sm">
+      <p id="br-text">Quelle → Ziel. Standard: Staging.</p>
+      <div>
+        <label class="label" for="br-stack">Stack</label>
+        <select id="br-stack" class="field"></select>
+      </div>
+      <fieldset class="m-0 border-0 p-0">
+        <legend class="label">Ziel</legend>
+        <div class="choice-track" role="radiogroup">
+          <label class="choice-opt inline-flex items-center gap-2">
+            <input type="radio" name="br-dest" id="br-dest-staging" value="staging" checked />
+            <span>nach Staging</span>
+          </label>
+          <label class="choice-opt inline-flex items-center gap-2">
+            <input type="radio" name="br-dest" id="br-dest-original" value="original" />
+            <span>an Originalpfad</span>
+          </label>
+        </div>
+      </fieldset>
+      <fieldset class="m-0 border-0 p-0" id="br-place-wrap">
+        <legend class="label">Staging-Ort</legend>
+        <div class="choice-track" role="radiogroup">
+          <label class="choice-opt inline-flex items-center gap-2">
+            <input type="radio" name="br-place" id="br-place-copilot" value="copilot" checked />
+            <span>Copilot</span>
+          </label>
+          <label class="choice-opt inline-flex items-center gap-2">
+            <input type="radio" name="br-place" id="br-place-guest" value="guest" />
+            <span>Gast (LXC)</span>
+          </label>
+        </div>
+      </fieldset>
+      <div id="br-typed-wrap" class="hidden">
+        <label class="label" for="br-typed">Zweite Bestätigung (Stack-Name oder RESTORE)</label>
+        <input id="br-typed" class="field" maxlength="64" autocomplete="off" />
+        <p class="mt-1 text-xs text-[var(--danger,#c44)]">Überschreibt Live-Daten. Nicht umkehrbar.</p>
+      </div>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" id="br-confirm" class="h-5 w-5" />
+        Ich bestätige Quelle → Ziel. Staging überschreibt keine Live-Binds.
+      </label>
+      <button type="button" id="br-go" class="btn btn-primary">Restore starten</button>
+      <p id="br-msg" class="text-[var(--muted)]" role="status"></p>
+      <pre id="br-job-log" class="job-log mt-2 max-h-40 hidden"></pre>
+    </div>
+  </form>
+</dialog>
 {% endblock %}
 
 {% block scripts %}
@@ -170,9 +225,14 @@
       const name = openable
         ? `<button type="button" class="browse-name is-dir" data-open="${esc(e.path)}">${esc(e.name)}</button>`
         : `<span class="browse-name ${e.blocked ? 'is-blocked' : ''}">${esc(e.name)}</span>`;
-      const dl = e.downloadable
-        ? `<a class="btn btn-ghost btn-xs" href="${API}/browse/download?dest_id=${encodeURIComponent(destId)}&amp;path=${encodeURIComponent(e.path)}">Laden</a>`
-        : '—';
+      const actions = [];
+      if (e.downloadable) {
+        actions.push(`<a class="btn btn-ghost btn-xs" href="${API}/browse/download?dest_id=${encodeURIComponent(destId)}&amp;path=${encodeURIComponent(e.path)}">Laden</a>`);
+      }
+      if (e.kind === 'archive' || (e.kind === 'restic' && e.is_dir)) {
+        actions.push(`<button type="button" class="btn btn-ghost btn-xs" data-restore-path="${esc(e.path)}" data-restore-kind="${esc(e.kind)}" data-restore-name="${esc(e.name)}">Restore</button>`);
+      }
+      const dl = actions.length ? actions.join(' ') : '—';
       return `<tr class="browse-row">
         <td class="py-2 pr-2 min-w-0">${name}</td>
         <td class="py-2 pr-2"><span class="dest-keep-badge ${kindBadge(e.kind)}">${esc(e.kind_label)}</span></td>
@@ -246,7 +306,169 @@
     setPath(t.getAttribute('data-open') || '');
   });
 
+  let restorePath = '';
+  let restoreKind = '';
+  let stacksCache = [];
+  let brPoll = null;
+
+  function brDestMode() {
+    return document.getElementById('br-dest-original')?.checked ? 'original' : 'staging';
+  }
+  function brPlace() {
+    return document.getElementById('br-place-guest')?.checked ? 'guest' : 'copilot';
+  }
+  function syncBrUi() {
+    const orig = brDestMode() === 'original';
+    document.getElementById('br-typed-wrap')?.classList.toggle('hidden', !orig);
+    document.getElementById('br-place-wrap')?.classList.toggle('hidden', orig);
+  }
+  document.querySelectorAll('input[name="br-dest"]').forEach((el) => {
+    el.addEventListener('change', syncBrUi);
+  });
+
+  function inferFromPath(p) {
+    const parts = String(p || '').split('/').filter(Boolean);
+    if (parts[0] === 'restic') {
+      return { parent_id: parts[1] || '', project: parts[2] || '' };
+    }
+    if (parts.length) return { parent_id: '', project: parts[0] };
+    return { parent_id: '', project: '' };
+  }
+
+  async function loadStacks() {
+    try {
+      const res = await fetch(API + '/stacks');
+      const data = await res.json();
+      stacksCache = data.stacks || [];
+    } catch (_) {
+      stacksCache = [];
+    }
+  }
+
+  function fillBrStacks(inferred) {
+    const sel = document.getElementById('br-stack');
+    if (!sel) return;
+    sel.innerHTML = (stacksCache || []).map((s) => {
+      const val = encodeURIComponent(s.parent_id) + '|' + encodeURIComponent(s.stack);
+      return `<option value="${val}">${esc(s.guest_name)} · ${esc(s.stack)}</option>`;
+    }).join('') || '<option value="">Kein Stack</option>';
+    const match = (stacksCache || []).find((s) =>
+      s.stack === inferred.project &&
+      (!inferred.parent_id || String(s.parent_id) === inferred.parent_id ||
+        String(s.parent_id).replace(/[^A-Za-z0-9_.-]+/g, '_') === inferred.parent_id)
+    ) || (stacksCache || []).find((s) => s.stack === inferred.project);
+    if (match) {
+      sel.value = encodeURIComponent(match.parent_id) + '|' + encodeURIComponent(match.stack);
+    }
+  }
+
+  body.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-restore-path]');
+    if (!btn) return;
+    e.preventDefault();
+    restorePath = btn.getAttribute('data-restore-path') || '';
+    restoreKind = btn.getAttribute('data-restore-kind') || '';
+    const name = btn.getAttribute('data-restore-name') || restorePath;
+    const inferred = inferFromPath(restorePath);
+    fillBrStacks(inferred);
+    document.getElementById('br-text').textContent =
+      'Quelle: ' + name + (restoreKind ? ' (' + restoreKind + ')' : '') +
+      ' → Ziel wählen. Standard: Staging, kein Live-Overwrite.';
+    document.getElementById('br-confirm').checked = false;
+    document.getElementById('br-typed').value = '';
+    document.getElementById('br-dest-staging').checked = true;
+    document.getElementById('br-place-copilot').checked = true;
+    document.getElementById('br-msg').textContent = '';
+    const log = document.getElementById('br-job-log');
+    if (log) { log.classList.add('hidden'); log.textContent = ''; }
+    syncBrUi();
+    document.getElementById('browse-restore-dialog').showModal();
+  });
+
+  function parseBrStack() {
+    const val = document.getElementById('br-stack')?.value || '';
+    const i = val.indexOf('|');
+    if (i < 0) return null;
+    return {
+      parent_id: decodeURIComponent(val.slice(0, i)),
+      project: decodeURIComponent(val.slice(i + 1)),
+    };
+  }
+
+  function pollBrJob(jobId) {
+    if (brPoll) clearTimeout(brPoll);
+    const log = document.getElementById('br-job-log');
+    const msg = document.getElementById('br-msg');
+    if (log) log.classList.remove('hidden');
+    (async function tick() {
+      try {
+        const res = await fetch(API + '/jobs/' + encodeURIComponent(jobId));
+        const data = await res.json().catch(() => ({}));
+        const job = data.job || {};
+        if (log) log.textContent = (job.log_lines || []).join('\n') || (job.message || '');
+        if (msg) msg.textContent = (job.phase || 'Restore') + ' · ' + (job.percent || 0) + '%';
+        if (job.done) {
+          if (msg) {
+            msg.textContent = job.error || job.message || (job.ok ? 'Restore fertig' : 'Fehlgeschlagen');
+            msg.style.color = job.ok ? '' : 'var(--danger, #c44)';
+          }
+          return;
+        }
+      } catch (err) {
+        if (msg) msg.textContent = String(err.message || err);
+        return;
+      }
+      brPoll = setTimeout(tick, 900);
+    })();
+  }
+
+  document.getElementById('br-go')?.addEventListener('click', async () => {
+    const msg = document.getElementById('br-msg');
+    if (!document.getElementById('br-confirm')?.checked) {
+      if (msg) msg.textContent = 'Bitte Restore bestätigen';
+      return;
+    }
+    const parsed = parseBrStack();
+    if (!parsed || !destId || !restorePath) {
+      if (msg) msg.textContent = 'Stack oder Pfad fehlt.';
+      return;
+    }
+    const mode = brDestMode();
+    if (mode === 'original') {
+      const typed = (document.getElementById('br-typed')?.value || '').trim();
+      if (typed !== parsed.project && typed.toUpperCase() !== 'RESTORE') {
+        if (msg) msg.textContent = 'Originalpfad: Stack-Name oder RESTORE eintippen';
+        return;
+      }
+    }
+    if (msg) { msg.textContent = 'Restore wird gestartet…'; msg.style.color = ''; }
+    const res = await fetch(API + '/browse/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dest_id: destId,
+        path: restorePath,
+        confirm: true,
+        dest_mode: mode,
+        dest_place: mode === 'original' ? 'guest' : brPlace(),
+        scope: 'stack',
+        paths: [],
+        typed_confirm: document.getElementById('br-typed')?.value || '',
+        parent_id: parsed.parent_id,
+        project: parsed.project,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (msg) { msg.textContent = data.detail || 'Restore fehlgeschlagen'; msg.style.color = 'var(--danger, #c44)'; }
+      return;
+    }
+    if (msg) msg.textContent = data.message || 'Restore gestartet';
+    if (data.job_id) pollBrJob(data.job_id);
+  });
+
   document.getElementById('btn-refresh-all')?.addEventListener('click', () => loadListing());
+  loadStacks();
   loadDests();
 })();
 </script>
