@@ -69,17 +69,17 @@
       <div class="flex items-start gap-3">
         <span id="bp-spinner" class="mt-0.5 inline-block h-5 w-5 shrink-0 rounded-full border-2 border-[var(--border)] border-t-[var(--primary)] animate-spin" aria-hidden="true"></span>
         <div class="min-w-0 flex-1">
-          <p id="bp-title" class="font-medium text-[var(--text)]">Backup läuft…</p>
-          <p id="bp-phase" class="mt-0.5 text-sm text-[var(--muted)]">Preflight</p>
+          <p id="bp-title" class="font-medium text-[var(--text)] break-words leading-snug">Backup läuft…</p>
+          <p id="bp-phase" class="mt-0.5 text-sm text-[var(--muted)] break-words leading-snug">Preflight</p>
         </div>
         <span id="bp-percent" class="shrink-0 text-sm font-medium tabular-nums text-[var(--text)]">0&nbsp;%</span>
       </div>
       <div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" id="bp-bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div id="bp-bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>
       </div>
-      <p id="bp-message" class="text-sm text-[var(--muted)]">Status wird geladen…</p>
+      <p id="bp-message" class="job-status-line text-sm text-[var(--muted)]">Status wird geladen…</p>
       <div id="bp-dest" class="hidden flex flex-wrap gap-1.5 text-xs"></div>
-      <pre id="bp-log" class="max-h-40 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words"></pre>
+      <div id="bp-log" class="job-log max-h-40" role="log" aria-live="polite"></div>
       <p id="bp-footer" class="text-sm hidden"></p>
     </div>
   </div>
@@ -213,7 +213,7 @@
       dest.innerHTML = '';
     }
     const log = document.getElementById('bp-log');
-    if (log) log.textContent = '';
+    if (log) log.replaceChildren();
     const foot = document.getElementById('bp-footer');
     if (foot) {
       foot.classList.add('hidden');
@@ -236,7 +236,13 @@
     const log = document.getElementById('bp-log');
     if (log) {
       const lines = job.log_lines || [];
-      log.textContent = lines.slice(-12).join('\n');
+      log.replaceChildren();
+      for (const line of lines.slice(-12)) {
+        const el = document.createElement('div');
+        el.className = 'job-log-line';
+        el.textContent = line;
+        log.appendChild(el);
+      }
       log.scrollTop = log.scrollHeight;
     }
 

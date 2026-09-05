@@ -16,6 +16,7 @@ import asyncssh
 
 from app.config import Settings
 from app.core.docker_control import DockerControlError, ssh_key_path
+from app.core.locale import format_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -955,10 +956,114 @@ async def _sftp_call(session: _SftpSession, op, *, timeout: float, retries: int 
     raise last
 
 
+def _count_local_files(local_dir: Path, skip: frozenset[str]) -> tuple[int, int]:
+    """Return (file_count, total_bytes) under local_dir, honoring skip names."""
+    files = 0
+    nbytes = 0
+    if not local_dir.is_dir():
+        return 0, 0
+    for item in local_dir.rglob("*"):
+        try:
+            rel = item.relative_to(local_dir)
+        except ValueError:
+            continue
+        if any(part in skip for part in rel.parts):
+            continue
+        if not item.is_file():
+            continue
+        files += 1
+        try:
+            nbytes += int(item.stat().st_size)
+        except OSError:
+            pass
+    return files, nbytes
+
+
+def _sftp_progress_prefix(label: str) -> str:
+    name = (label or "").strip()
+    if not name or name.lower() == "sftp":
+        return "SFTP"
+    return f"SFTP {name}"
+
+
+def _format_sftp_progress(stats: dict[str, int], *, label: str) -> str:
+    done = int(stats.get("copied", 0)) + int(stats.get("skipped", 0))
+    total = int(stats.get("files_total", 0) or 0)
+    bytes_done = int(stats.get("bytes_done", 0) or 0)
+    bytes_total = int(stats.get("bytes_total", 0) or 0)
+    if total > 0:
+        shown = max(total, done)
+        pct = min(100, int(round(100.0 * done / shown)))
+        files = f"{done}/{shown} Dateien ({pct} %)"
+    else:
+        files = f"{done} Dateien"
+    bits = [
+        f"{_sftp_progress_prefix(label)}: {files}",
+        f"{int(stats.get('copied', 0))} neu",
+        f"{int(stats.get('deleted', 0))} entfernt",
+    ]
+    if bytes_total > 0:
+        bits.append(f"{format_bytes(bytes_done)} / {format_bytes(bytes_total)}")
+    elif bytes_done > 0:
+        bits.append(format_bytes(bytes_done))
+    return " · ".join(bits)
+
+
+async def _sftp_count_remote_files(
+    session: _SftpSession,
+    remote: str,
+    skip: frozenset[str],
+    timeout: float,
+) -> tuple[int, int]:
+    """Return (file_count, total_bytes) via SFTP readdir, honoring skip names."""
+    files = 0
+    nbytes = 0
+    unknown = getattr(asyncssh, "FILEXFER_TYPE_UNKNOWN", 0)
+
+    async def _walk(path: str) -> None:
+        nonlocal files, nbytes
+
+        async def _readdir(sftp):
+            return await sftp.readdir(path)
+
+        try:
+            entries = await _sftp_call(session, _readdir, timeout=min(120.0, timeout))
+        except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
+            return
+        for ent in entries:
+            name = ent.filename
+            if name in (".", "..") or name in skip:
+                continue
+            rpath = f"{path.rstrip('/')}/{name}"
+            attrs = ent.attrs
+            is_dir = _sftp_is_dir(attrs)
+            typ = getattr(attrs, "type", None) if attrs is not None else None
+            if typ is None or typ == unknown:
+                try:
+                    st = await _sftp_call(
+                        session,
+                        lambda sftp, p=rpath: sftp.stat(p),
+                        timeout=min(60.0, timeout),
+                    )
+                    is_dir = _sftp_is_dir(st)
+                    attrs = st
+                except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
+                    is_dir = False
+            if is_dir:
+                await _walk(rpath)
+                continue
+            files += 1
+            nbytes += int(getattr(attrs, "size", 0) or 0)
+
+    await _walk(remote.rstrip("/"))
+    return files, nbytes
+
+
 async def _sftp_note_progress(
     log: LogFn | None,
     stats: dict[str, int],
     *,
+    label: str = "SFTP",
     force: bool = False,
 ) -> None:
     n = stats["copied"] + stats["skipped"]
@@ -966,10 +1071,7 @@ async def _sftp_note_progress(
         return
     if not force and (n == 0 or n % _SFTP_PROGRESS_EVERY != 0):
         return
-    await log(
-        f"SFTP … {stats['copied']} neu, {stats['skipped']} unverändert, "
-        f"{stats['deleted']} entfernt"
-    )
+    await log(_format_sftp_progress(stats, label=label))
 
 
 async def sftp_mirror_get(
@@ -987,6 +1089,7 @@ async def sftp_mirror_get(
     password: str | None = None,
     port: int | None = None,
     log: LogFn | None = None,
+    label: str = "SFTP",
 ) -> dict[str, int]:
     """Mirror remote directory → local (skip same-size files).
 
@@ -995,7 +1098,14 @@ async def sftp_mirror_get(
     """
     skip = exclude or frozenset({"locks"})
     local_dir.mkdir(parents=True, exist_ok=True)
-    stats = {"copied": 0, "skipped": 0, "deleted": 0}
+    stats = {
+        "copied": 0,
+        "skipped": 0,
+        "deleted": 0,
+        "bytes_done": 0,
+        "files_total": 0,
+        "bytes_total": 0,
+    }
     started = time.monotonic()
     overall = max(float(timeout) * 4.0, float(timeout))
 
@@ -1051,6 +1161,7 @@ async def sftp_mirror_get(
             if is_dir:
                 await _walk(rpath, lpath)
                 continue
+            rsize = 0
             try:
                 rst = await _sftp_call(
                     session, lambda sftp, p=rpath: sftp.stat(p), timeout=min(60.0, timeout)
@@ -1058,7 +1169,8 @@ async def sftp_mirror_get(
                 rsize = int(getattr(rst, "size", 0) or 0)
                 if lpath.is_file() and lpath.stat().st_size == rsize:
                     stats["skipped"] += 1
-                    await _sftp_note_progress(log, stats)
+                    stats["bytes_done"] += rsize
+                    await _sftp_note_progress(log, stats, label=label)
                     continue
             except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
                 pass
@@ -1068,8 +1180,14 @@ async def sftp_mirror_get(
                 lambda sftp, src=rpath, dst=str(lpath): sftp.get(src, dst),
                 timeout=timeout,
             )
+            if rsize <= 0:
+                try:
+                    rsize = int(lpath.stat().st_size)
+                except OSError:
+                    rsize = 0
             stats["copied"] += 1
-            await _sftp_note_progress(log, stats)
+            stats["bytes_done"] += rsize
+            await _sftp_note_progress(log, stats, label=label)
         if delete_extra:
             for child in list(local.iterdir()):
                 if child.name in skip or child.name in remote_names:
@@ -1082,8 +1200,17 @@ async def sftp_mirror_get(
 
     try:
         await session.open()
+        try:
+            nfiles, nbytes = await _sftp_count_remote_files(
+                session, remote_dir.rstrip("/"), skip, timeout
+            )
+            stats["files_total"] = nfiles
+            stats["bytes_total"] = nbytes
+        except (OSError, asyncssh.Error, asyncio.TimeoutError):
+            pass
+        await _sftp_note_progress(log, stats, label=label, force=True)
         await _walk(remote_dir.rstrip("/"), local_dir)
-        await _sftp_note_progress(log, stats, force=True)
+        await _sftp_note_progress(log, stats, label=label, force=True)
     except asyncio.TimeoutError as exc:
         raise DockerControlError(
             f"SFTP-Sync-Timeout von {ip}:{remote_dir}",
@@ -1116,6 +1243,7 @@ async def sftp_mirror_put(
     password: str | None = None,
     port: int | None = None,
     log: LogFn | None = None,
+    label: str = "SFTP",
 ) -> dict[str, int]:
     """Mirror local directory → remote (skip same-size files).
 
@@ -1128,7 +1256,15 @@ async def sftp_mirror_put(
             f"Lokales Verzeichnis fehlt: {local_dir}",
             status_code=400,
         )
-    stats = {"copied": 0, "skipped": 0, "deleted": 0}
+    nfiles, nbytes = _count_local_files(local_dir, skip)
+    stats = {
+        "copied": 0,
+        "skipped": 0,
+        "deleted": 0,
+        "bytes_done": 0,
+        "files_total": nfiles,
+        "bytes_total": nbytes,
+    }
     started = time.monotonic()
     overall = max(float(timeout) * 4.0, float(timeout))
 
@@ -1204,12 +1340,17 @@ async def sftp_mirror_put(
                 await _walk(item, rpath)
                 continue
             try:
+                lsize = int(item.stat().st_size)
+            except OSError:
+                lsize = 0
+            try:
                 rst = await _sftp_call(
                     session, lambda sftp, p=rpath: sftp.stat(p), timeout=min(60.0, timeout)
                 )
-                if int(getattr(rst, "size", 0) or 0) == item.stat().st_size:
+                if int(getattr(rst, "size", 0) or 0) == lsize:
                     stats["skipped"] += 1
-                    await _sftp_note_progress(log, stats)
+                    stats["bytes_done"] += lsize
+                    await _sftp_note_progress(log, stats, label=label)
                     continue
             except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
                 pass
@@ -1220,7 +1361,8 @@ async def sftp_mirror_put(
                 timeout=timeout,
             )
             stats["copied"] += 1
-            await _sftp_note_progress(log, stats)
+            stats["bytes_done"] += lsize
+            await _sftp_note_progress(log, stats, label=label)
         if delete_extra:
             for name in remote_names - local_names:
                 if name in skip:
@@ -1242,8 +1384,9 @@ async def sftp_mirror_put(
 
     try:
         await session.open()
+        await _sftp_note_progress(log, stats, label=label, force=True)
         await _walk(local_dir, remote_dir.rstrip("/"))
-        await _sftp_note_progress(log, stats, force=True)
+        await _sftp_note_progress(log, stats, label=label, force=True)
     except asyncio.TimeoutError as exc:
         raise DockerControlError(
             f"SFTP-Sync-Timeout nach {ip}:{remote_dir}",

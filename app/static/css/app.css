@@ -2876,8 +2876,46 @@ html[data-chrome="android"] .ssh-dialog {
   font-size: 0.75rem;
   line-height: 1.45;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
+  text-overflow: unset;
   background: color-mix(in srgb, var(--background) 70%, var(--card));
+}
+
+.job-status-line {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-overflow: unset;
+  overflow: visible;
+}
+
+.job-log {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: auto;
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 80%, transparent);
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-overflow: unset;
+}
+
+.job-log-line {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-overflow: unset;
+  overflow: visible;
 }
 
 .topo-empty {

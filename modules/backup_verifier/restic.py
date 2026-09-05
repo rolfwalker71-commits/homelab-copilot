@@ -693,7 +693,13 @@ async def _mirror_lxc_to_copilot(
             "rsync auf dem Guest fehlt — spiegele das Repo per SFTP nach Copilot…"
         )
         stats = await sshutil.sftp_mirror_get(
-            settings, ip, lxc_repo, copilot_repo, timeout=timeout, log=log
+            settings,
+            ip,
+            lxc_repo,
+            copilot_repo,
+            timeout=timeout,
+            log=log,
+            label="Copilot",
         )
         await log(
             f"Repo per SFTP nach Copilot: {stats['copied']} neu, "
@@ -736,7 +742,13 @@ async def _mirror_copilot_to_lxc(
         used_rsync = False
     if not used_rsync:
         await sshutil.sftp_mirror_put(
-            settings, ip, copilot_repo, lxc_repo, timeout=timeout, log=log
+            settings,
+            ip,
+            copilot_repo,
+            lxc_repo,
+            timeout=timeout,
+            log=log,
+            label="Host",
         )
     await log("Copilot-Repo auf den Host zurückgespiegelt (Incrementals fortsetzen).")
 
@@ -772,6 +784,7 @@ async def _mirror_to_sftp(
         password=auth.get("password"),
         port=auth["port"],
         log=log,
+        label=str(dest.get("label") or "SFTP"),
     )
     await log(
         f"{dest.get('label') or 'SFTP'}: {stats['copied']} neu, "
@@ -808,6 +821,7 @@ async def _mirror_from_sftp(
         password=auth.get("password"),
         port=auth["port"],
         log=log,
+        label=str(dest.get("label") or "SFTP"),
     )
 
 
