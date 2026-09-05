@@ -29,7 +29,7 @@ from backup_verifier.backup import BackupError, list_backup_stacks, run_backup
 from backup_verifier.config import get_backup_settings
 from backup_verifier import cron as cron_mod
 from backup_verifier import destinations as dest_mod
-from backup_verifier.inventory import build_inventory
+from backup_verifier.inventory import build_inventory, resolve_guest
 from backup_verifier.jobs import JOBS
 from backup_verifier.restic import ENGINE_RESTIC, ResticError, list_restic_snapshots
 from backup_verifier.restore import RestoreError, run_restore
@@ -206,6 +206,23 @@ def _get_store() -> BackupStore:
 def _snapshot(request: Request):
     store: TopologyStore = request.app.state.topology_store
     return store.snapshot
+
+
+def _with_guest(row: dict[str, Any], snapshot: Any, *, overwrite: bool = False) -> dict[str, Any]:
+    """Attach guest_name / guest_ip from topology (parent_id like lxc:pve01:105)."""
+    out = dict(row)
+    existing = str(out.get("guest_name") or "").strip()
+    if existing and not overwrite:
+        if not out.get("guest_ip"):
+            info = resolve_guest(snapshot, str(out.get("parent_id") or ""))
+            if info.get("guest_ip"):
+                out["guest_ip"] = info["guest_ip"]
+        return out
+    info = resolve_guest(snapshot, str(out.get("parent_id") or ""))
+    out["guest_name"] = info["guest_name"] or existing
+    if info.get("guest_ip"):
+        out["guest_ip"] = info["guest_ip"]
+    return out
 
 
 async def _run_enqueued_backup(
@@ -621,11 +638,13 @@ async def get_backup_job(job_id: str) -> dict[str, Any]:
 
 @router.get("/history")
 async def history(
+    request: Request,
     limit: int = Query(50, ge=1, le=200),
     stack: str | None = None,
 ) -> dict[str, Any]:
     store = _get_store()
-    runs = await store.list_runs(limit=limit, stack=stack)
+    snapshot = _snapshot(request)
+    runs = [_with_guest(r, snapshot) for r in await store.list_runs(limit=limit, stack=stack)]
     return {"runs": runs, "time": format_de(now_berlin())}
 
 
@@ -770,27 +789,25 @@ async def restores(limit: int = Query(30, ge=1, le=100)) -> dict[str, Any]:
 
 
 @router.get("/schedules")
-async def list_schedules() -> dict[str, Any]:
+async def list_schedules(request: Request) -> dict[str, Any]:
     store = _get_store()
     schedules = await store.list_schedules()
+    snapshot = _snapshot(request)
     now = now_berlin()
     enriched: list[dict[str, Any]] = []
     for row in schedules:
         nxt = next_run_after(str(row.get("cron_expr") or ""), now) if row.get("enabled") else None
-        enriched.append(
-            {
-                **row,
-                "next_run": format_de(nxt) if nxt else None,
-                "next_run_iso": iso_utc(nxt) if nxt else None,
-            }
-        )
+        item = _with_guest(row, snapshot, overwrite=True)
+        item["next_run"] = format_de(nxt) if nxt else None
+        item["next_run_iso"] = iso_utc(nxt) if nxt else None
+        enriched.append(item)
     return {
         "schedules": enriched,
         "scheduler": "in_process",
         "scheduler_running": bool(_sched_task and not _sched_task.done()),
         "timezone": "Europe/Berlin",
         "crontab_available": cron_mod.crontab_available(),
-        "preview": cron_mod.preview_crontab(schedules),
+        "preview": cron_mod.preview_crontab(enriched),
         "hint": (
             "Zeitpläne laufen in der App (Europe/Berlin). "
             "Kein Host-Crontab nötig — alte curl-Einträge kannst du löschen."

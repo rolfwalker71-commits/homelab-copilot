@@ -22,7 +22,7 @@
       <thead>
         <tr class="border-b border-[var(--border)] text-[var(--muted)]">
           <th class="py-2 pr-2 font-medium">Zeit</th>
-          <th class="py-2 pr-2 font-medium">Stack</th>
+          <th class="py-2 pr-2 font-medium">Stack / Host</th>
           <th class="py-2 pr-2 font-medium">Status</th>
           <th class="py-2 pr-2 font-medium">Ziele</th>
           <th class="py-2 pr-2 font-medium">Größe</th>
@@ -106,6 +106,15 @@
     return `<span class="chip chip-${cls}" title="${label}">${label}: ${s}</span>`;
   }
 
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function hostLabel(r) {
+    return String(r && (r.guest_name || r.parent_id) || '').trim();
+  }
+
   function hopChips(r) {
     const hops = r.destinations;
     if (Array.isArray(hops) && hops.length) {
@@ -135,18 +144,22 @@
       }
       const snap = r.snapshot_id ? String(r.snapshot_id).slice(0, 12) : (r.engine === 'restic' ? '—' : 'tar');
       const eng = r.engine === 'restic' ? 'restic' : 'tar';
+      const host = hostLabel(r);
+      const ip = String(r.guest_ip || '').trim();
+      const hostTitle = [r.parent_id, ip].filter(Boolean).join(' · ');
+      const subtitle = [ip && ip !== host ? ip : '', eng].filter(Boolean).join(' · ');
       return `<tr class="border-b border-[var(--border)] align-middle">
-        <td class="py-2 pr-2 whitespace-nowrap">${r.created_at || ''}</td>
-        <td class="py-2 pr-2"><div class="font-medium break-words">${r.stack}</div><div class="text-[var(--muted)] text-xs">${r.guest_name || ''} · ${eng}</div></td>
-        <td class="py-2 pr-2"><span class="chip chip-${r.status === 'success' ? 'running' : r.status === 'failed' ? 'stopped' : r.status === 'partial' ? 'partial' : 'unknown'}">${r.status}</span></td>
+        <td class="py-2 pr-2 whitespace-nowrap">${esc(r.created_at || '')}</td>
+        <td class="py-2 pr-2"><div class="font-medium break-words">${esc(r.stack)}${host ? ' · ' + esc(host) : ''}</div><div class="text-[var(--muted)] text-xs" title="${esc(hostTitle)}">${esc(subtitle)}</div></td>
+        <td class="py-2 pr-2"><span class="chip chip-${r.status === 'success' ? 'running' : r.status === 'failed' ? 'stopped' : r.status === 'partial' ? 'partial' : 'unknown'}">${esc(r.status)}</span></td>
         <td class="py-2 pr-2"><div class="flex flex-wrap items-center gap-1">${hopChips(r)}</div></td>
         <td class="py-2 pr-2 whitespace-nowrap">${size}</td>
-        <td class="py-2 pr-2 font-mono text-xs">${snap}</td>
-        <td class="py-2 pr-2">${r.verify_status || '—'}</td>
+        <td class="py-2 pr-2 font-mono text-xs">${esc(snap)}</td>
+        <td class="py-2 pr-2">${esc(r.verify_status || '—')}</td>
         <td class="py-2 whitespace-nowrap">
           <div class="flex flex-wrap items-center gap-1">
             <button type="button" class="btn btn-ghost btn-xs" data-detail="${r.id}">Log</button>
-            ${['success','partial'].includes(r.status) ? `<button type="button" class="btn btn-ghost btn-xs" data-restore="${r.id}" data-stack="${r.stack}" data-engine="${eng}" data-parent="${r.parent_id || ''}" data-snapshot="${r.snapshot_id || ''}">Restore</button>` : ''}
+            ${['success','partial'].includes(r.status) ? `<button type="button" class="btn btn-ghost btn-xs" data-restore="${r.id}" data-stack="${esc(r.stack)}" data-guest="${esc(host)}" data-engine="${eng}" data-parent="${esc(r.parent_id || '')}" data-snapshot="${esc(r.snapshot_id || '')}">Restore</button>` : ''}
           </div>
         </td>
       </tr>`;
@@ -171,9 +184,11 @@
       restoreEngine = restore.getAttribute('data-engine') || 'tar';
       restoreParent = restore.getAttribute('data-parent') || '';
       restoreStack = restore.getAttribute('data-stack') || '';
+      const restoreGuest = restore.getAttribute('data-guest') || '';
       const presetSnap = restore.getAttribute('data-snapshot') || '';
+      const where = restoreGuest ? ' auf „' + restoreGuest + '“' : '';
       document.getElementById('restore-text').textContent =
-        'Restore für Stack „' + restoreStack + '“ (Lauf #' + restoreRunId + '). Stack wird gestoppt.';
+        'Restore für Stack „' + restoreStack + '“' + where + ' (Lauf #' + restoreRunId + '). Stack wird gestoppt.';
       document.getElementById('restore-confirm').checked = false;
       document.getElementById('restore-msg').textContent = '';
       const wrap = document.getElementById('restore-snap-wrap');
@@ -306,14 +321,16 @@
         return;
       }
       const snaps = data.snapshots || [];
+      const snapGuest = hostLabel(stacksCache.find((x) => x.parent_id === parentId && x.stack === project) || { parent_id: parentId });
       list.innerHTML = snaps.length ? snaps.map((s) => `
         <li class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] p-2">
-          <span><code>${(s.short_id || String(s.id || '').slice(0, 8))}</code>
-            · ${s.time || ''}
-            ${(s.tags || []).length ? ' · ' + s.tags.join(', ') : ''}
+          <span><code>${esc(s.short_id || String(s.id || '').slice(0, 8))}</code>
+            · ${esc(s.time || '')}
+            ${(s.tags || []).length ? ' · ' + esc(s.tags.join(', ')) : ''}
           </span>
-          <button type="button" class="btn btn-ghost btn-xs" data-snap-restore="${s.id}"
-            data-parent="${parentId}" data-stack="${project}">Restore</button>
+          <button type="button" class="btn btn-ghost btn-xs" data-snap-restore="${esc(s.id)}"
+            data-parent="${esc(parentId)}" data-stack="${esc(project)}"
+            data-guest="${esc(snapGuest)}">Restore</button>
         </li>`).join('') : '<li class="text-[var(--muted)]">Keine Snapshots.</li>';
     } catch (err) {
       list.innerHTML = '<li class="text-[var(--danger,#c44)]">' + String(err.message || err) + '</li>';
@@ -327,9 +344,11 @@
     restoreEngine = 'restic';
     restoreParent = btn.getAttribute('data-parent') || '';
     restoreStack = btn.getAttribute('data-stack') || '';
+    const snapGuest = btn.getAttribute('data-guest') || '';
     const sid = btn.getAttribute('data-snap-restore') || '';
+    const where = snapGuest ? ' auf „' + snapGuest + '“' : '';
     document.getElementById('restore-text').textContent =
-      'Restore für Stack „' + restoreStack + '“ aus Snapshot ' + sid.slice(0, 12) + '. Stack wird gestoppt.';
+      'Restore für Stack „' + restoreStack + '“' + where + ' aus Snapshot ' + sid.slice(0, 12) + '. Stack wird gestoppt.';
     document.getElementById('restore-confirm').checked = false;
     document.getElementById('restore-msg').textContent = '';
     const wrap = document.getElementById('restore-snap-wrap');

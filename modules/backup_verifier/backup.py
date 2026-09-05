@@ -25,7 +25,7 @@ from backup_verifier.destinations import (
     legacy_role_for,
     resolve_auth,
 )
-from backup_verifier.inventory import build_inventory
+from backup_verifier.inventory import build_inventory, resolve_guest
 from backup_verifier.restic import ENGINE_RESTIC, ResticError, run_restic_backup
 from backup_verifier import sshutil
 from backup_verifier.store import BackupStore
@@ -1031,14 +1031,12 @@ async def list_backup_stacks(
             continue
         key = f"{c.parent_id}::{project}"
         if key not in seen:
-            guest = next(
-                (g.name for g in snapshot.guests if g.id == c.parent_id),
-                c.parent_id,
-            )
+            guest = resolve_guest(snapshot, c.parent_id)
             seen[key] = {
                 "parent_id": c.parent_id,
                 "stack": project,
-                "guest_name": guest,
+                "guest_name": guest["guest_name"] or c.parent_id,
+                "guest_ip": guest["guest_ip"],
                 "containers": 0,
             }
         seen[key]["containers"] += 1

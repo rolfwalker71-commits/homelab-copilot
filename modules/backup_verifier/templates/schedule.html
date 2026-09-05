@@ -123,6 +123,28 @@
     return encodeURIComponent(parentId) + '|' + encodeURIComponent(stack);
   }
 
+  function hostLabel(s) {
+    return String(s && (s.guest_name || s.parent_id) || '').trim();
+  }
+
+  function stackHostText(s) {
+    const stack = String(s && s.stack || 'Stack');
+    const host = hostLabel(s);
+    return host && host !== stack ? (stack + ' · ' + host) : stack;
+  }
+
+  function stackHostHtml(s) {
+    const stack = esc(s && s.stack || 'Stack');
+    const host = hostLabel(s);
+    const ip = String(s && s.guest_ip || '').trim();
+    const title = [s && s.parent_id, ip].filter(Boolean).join(' · ');
+    let html = '<strong>' + stack + '</strong>';
+    if (host) {
+      html += ' · <span title="' + esc(title) + '">' + esc(host) + '</span>';
+    }
+    return html;
+  }
+
   function syncPresetUI() {
     const v = document.getElementById('sched-preset').value;
     document.getElementById('sched-weekly-wrap').classList.toggle('hidden', v !== 'weekly');
@@ -161,7 +183,7 @@
     if (sel && ![...sel.options].some((o) => o.value === val)) {
       const opt = document.createElement('option');
       opt.value = val;
-      opt.textContent = (s.stack || 'Stack') + ' (nicht in Inventar)';
+      opt.textContent = stackHostText(s) + ' (nicht in Inventar)';
       sel.appendChild(opt);
     }
     if (sel) sel.value = val;
@@ -185,7 +207,7 @@
       }
     }
     syncPresetUI();
-    setEditMode(true, s.stack || '');
+    setEditMode(true, stackHostText(s));
     document.getElementById('sched-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
     document.getElementById('sched-stack').focus();
   }
@@ -239,18 +261,21 @@
     const list = document.getElementById('sched-list');
     const items = data.schedules || [];
     schedulesCache = items;
-    list.innerHTML = items.length ? items.map((s) => `
+    list.innerHTML = items.length ? items.map((s) => {
+      const label = stackHostText(s);
+      return `
       <li class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] p-2">
-        <span><strong>${esc(s.stack)}</strong> · <code>${esc(s.cron_expr)}</code> · ${s.enabled ? 'aktiv' : 'aus'}
+        <span>${stackHostHtml(s)} · <code>${esc(s.cron_expr)}</code> · ${s.enabled ? 'aktiv' : 'aus'}
           · ${s.engine === 'restic' ? 'restic' : 'tar'}
           ${s.next_run ? `<br><span class="text-[var(--muted)]">Nächster Lauf: ${esc(s.next_run)}</span>` : ''}
           ${s.last_fired_at ? `<br><span class="text-[var(--muted)]">Zuletzt gestartet: ${esc(s.last_fired_at)}</span>` : ''}
         </span>
         <span class="flex flex-wrap gap-2">
-          <button type="button" class="btn btn-ghost btn-xs" data-edit-sched="${s.id}" aria-label="Zeitplan ${esc(s.stack)} bearbeiten">Bearbeiten</button>
-          <button type="button" class="btn btn-ghost btn-xs" data-del-sched="${s.id}" aria-label="Zeitplan ${esc(s.stack)} löschen">Löschen</button>
+          <button type="button" class="btn btn-ghost btn-xs" data-edit-sched="${s.id}" aria-label="Zeitplan ${esc(label)} bearbeiten">Bearbeiten</button>
+          <button type="button" class="btn btn-ghost btn-xs" data-del-sched="${s.id}" aria-label="Zeitplan ${esc(label)} löschen">Löschen</button>
         </span>
-      </li>`).join('') : '<li class="text-[var(--muted)]">Keine Zeitpläne.</li>';
+      </li>`;
+    }).join('') : '<li class="text-[var(--muted)]">Keine Zeitpläne.</li>';
     document.getElementById('cron-preview').textContent = [data.hint, data.preview].filter(Boolean).join('\n\n');
   }
 

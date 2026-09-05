@@ -82,15 +82,27 @@ def _container_image(info: dict[str, Any]) -> str:
     return str(image)
 
 
-def _guest_name(snapshot: TopologySnapshot | None, parent_id: str) -> str:
+def resolve_guest(
+    snapshot: TopologySnapshot | None, parent_id: str
+) -> dict[str, str | None]:
+    """Map parent_id (e.g. lxc:pve01:105) to guest hostname and optional IP."""
+    if not parent_id:
+        return {"guest_name": "", "guest_ip": None}
     if snapshot is None:
-        return parent_id
+        fallback = "local-docker" if parent_id == "local:docker" else parent_id
+        return {"guest_name": fallback, "guest_ip": None}
     for g in snapshot.guests:
         if g.id == parent_id:
-            return g.name
+            name = (g.hostname or g.name or "").strip() or parent_id
+            ip = g.ip_addresses[0] if g.ip_addresses else None
+            return {"guest_name": name, "guest_ip": ip}
     if parent_id == "local:docker":
-        return "local-docker"
-    return parent_id
+        return {"guest_name": "local-docker", "guest_ip": None}
+    return {"guest_name": parent_id, "guest_ip": None}
+
+
+def _guest_name(snapshot: TopologySnapshot | None, parent_id: str) -> str:
+    return resolve_guest(snapshot, parent_id)["guest_name"] or parent_id
 
 
 async def build_inventory(

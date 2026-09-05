@@ -174,5 +174,6 @@ def preview_crontab(
         lines.append("Keine aktiven Zeitpläne.")
         return "\n".join(lines) + "\n"
     for s in enabled:
-        lines.append(f"{s.get('cron_expr')}  {s.get('stack')}  ({s.get('parent_id')})")
+        host = s.get("guest_name") or s.get("parent_id")
+        lines.append(f"{s.get('cron_expr')}  {s.get('stack')}  ({host})")
     return "\n".join(lines) + "\n"
