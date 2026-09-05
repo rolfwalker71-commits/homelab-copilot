@@ -722,13 +722,13 @@
     const ru = t.release_upgrade || (t.last_scan && t.last_scan.release_upgrade) || null;
     const ruChip = (ru && ru.available)
       ? ' ' + chip(ru.chip || (ru.urgency === 'recommended' ? 'Release-Upgrade empfohlen' : 'Nächstes LTS verfügbar'),
-          ru.urgency === 'recommended' ? 'chip-stopped' : 'chip-info')
+          ru.urgency === 'recommended' ? 'chip-upgrade' : 'chip-info')
       : '';
     if (!monitored) {
-      statusHtml = chip('Nicht überwacht', 'chip-unknown') + imgChip + ruChip;
+      statusHtml = chip('Nicht überwacht', 'chip-monitor') + imgChip + ruChip;
     } else if (pending != null) {
       statusHtml =
-        chip(pending + ' Updates', pending ? 'chip-unknown' : 'chip-running') +
+        chip(pending + ' Updates', pending ? 'chip-pending' : 'chip-running') +
         (sec ? ' ' + chip(sec + ' Security', 'chip-stopped') : '') +
         imgChip + ruChip +
         (t.last_scan && t.last_scan.reboot_required ? ' ' + chip('Reboot', 'chip-stopped') : '') +

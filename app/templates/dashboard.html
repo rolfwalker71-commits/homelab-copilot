@@ -527,8 +527,8 @@
 
 {% set summary = snapshot.summary if snapshot else {'nodes': 0, 'guests': 0, 'containers': 0, 'errors': 0} %}
 <div class="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
-  <div class="surface animate-in animate-in-delay-1 p-4 sm:p-5">
-    <div class="stat-tile">
+  <div class="surface surface-tinted animate-in animate-in-delay-1 p-4 sm:p-5">
+    <div class="stat-tile" data-kpi="nodes">
       <span class="stat-tile-ico" aria-hidden="true">{{ ico('nodes') }}</span>
       <div class="stat-tile-body">
         <p class="text-sm text-[var(--muted)]">Nodes</p>
@@ -536,8 +536,8 @@
       </div>
     </div>
   </div>
-  <div class="surface animate-in animate-in-delay-1 p-4 sm:p-5">
-    <div class="stat-tile">
+  <div class="surface surface-tinted animate-in animate-in-delay-1 p-4 sm:p-5">
+    <div class="stat-tile" data-kpi="guests">
       <span class="stat-tile-ico" aria-hidden="true">{{ ico('guests') }}</span>
       <div class="stat-tile-body">
         <p class="text-sm text-[var(--muted)]">Guests</p>
@@ -545,8 +545,8 @@
       </div>
     </div>
   </div>
-  <div class="surface animate-in animate-in-delay-2 p-4 sm:p-5">
-    <div class="stat-tile">
+  <div class="surface surface-tinted animate-in animate-in-delay-2 p-4 sm:p-5">
+    <div class="stat-tile" data-kpi="containers">
       <span class="stat-tile-ico" aria-hidden="true">{{ ico('containers') }}</span>
       <div class="stat-tile-body">
         <p class="text-sm text-[var(--muted)]">Container</p>
@@ -554,8 +554,8 @@
       </div>
     </div>
   </div>
-  <div class="surface animate-in animate-in-delay-2 p-4 sm:p-5">
-    <div class="stat-tile">
+  <div class="surface surface-tinted animate-in animate-in-delay-2 p-4 sm:p-5">
+    <div class="stat-tile" data-kpi="modules">
       <span class="stat-tile-ico" aria-hidden="true">{{ ico('modules') }}</span>
       <div class="stat-tile-body">
         <p class="text-sm text-[var(--muted)]">Module</p>

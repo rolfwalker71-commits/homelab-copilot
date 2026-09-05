@@ -11,8 +11,8 @@
   const MQ_LIGHT = window.matchMedia("(prefers-color-scheme: light)");
   const THEME_LABELS = { light: "Hell", dark: "Dunkel", system: "System" };
   const THEME_COLORS = {
-    dark: { android: "#1a2422", desktop: "#1a1f1e", ios: "#1a2422" },
-    light: { android: "#e6f2ef", desktop: "#f0f5f3", ios: "#e6f2ef" },
+    dark: { android: "#15221f", desktop: "#161c1b", ios: "#15221f" },
+    light: { android: "#d4ebe5", desktop: "#e8eeec", ios: "#d4ebe5" },
   };
 
   function resolveChrome(pref) {

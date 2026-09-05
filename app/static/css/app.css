@@ -1,7 +1,7 @@
 /*! Homelab Operations Copilot — dual chrome:
  *  android  → Material You 3 Expressive (mobile / <lg)
  *  desktop  → Fluent 2 (lg+)
- *  Seed: Homelab-Teal (#0D9488)
+ *  Seed: Homelab-Teal (#0D9488) + complementary ochre for structure
  */
 
 html {
@@ -18,40 +18,50 @@ html[data-theme="light"] {
   --bg: var(--background);
   --surface: var(--surface-container);
   --surface-2: var(--card);
+  --surface-raised: var(--card);
+  --surface-tinted: color-mix(in srgb, var(--primary) 12%, var(--card));
   --border: var(--outline);
   --text: var(--on-surface);
   --muted: var(--on-surface-variant);
   --accent: var(--primary);
   --accent-soft: var(--primary-container);
-  --success: #4ade80;
-  --partial: #fbbf24;
-  --warn: #e6b422;
-  --danger: #f2b8b5;
-  --info: #5eead4;
-  --on-primary: #003730;
+  --success: #5dca7a;
+  --partial: #e0a04a;
+  --warn: #d9a63a;
+  --danger: #e8a8a4;
+  --info: #5ec9be;
+  --tertiary: #d4b06a;
+  --on-primary: #003732;
   --motion: cubic-bezier(0.2, 0, 0, 1);
 }
 
 /* ═══════════════════════════════════════════
    Material You 3 Expressive (mobile)
-   Seed: Homelab-Teal — tonal, large shapes
+   Seed: Homelab-Teal — tonal layers, not gray slabs
    ═══════════════════════════════════════════ */
 html[data-chrome="android"] {
-  --background: #0e1514;
-  --surface-container: #1a2422;
-  --card: #24302d;
-  --outline: #3d4a47;
-  --on-surface: #e0e5e3;
-  --on-surface-variant: #b8c4c0;
-  --primary: #2dd4bf;
-  --primary-container: #0f766e;
-  --secondary: #2a3834;
-  --on-secondary: #c5e6df;
-  --on-primary: #003730;
-  --success: #4ade80;
-  --partial: #fbbf24;
-  --danger: #f2b8b5;
-  --info: #5eead4;
+  --background: #0b1211;
+  --surface-container-low: #12201d;
+  --surface-container: #15221f;
+  --surface-container-high: #1c2c28;
+  --card: #1c2c28;
+  --outline: #3d534e;
+  --on-surface: #e6eeeb;
+  --on-surface-variant: #b0c4be;
+  --primary: #3cb8ac;
+  --primary-container: #145a54;
+  --on-primary-container: #b8f0e6;
+  --secondary: #1a3f3a;
+  --on-secondary: #c5ebe4;
+  --on-primary: #003732;
+  --tertiary: #d4b06a;
+  --tertiary-container: #3a3220;
+  --on-tertiary: #3a2c10;
+  --success: #5dca7a;
+  --partial: #e0a04a;
+  --warn: #d9a63a;
+  --danger: #e8a8a4;
+  --info: #5ec9be;
   --radius: 1.75rem;          /* 28dp */
   --radius-ctrl: 1.25rem;
   --shadow: none;
@@ -65,21 +75,28 @@ html[data-chrome="android"] {
    Mica-ish chrome, compact radius, teal accent
    ═══════════════════════════════════════════ */
 html[data-chrome="desktop"] {
-  --background: #1a1f1e;
-  --surface-container: rgb(36 44 42 / 0.85);
-  --card: #252c2a;
-  --outline: #3a4340;
+  --background: #161c1b;
+  --surface-container-low: #1b2321;
+  --surface-container: rgb(28 38 36 / 0.88);
+  --surface-container-high: #24302d;
+  --card: #24302d;
+  --outline: #3d4a46;
   --on-surface: #f2f5f4;
-  --on-surface-variant: #c0cbc7;
-  --primary: #2dd4bf;
-  --primary-container: #0f766e;
-  --secondary: #2a3230;
-  --on-secondary: #e8f5f2;
-  --on-primary: #003730;
-  --success: #4ade80;
-  --partial: #fbbf24;
-  --danger: #f2b8b5;
-  --info: #5eead4;
+  --on-surface-variant: #b8c6c1;
+  --primary: #3cb8ac;
+  --primary-container: #145a54;
+  --on-primary-container: #b8f0e6;
+  --secondary: #223632;
+  --on-secondary: #d6efe9;
+  --on-primary: #003732;
+  --tertiary: #d4b06a;
+  --tertiary-container: #3a3220;
+  --on-tertiary: #3a2c10;
+  --success: #5dca7a;
+  --partial: #e0a04a;
+  --warn: #d9a63a;
+  --danger: #e8a8a4;
+  --info: #5ec9be;
   --radius: 0.5rem;           /* 8px */
   --radius-ctrl: 0.25rem;     /* 4px */
   --shadow: none;
@@ -90,42 +107,54 @@ html[data-chrome="desktop"] {
 
 html[data-theme="light"][data-chrome="android"] {
   color-scheme: light;
-  --background: #f4faf8;
-  --surface-container: #e6f2ef;
+  --background: #e8f4f0;
+  --surface-container-low: #f3faf7;
+  --surface-container: #d4ebe5;
+  --surface-container-high: #ffffff;
   --card: #ffffff;
-  --outline: #6b7c78;
-  --on-surface: #0f1a18;
-  --on-surface-variant: #3d4f4b;
-  --primary: #0d9488;
-  --primary-container: #99f6e4;
-  --secondary: #cce8e2;
-  --on-secondary: #0f1a18;
+  --outline: #5a756f;
+  --on-surface: #0d1916;
+  --on-surface-variant: #3a524d;
+  --primary: #0a6b63;
+  --primary-container: #6ed9cb;
+  --on-primary-container: #003732;
+  --secondary: #b5ddd5;
+  --on-secondary: #0d1916;
   --on-primary: #ffffff;
-  --success: #15803d;
+  --tertiary: #8a6820;
+  --tertiary-container: #f3e2b8;
+  --on-tertiary: #3a2c10;
+  --success: #14753a;
   --partial: #b45309;
   --danger: #b3261e;
-  --warn: #7d5700;
-  --info: #0f766e;
+  --warn: #8a5a00;
+  --info: #0b6b64;
 }
 
 html[data-theme="light"][data-chrome="desktop"] {
   color-scheme: light;
-  --background: #f0f5f3;
-  --surface-container: rgb(255 255 255 / 0.78);
+  --background: #e8eeec;
+  --surface-container-low: #f3f6f5;
+  --surface-container: rgb(255 255 255 / 0.84);
+  --surface-container-high: #ffffff;
   --card: #ffffff;
-  --outline: #d5e0dc;
+  --outline: #c5d4d0;
   --on-surface: #121a18;
-  --on-surface-variant: #4a5c57;
-  --primary: #0f766e;
-  --primary-container: #5eead4;
-  --secondary: #f3faf8;
+  --on-surface-variant: #3e524d;
+  --primary: #0a6b63;
+  --primary-container: #4db8ac;
+  --on-primary-container: #003732;
+  --secondary: #d5ebe6;
   --on-secondary: #121a18;
   --on-primary: #ffffff;
-  --success: #15803d;
+  --tertiary: #8a6820;
+  --tertiary-container: #f3e2b8;
+  --on-tertiary: #3a2c10;
+  --success: #14753a;
   --partial: #b45309;
   --danger: #c42b1c;
-  --warn: #9a6700;
-  --info: #0f766e;
+  --warn: #8a5a00;
+  --info: #0b6b64;
 }
 
 body {
@@ -139,16 +168,16 @@ body {
 
 html[data-chrome="android"] body {
   background:
-    radial-gradient(ellipse 90% 55% at 0% -5%, color-mix(in srgb, var(--primary) 22%, transparent), transparent 55%),
-    radial-gradient(ellipse 70% 45% at 100% 0%, color-mix(in srgb, var(--primary-container) 35%, transparent), transparent 50%),
+    radial-gradient(ellipse 90% 55% at 0% -5%, color-mix(in srgb, var(--primary) 26%, transparent), transparent 55%),
+    radial-gradient(ellipse 70% 45% at 100% 0%, color-mix(in srgb, var(--tertiary) 12%, transparent), transparent 52%),
     var(--background);
   padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom));
 }
 
 html[data-chrome="desktop"] body {
   background:
-    radial-gradient(ellipse 80% 50% at 8% -8%, color-mix(in srgb, var(--primary) 14%, transparent), transparent 55%),
-    radial-gradient(ellipse 55% 40% at 100% 0%, color-mix(in srgb, var(--primary-container) 26%, transparent), transparent 50%),
+    radial-gradient(ellipse 80% 50% at 8% -8%, color-mix(in srgb, var(--primary) 16%, transparent), transparent 55%),
+    radial-gradient(ellipse 55% 40% at 100% 0%, color-mix(in srgb, var(--tertiary) 8%, transparent), transparent 50%),
     var(--background);
 }
 
@@ -164,11 +193,24 @@ html[data-chrome="desktop"] body {
   border: 1px solid transparent;
 }
 
+.surface-raised {
+  background: var(--card);
+}
+
+.surface-tinted {
+  background: var(--surface-tinted);
+}
+
 html[data-chrome="desktop"] .surface {
   background: var(--card);
   border-color: var(--outline);
   border-radius: var(--radius);
   backdrop-filter: none;
+}
+
+html[data-chrome="desktop"] .surface-tinted {
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--outline));
 }
 
 .entity-card {
@@ -182,10 +224,11 @@ html[data-chrome="desktop"] .surface {
 html[data-chrome="android"] .entity-card {
   /* tonal elevation — no drop shadow */
   box-shadow: none;
+  background: var(--surface-container-high);
 }
 
 html[data-chrome="android"] .entity-card:active {
-  background: color-mix(in srgb, var(--primary) 12%, var(--card));
+  background: color-mix(in srgb, var(--primary) 14%, var(--card));
   transform: scale(0.985);
 }
 
@@ -195,11 +238,26 @@ html[data-chrome="desktop"] .entity-card {
 }
 
 html[data-chrome="desktop"] .entity-card:hover {
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
+}
+
+.entity-card[data-monitored="0"],
+html[data-chrome="android"] .entity-card[data-monitored="0"] {
+  background: color-mix(in srgb, var(--on-surface-variant) 10%, var(--card));
+}
+
+.entity-card[data-monitored="1"],
+html[data-chrome="android"] .entity-card[data-monitored="1"] {
   background: color-mix(in srgb, var(--primary) 8%, var(--card));
 }
 
-.entity-card[data-monitored="0"] {
-  opacity: 0.88;
+.entity-card:has(.host-select:checked),
+html[data-chrome="android"] .entity-card:has(.host-select:checked) {
+  background: color-mix(in srgb, var(--primary) 18%, var(--card));
+}
+
+html[data-chrome="desktop"] .entity-card:has(.host-select:checked) {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--outline));
 }
 
 .host-monitor {
@@ -366,45 +424,54 @@ html[data-chrome="desktop"] .choice-opt {
 }
 
 .chip-running {
-  background: color-mix(in srgb, var(--success) 22%, transparent);
+  background: color-mix(in srgb, var(--success) 28%, var(--card));
   color: var(--success);
 }
 .chip-stopped {
-  background: color-mix(in srgb, var(--danger) 22%, transparent);
+  background: color-mix(in srgb, var(--danger) 26%, var(--card));
   color: var(--danger);
 }
 .chip-unknown {
-  background: color-mix(in srgb, var(--on-surface-variant) 18%, transparent);
+  background: color-mix(in srgb, var(--on-surface-variant) 16%, var(--card));
   color: var(--muted);
 }
-.chip-paused {
-  background: color-mix(in srgb, var(--warn) 22%, transparent);
+.chip-paused,
+.chip-pending {
+  background: color-mix(in srgb, var(--warn) 26%, var(--card));
   color: var(--warn);
 }
 .chip-partial {
-  background: color-mix(in srgb, var(--partial) 22%, transparent);
+  background: color-mix(in srgb, var(--partial) 26%, var(--card));
   color: var(--partial);
 }
 .chip-info {
-  background: color-mix(in srgb, var(--info) 20%, transparent);
+  background: color-mix(in srgb, var(--info) 24%, var(--card));
   color: var(--info);
 }
 .chip-images {
-  background: color-mix(in srgb, var(--primary) 28%, transparent);
-  color: var(--primary);
+  background: color-mix(in srgb, var(--tertiary) 26%, var(--card));
+  color: var(--tertiary);
+}
+.chip-upgrade {
+  background: color-mix(in srgb, var(--tertiary) 28%, var(--card));
+  color: var(--tertiary);
+}
+.chip-monitor {
+  background: color-mix(in srgb, var(--on-surface-variant) 14%, var(--card));
+  color: var(--on-surface-variant);
 }
 
 /* Soft tonal row fills by status (Docker + Proxmox detail panels).
    Rail uses status dots instead — see .topo-rail-status-*.
    Soft mixes keep WCAG contrast on var(--text) / var(--muted). */
 .row-status-running {
-  background: color-mix(in srgb, var(--success) 15%, var(--card));
+  background: color-mix(in srgb, var(--success) 18%, var(--card));
 }
 
 .row-status-stopped,
 .row-status-exited,
 .row-status-dead {
-  background: color-mix(in srgb, var(--danger) 13%, var(--card));
+  background: color-mix(in srgb, var(--danger) 16%, var(--card));
 }
 
 .row-status-paused,
@@ -412,19 +479,24 @@ html[data-chrome="desktop"] .choice-opt {
 .row-status-error,
 .row-status-created,
 .row-status-restarting {
-  background: color-mix(in srgb, var(--warn) 13%, var(--card));
+  background: color-mix(in srgb, var(--warn) 16%, var(--card));
 }
 
 html[data-theme="light"] .chip-running { color: var(--success); }
+html[data-theme="light"] .chip-stopped { color: var(--danger); }
+html[data-theme="light"] .chip-paused,
+html[data-theme="light"] .chip-pending { color: var(--warn); }
+html[data-theme="light"] .chip-upgrade,
+html[data-theme="light"] .chip-images { color: var(--tertiary); }
 
 html[data-theme="light"] .row-status-running {
-  background: color-mix(in srgb, var(--success) 11%, var(--card));
+  background: color-mix(in srgb, var(--success) 14%, var(--card));
 }
 
 html[data-theme="light"] .row-status-stopped,
 html[data-theme="light"] .row-status-exited,
 html[data-theme="light"] .row-status-dead {
-  background: color-mix(in srgb, var(--danger) 10%, var(--card));
+  background: color-mix(in srgb, var(--danger) 12%, var(--card));
 }
 
 html[data-theme="light"] .row-status-paused,
@@ -432,7 +504,7 @@ html[data-theme="light"] .row-status-unknown,
 html[data-theme="light"] .row-status-error,
 html[data-theme="light"] .row-status-created,
 html[data-theme="light"] .row-status-restarting {
-  background: color-mix(in srgb, var(--warn) 10%, var(--card));
+  background: color-mix(in srgb, var(--warn) 12%, var(--card));
 }
 
 /* ── Buttons ──────────────────────────────── */
@@ -588,14 +660,14 @@ html[data-chrome="desktop"] .field {
 }
 
 html[data-chrome="android"] .app-header {
-  background: var(--surface-container);
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface-container));
   border-bottom: none;
 }
 
 html[data-chrome="desktop"] .app-header {
-  background: color-mix(in srgb, var(--card) 80%, transparent);
-  backdrop-filter: blur(1.25rem) saturate(1.4);
-  border-bottom: 1px solid var(--outline);
+  background: color-mix(in srgb, var(--card) 78%, transparent);
+  backdrop-filter: blur(1.25rem) saturate(1.45);
+  border-bottom: 1px solid color-mix(in srgb, var(--primary) 18%, var(--outline));
 }
 
 .app-header-inner {
@@ -630,8 +702,8 @@ html[data-chrome="desktop"] .app-header-inner {
   height: 1.75rem;
   flex-shrink: 0;
   border-radius: 0.55rem;
-  background: color-mix(in srgb, var(--primary-container) 55%, var(--card));
-  color: var(--primary);
+  background: var(--primary-container);
+  color: var(--on-primary-container);
   align-items: center;
   justify-content: center;
 }
@@ -695,7 +767,7 @@ html[data-chrome="desktop"] .nav-desktop {
 
 .nav-desktop a.active {
   color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
 }
 
 .nav-desktop a.active::after {
@@ -723,7 +795,7 @@ html[data-chrome="android"] .nav-android {
   z-index: 40;
   height: calc(var(--nav-h) + env(safe-area-inset-bottom));
   padding: 0.35rem 0.5rem env(safe-area-inset-bottom);
-  background: var(--surface-container);
+  background: color-mix(in srgb, var(--primary) 6%, var(--surface-container));
   border-top: 1px solid color-mix(in srgb, var(--outline) 40%, transparent);
   gap: 0;
 }
@@ -761,6 +833,11 @@ html[data-chrome="android"] .nav-android {
 .nav-android a.active .nav-icon {
   background: var(--secondary);
   color: var(--primary);
+}
+
+html[data-theme="light"][data-chrome="android"] .nav-android a.active .nav-icon {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
 }
 
 html[data-chrome="desktop"] .nav-android {
@@ -838,8 +915,8 @@ html[data-chrome="desktop"] .alert-tonal {
   gap: 0.75rem;
   border-radius: var(--radius);
   padding: 1rem 1.15rem;
-  background: color-mix(in srgb, var(--primary-container) 28%, var(--surface-container));
-  border: 1px solid color-mix(in srgb, var(--primary) 22%, transparent);
+  background: color-mix(in srgb, var(--primary-container) 36%, var(--surface-container));
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, transparent);
   color: var(--on-surface);
 }
 
@@ -866,6 +943,38 @@ html[data-chrome="desktop"] .alert-tonal {
   gap: 0.75rem;
 }
 
+.stat-tile[data-kpi="nodes"] .stat-tile-ico {
+  background: color-mix(in srgb, var(--primary) 22%, var(--card));
+  color: var(--primary);
+}
+
+.stat-tile[data-kpi="guests"] .stat-tile-ico {
+  background: color-mix(in srgb, var(--tertiary) 22%, var(--card));
+  color: var(--tertiary);
+}
+
+.stat-tile[data-kpi="guests"] .stat-value {
+  color: var(--tertiary);
+}
+
+.stat-tile[data-kpi="containers"] .stat-tile-ico {
+  background: color-mix(in srgb, var(--info) 22%, var(--card));
+  color: var(--info);
+}
+
+.stat-tile[data-kpi="containers"] .stat-value {
+  color: var(--info);
+}
+
+.stat-tile[data-kpi="modules"] .stat-tile-ico {
+  background: color-mix(in srgb, var(--success) 20%, var(--card));
+  color: var(--success);
+}
+
+.stat-tile[data-kpi="modules"] .stat-value {
+  color: var(--success);
+}
+
 .stat-tile-ico {
   display: inline-flex;
   align-items: center;
@@ -874,7 +983,7 @@ html[data-chrome="desktop"] .alert-tonal {
   height: 2.5rem;
   flex-shrink: 0;
   border-radius: 0.85rem;
-  background: color-mix(in srgb, var(--primary-container) 40%, var(--card));
+  background: color-mix(in srgb, var(--primary-container) 48%, var(--card));
   color: var(--primary);
 }
 
@@ -907,7 +1016,7 @@ html[data-chrome="desktop"] .stat-tile-ico {
   height: 2.5rem;
   flex-shrink: 0;
   border-radius: 0.85rem;
-  background: color-mix(in srgb, var(--primary-container) 42%, var(--card));
+  background: color-mix(in srgb, var(--primary) 20%, var(--card));
   color: var(--primary);
 }
 
@@ -1044,6 +1153,19 @@ html[data-chrome="desktop"] .module-card-ico {
   gap: 0.4rem;
 }
 
+html[data-chrome="android"] .module-subnav .btn-ghost {
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface-container));
+  border-color: transparent;
+}
+
+html[data-chrome="desktop"] .module-subnav .btn-ghost {
+  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+}
+
+html[data-chrome="android"] .module-subnav .btn-primary {
+  border-radius: 999px;
+}
+
 /* Desktop: command-row actions visible; Android uses FAB */
 html[data-chrome="android"] .actions-desktop .btn-primary {
   display: none;
@@ -1112,6 +1234,7 @@ html[data-chrome="desktop"] .topo-rail {
 html[data-chrome="android"] .topo-rail {
   border-radius: 1.25rem;
   border-color: transparent;
+  background: var(--surface-container);
 }
 
 .topo-rail-top {
@@ -1209,8 +1332,8 @@ html[data-chrome="android"] .topo-rail {
 }
 
 .topo-rail-node-select.is-selected {
-  background: color-mix(in srgb, var(--primary) 16%, var(--card));
-  box-shadow: inset 3px 0 0 var(--primary);
+  background: color-mix(in srgb, var(--primary) 20%, var(--card));
+  box-shadow: inset 2px 0 0 var(--primary);
   border-color: transparent;
 }
 
@@ -1219,11 +1342,14 @@ html[data-chrome="android"] .topo-rail-node-select {
 }
 
 html[data-chrome="android"] .topo-rail-node-select.is-selected {
-  background: color-mix(in srgb, var(--primary) 18%, var(--card));
+  background: var(--secondary);
+  color: var(--on-secondary);
+  box-shadow: none;
 }
 
 html[data-theme="light"][data-chrome="android"] .topo-rail-node-select.is-selected {
-  background: color-mix(in srgb, var(--primary-container) 72%, var(--card));
+  background: var(--primary-container);
+  color: var(--on-primary-container);
 }
 
 .topo-rail-node-static {
@@ -1249,6 +1375,10 @@ html[data-theme="light"][data-chrome="android"] .topo-rail-node-select.is-select
 .topo-rail-node-icon {
   flex-shrink: 0;
   color: var(--muted);
+}
+
+.topo-rail-node-select.is-selected .topo-rail-node-icon {
+  color: var(--primary);
 }
 
 .topo-rail-node-select .topo-rail-status {
@@ -1305,10 +1435,10 @@ html[data-theme="light"][data-chrome="android"] .topo-rail-node-select.is-select
   outline-offset: 1px;
 }
 
-/* Mockup selection: lavender/primary tonal fill + left accent bar (no status wash) */
+/* Fluent rail: tonal fill + 2px accent. Android: tonal container, no stripe. */
 .topo-rail-item.is-selected {
-  background: color-mix(in srgb, var(--primary) 16%, var(--card));
-  box-shadow: inset 3px 0 0 var(--primary);
+  background: color-mix(in srgb, var(--primary) 20%, var(--card));
+  box-shadow: inset 2px 0 0 var(--primary);
   border-color: transparent;
 }
 
@@ -1317,11 +1447,14 @@ html[data-chrome="android"] .topo-rail-item {
 }
 
 html[data-chrome="android"] .topo-rail-item.is-selected {
-  background: color-mix(in srgb, var(--primary) 18%, var(--card));
+  background: var(--secondary);
+  color: var(--on-secondary);
+  box-shadow: none;
 }
 
 html[data-theme="light"][data-chrome="android"] .topo-rail-item.is-selected {
-  background: color-mix(in srgb, var(--primary-container) 72%, var(--card));
+  background: var(--primary-container);
+  color: var(--on-primary-container);
 }
 
 .topo-rail-status {
@@ -1395,6 +1528,7 @@ html[data-theme="light"] .topo-rail-status-running {
 html[data-chrome="android"] .topo-detail {
   border-radius: 1.25rem;
   border-color: transparent;
+  background: var(--surface-container-low);
 }
 
 .topo-detail-empty {
@@ -1494,13 +1628,13 @@ html[data-chrome="android"] .topo-detail {
 
 /* Guest detail header: status via background (no chip) */
 .topo-detail-head.row-status-running {
-  background: color-mix(in srgb, var(--success) 15%, var(--card));
+  background: color-mix(in srgb, var(--success) 18%, var(--card));
 }
 
 .topo-detail-head.row-status-stopped,
 .topo-detail-head.row-status-exited,
 .topo-detail-head.row-status-dead {
-  background: color-mix(in srgb, var(--danger) 13%, var(--card));
+  background: color-mix(in srgb, var(--danger) 16%, var(--card));
 }
 
 .topo-detail-head.row-status-paused,
@@ -1508,17 +1642,17 @@ html[data-chrome="android"] .topo-detail {
 .topo-detail-head.row-status-error,
 .topo-detail-head.row-status-created,
 .topo-detail-head.row-status-restarting {
-  background: color-mix(in srgb, var(--warn) 13%, var(--card));
+  background: color-mix(in srgb, var(--warn) 16%, var(--card));
 }
 
 html[data-theme="light"] .topo-detail-head.row-status-running {
-  background: color-mix(in srgb, var(--success) 12%, var(--card));
+  background: color-mix(in srgb, var(--success) 14%, var(--card));
 }
 
 html[data-theme="light"] .topo-detail-head.row-status-stopped,
 html[data-theme="light"] .topo-detail-head.row-status-exited,
 html[data-theme="light"] .topo-detail-head.row-status-dead {
-  background: color-mix(in srgb, var(--danger) 12%, var(--card));
+  background: color-mix(in srgb, var(--danger) 13%, var(--card));
 }
 
 html[data-theme="light"] .topo-detail-head.row-status-paused,
@@ -1526,7 +1660,7 @@ html[data-theme="light"] .topo-detail-head.row-status-unknown,
 html[data-theme="light"] .topo-detail-head.row-status-error,
 html[data-theme="light"] .topo-detail-head.row-status-created,
 html[data-theme="light"] .topo-detail-head.row-status-restarting {
-  background: color-mix(in srgb, var(--warn) 12%, var(--card));
+  background: color-mix(in srgb, var(--warn) 13%, var(--card));
 }
 
 .topo-detail-title-row {
@@ -1727,7 +1861,7 @@ html[data-chrome="desktop"] .topo-fact {
 html[data-chrome="android"] .topo-detail-metrics {
   border-radius: 1rem;
   border-color: transparent;
-  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
 }
 
 .topo-metric-gauges {
@@ -1874,7 +2008,7 @@ html[data-theme="dark"] .topo-metric.level-ok .topo-metric-bar-fill {
 }
 
 .topo-spark[data-spark="net"] .topo-spark-line {
-  stroke: color-mix(in srgb, var(--primary) 40%, var(--success));
+  stroke: var(--info);
 }
 
 .topo-spark.is-empty .topo-spark-line {
@@ -1984,7 +2118,7 @@ html[data-theme="dark"] .topo-node-status-pill.status-running {
 html[data-chrome="android"] .topo-chart-card {
   border-radius: 1.1rem;
   border-color: transparent;
-  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
 }
 
 .topo-chart-head {
@@ -2023,11 +2157,11 @@ html[data-chrome="android"] .topo-chart-card {
 }
 
 .topo-chart-line-mem {
-  stroke: var(--success);
+  stroke: var(--tertiary);
 }
 
 .topo-chart-line-net {
-  stroke: color-mix(in srgb, var(--primary) 40%, var(--success));
+  stroke: var(--info);
 }
 
 .topo-chart-card.is-empty .topo-chart-line,
@@ -2271,7 +2405,7 @@ html[data-chrome="desktop"] .topo-inventory-toggle-inner {
 }
 
 html[data-theme="dark"] .topo-chart-line-mem {
-  stroke: var(--success);
+  stroke: var(--tertiary);
 }
 
 html[data-theme="dark"] .topo-storage-row.level-ok .topo-metric-bar-fill {
@@ -2582,13 +2716,13 @@ html[data-chrome="desktop"] .topo-docker-panel-orphan {
 
 /* Status tint wins over default docker-row surface */
 .topo-docker-chip.row-status-running {
-  background: color-mix(in srgb, var(--success) 15%, color-mix(in srgb, var(--background) 45%, var(--card)));
+  background: color-mix(in srgb, var(--success) 18%, color-mix(in srgb, var(--background) 40%, var(--card)));
 }
 
 .topo-docker-chip.row-status-stopped,
 .topo-docker-chip.row-status-exited,
 .topo-docker-chip.row-status-dead {
-  background: color-mix(in srgb, var(--danger) 13%, color-mix(in srgb, var(--background) 45%, var(--card)));
+  background: color-mix(in srgb, var(--danger) 16%, color-mix(in srgb, var(--background) 40%, var(--card)));
 }
 
 .topo-docker-chip.row-status-paused,
@@ -2596,17 +2730,17 @@ html[data-chrome="desktop"] .topo-docker-panel-orphan {
 .topo-docker-chip.row-status-error,
 .topo-docker-chip.row-status-created,
 .topo-docker-chip.row-status-restarting {
-  background: color-mix(in srgb, var(--warn) 13%, color-mix(in srgb, var(--background) 45%, var(--card)));
+  background: color-mix(in srgb, var(--warn) 16%, color-mix(in srgb, var(--background) 40%, var(--card)));
 }
 
 html[data-theme="light"] .topo-docker-chip.row-status-running {
-  background: color-mix(in srgb, var(--success) 11%, color-mix(in srgb, var(--background) 40%, var(--card)));
+  background: color-mix(in srgb, var(--success) 14%, color-mix(in srgb, var(--background) 35%, var(--card)));
 }
 
 html[data-theme="light"] .topo-docker-chip.row-status-stopped,
 html[data-theme="light"] .topo-docker-chip.row-status-exited,
 html[data-theme="light"] .topo-docker-chip.row-status-dead {
-  background: color-mix(in srgb, var(--danger) 10%, color-mix(in srgb, var(--background) 40%, var(--card)));
+  background: color-mix(in srgb, var(--danger) 12%, color-mix(in srgb, var(--background) 35%, var(--card)));
 }
 
 html[data-theme="light"] .topo-docker-chip.row-status-paused,
@@ -2614,7 +2748,7 @@ html[data-theme="light"] .topo-docker-chip.row-status-unknown,
 html[data-theme="light"] .topo-docker-chip.row-status-error,
 html[data-theme="light"] .topo-docker-chip.row-status-created,
 html[data-theme="light"] .topo-docker-chip.row-status-restarting {
-  background: color-mix(in srgb, var(--warn) 10%, color-mix(in srgb, var(--background) 40%, var(--card)));
+  background: color-mix(in srgb, var(--warn) 12%, color-mix(in srgb, var(--background) 35%, var(--card)));
 }
 
 .topo-docker-chip-name {
@@ -2664,8 +2798,8 @@ html[data-chrome="desktop"] .topo-docker-chip-img {
   width: 100%;
   box-sizing: border-box;
   border-radius: calc(var(--radius) * 0.55);
-  background: color-mix(in srgb, var(--primary) 6%, var(--card));
-  border: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
+  background: color-mix(in srgb, var(--primary) 11%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--outline));
   padding: 0.55rem 0.7rem 0.65rem;
 }
 
@@ -2878,7 +3012,7 @@ html[data-chrome="desktop"] .topo-stack-card {
 .topo-stack-dot-paused,
 .topo-stack-dot-created,
 .topo-stack-dot-restarting {
-  background: #c9a227;
+  background: var(--warn);
 }
 
 .topo-singles {
