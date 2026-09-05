@@ -68,6 +68,7 @@ class ImageUpdateApplyPayload(BaseModel):
     project: str | None = None
     names: list[str] = Field(default_factory=list)
     restart: bool = True
+    prune: bool = True
     confirm: bool = False
 
 
@@ -307,6 +308,7 @@ async def docker_image_updates_apply(
             project=payload.project,
             names=payload.names,
             restart=payload.restart,
+            prune=payload.prune,
         )
     except docker_ctl.DockerControlError as exc:
         raise _docker_http_error(exc) from exc

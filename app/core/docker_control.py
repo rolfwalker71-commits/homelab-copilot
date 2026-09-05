@@ -15,6 +15,27 @@ from typing import Any, Literal
 import asyncssh
 
 from app.config import Settings
+from app.core.image_digest import (
+    cmd_compose_project_labels,
+    cmd_remote_manifest_inspect,
+    first_digest,
+    image_digest_status,
+    local_digest_set,
+    parse_compose_project_label_lines,
+    parse_remote_inspect_digests,
+)
+from app.core.image_prune import (
+    cmd_dangling_image_prune,
+    cmd_in_use_image_ids,
+    cmd_named_image_ids,
+    cmd_project_image_ids,
+    cmd_rmi_unused,
+    compose_projects_for_container_names,
+    format_unused_image_cleanup_message,
+    parse_image_id_lines,
+    parse_image_prune_output,
+    replaced_image_ids_to_remove,
+)
 from app.core.models import TopologyEntity, TopologySnapshot
 from app.core.ssh_endpoint import find_topology_entity, resolve_ssh_endpoint
 
@@ -1125,7 +1146,7 @@ async def scan_image_updates(
     project: str | None = None,
     inspect_timeout: float = 90.0,
 ) -> dict[str, Any]:
-    """Compare local RepoDigests vs remote manifests (no pull, no restart)."""
+    """Compare local RepoDigests / image id vs registry manifests (no pull)."""
     ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
     if ip is None:
         raise DockerControlError(
@@ -1213,41 +1234,37 @@ async def scan_image_updates(
 
     rows: list[dict[str, Any]] = []
     for cname, image, image_id in specs:
-        local_digests = digest_by_ref.get(image_id) or digest_by_ref.get(image) or []
-        local_sha = _local_sha_from_digests(local_digests)
+        raw_local = digest_by_ref.get(image_id) or digest_by_ref.get(image) or []
+        local_set = local_digest_set(repo_digests=raw_local, image_id=image_id)
+        local_sha = first_digest(local_set) or _local_sha_from_digests(raw_local)
+        remote_set: set[str] = set()
         remote_sha = ""
         newer = False
         err = ""
         if not image or image.startswith("sha256:"):
             err = "Kein Tag — Vergleich nicht möglich."
-        elif not local_sha:
-            err = _LOCAL_ONLY_STATUS
         else:
-            remote_cmd = (
-                "docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "
-                + shlex.quote(image)
-                + " 2>/dev/null || docker manifest inspect --verbose "
-                + shlex.quote(image)
-                + " 2>/dev/null | head -c 400"
-            )
             r_out, r_err, r_code = await _ssh_run(
                 settings,
                 ip,
-                remote_cmd,
+                cmd_remote_manifest_inspect(image),
                 port=port,
                 username=user,
                 cmd_timeout=inspect_timeout,
             )
             text = (r_out or "").strip()
-            if r_code == 0 and "sha256:" in text:
-                for token in text.replace('"', " ").replace("'", " ").split():
-                    if token.startswith("sha256:"):
-                        remote_sha = token.split(",", 1)[0]
-                        break
-            if not remote_sha:
-                err = (r_err or text or "Remote-Manifest nicht lesbar").strip()[:180]
-            elif local_sha != remote_sha:
+            if r_code == 0:
+                remote_set = parse_remote_inspect_digests(text)
+                remote_sha = first_digest(remote_set)
+            status = image_digest_status(local_set, remote_set)
+            if status == "update":
                 newer = True
+            elif status == "unknown":
+                remote_err = (r_err or "").strip()
+                if remote_err and "sha256:" not in remote_err.lower():
+                    err = remote_err[:180]
+                else:
+                    err = _LOCAL_ONLY_STATUS
         stack = ""
         for c in containers:
             if c.name == cname or c.name.lstrip("/") == cname:
@@ -1289,6 +1306,23 @@ async def scan_image_updates(
     }
 
 
+def _compose_name_to_project(
+    snapshot: TopologySnapshot | None, parent_id: str
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    if snapshot is None:
+        return mapping
+    for container in snapshot.containers:
+        if container.parent_id != parent_id:
+            continue
+        project = (container.labels or {}).get("com.docker.compose.project") or ""
+        if not project:
+            continue
+        mapping[container.name] = project
+        mapping[container.name.lstrip("/")] = project
+    return mapping
+
+
 async def apply_image_updates(
     settings: Settings,
     *,
@@ -1297,10 +1331,15 @@ async def apply_image_updates(
     project: str | None = None,
     names: list[str] | None = None,
     restart: bool = True,
+    prune: bool = True,
     pull_timeout: float = 1800.0,
     on_line: Callable[[str], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
-    """Pull newer images after explicit confirmation. Restart only if requested."""
+    """Pull newer images after explicit confirmation. Restart only if requested.
+
+    After a successful recreate (compose up), unused images from this upgrade
+    are pruned best-effort — a prune failure does not fail the upgrade.
+    """
     ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
     if ip is None:
         raise DockerControlError(
@@ -1333,14 +1372,162 @@ async def apply_image_updates(
             cmd_timeout=pull_timeout,
         )
 
+    async def _run_quiet(
+        cmd: str, *, cmd_timeout: float | None = None
+    ) -> tuple[str, str, int]:
+        return await _ssh_run(
+            settings,
+            ip,
+            cmd,
+            port=port,
+            username=user,
+            cmd_timeout=cmd_timeout if cmd_timeout is not None else min(90.0, pull_timeout),
+        )
+
+    logs: list[str] = []
+
+    async def _emit(text: str) -> None:
+        line = (text or "").strip()
+        if not line:
+            return
+        logs.append(line)
+        if not on_line:
+            return
+        result = on_line(line)
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def _collect_ids(cmd: str) -> set[str]:
+        stdout, _stderr, code = await _run_quiet(cmd)
+        if code != 0:
+            return set()
+        return parse_image_id_lines(stdout)
+
+    async def _cleanup_unused_images(
+        *,
+        previous_ids: set[str],
+        current_ids_cmd: str,
+    ) -> dict[str, Any]:
+        """Dangling prune + unused previous tags. Never fails the upgrade."""
+        try:
+            await _emit("Ungenutzte Images entfernen…")
+            current_ids = await _collect_ids(current_ids_cmd)
+            in_use_ids = await _collect_ids(cmd_in_use_image_ids())
+            to_remove = replaced_image_ids_to_remove(
+                previous_ids=previous_ids,
+                current_ids=current_ids,
+                in_use_ids=in_use_ids,
+            )
+            replaced_removed = 0
+            rmi_cmd = cmd_rmi_unused(to_remove)
+            if rmi_cmd:
+                stdout, stderr, code = await _run_quiet(rmi_cmd, cmd_timeout=min(180.0, pull_timeout))
+                parsed_rmi = parse_image_prune_output(f"{stdout or ''}\n{stderr or ''}")
+                if code == 0:
+                    replaced_removed = len(to_remove)
+                else:
+                    replaced_removed = int(parsed_rmi["untagged"] or 0)
+
+            stdout, stderr, pcode = await _run_quiet(
+                cmd_dangling_image_prune(),
+                cmd_timeout=min(180.0, pull_timeout),
+            )
+            prune_text = f"{stdout or ''}\n{stderr or ''}"
+            parsed = parse_image_prune_output(prune_text)
+            warning = None
+            if pcode != 0:
+                warning = (stderr or stdout or f"exit {pcode}").strip()[:180]
+            message = format_unused_image_cleanup_message(
+                dangling_deleted=int(parsed["deleted"] or 0),
+                dangling_untagged=int(parsed["untagged"] or 0),
+                replaced_removed=replaced_removed,
+                reclaimed=str(parsed.get("reclaimed") or ""),
+                warning=warning,
+            )
+            await _emit(message)
+            return {
+                "ok": warning is None,
+                "deleted": int(parsed["deleted"] or 0) + replaced_removed,
+                "reclaimed": parsed.get("reclaimed") or "",
+                "message": message,
+                "warning": warning,
+            }
+        except DockerControlError as exc:
+            message = format_unused_image_cleanup_message(warning=exc.message)
+            await _emit(message)
+            return {
+                "ok": False,
+                "deleted": 0,
+                "reclaimed": "",
+                "message": message,
+                "warning": exc.message,
+            }
+        except Exception as exc:
+            message = format_unused_image_cleanup_message(warning=str(exc))
+            await _emit(message)
+            logger.warning("image prune after upgrade failed: %s", exc)
+            return {
+                "ok": False,
+                "deleted": 0,
+                "reclaimed": "",
+                "message": message,
+                "warning": str(exc),
+            }
+
     safe_names = [validate_docker_name(n) for n in (names or []) if n]
     project = (project or "").strip() or None
     if project:
         validate_docker_name(project, kind="Compose-Projekt")
 
-    logs: list[str] = []
+    stacks_to_upgrade: list[str] = []
+    names_to_upgrade: list[str] = list(safe_names)
     if project:
-        cmd = f"docker compose -p {shlex.quote(project)} pull"
+        stacks_to_upgrade = [project]
+        names_to_upgrade = []
+    elif safe_names:
+        name_to_project = _compose_name_to_project(snapshot, parent_id)
+        live_out, _live_err, live_code = await _run_quiet(
+            cmd_compose_project_labels(safe_names)
+        )
+        if live_code == 0:
+            name_to_project.update(parse_compose_project_label_lines(live_out))
+        projects, leftover = compose_projects_for_container_names(
+            name_to_project, safe_names
+        )
+        valid_stacks: list[str] = []
+        for stack_name in projects:
+            try:
+                valid_stacks.append(
+                    validate_docker_name(stack_name, kind="Compose-Projekt")
+                )
+            except DockerControlError:
+                for name in safe_names:
+                    mapped = (
+                        name_to_project.get(name)
+                        or name_to_project.get(name.lstrip("/"))
+                        or ""
+                    )
+                    if mapped == stack_name and name not in leftover:
+                        leftover.append(name)
+        stacks_to_upgrade = valid_stacks
+        names_to_upgrade = leftover
+
+    if not stacks_to_upgrade and not names_to_upgrade:
+        raise DockerControlError(
+            "Bitte Container-Namen oder ein Compose-Projekt angeben.",
+            status_code=400,
+        )
+
+    prune_results: list[dict[str, Any]] = []
+    pulled: list[str] = []
+    last_project: str | None = project
+
+    for stack in stacks_to_upgrade:
+        last_project = stack
+        previous_ids: set[str] = set()
+        if prune and restart:
+            previous_ids = await _collect_ids(cmd_project_image_ids(stack))
+        cmd = f"docker compose -p {shlex.quote(stack)} pull"
         stdout, stderr, code = await _run(cmd, stream=True)
         logs.append((stdout or stderr or "").strip()[:4000])
         if code != 0:
@@ -1349,7 +1536,9 @@ async def apply_image_updates(
                 status_code=502,
             )
         if restart:
-            rcmd = f"docker compose -p {shlex.quote(project)} up -d"
+            rcmd = (
+                f"docker compose -p {shlex.quote(stack)} up -d --force-recreate"
+            )
             stdout, stderr, code = await _run(rcmd, stream=True)
             logs.append((stdout or stderr or "").strip()[:2000])
             if code != 0:
@@ -1357,70 +1546,135 @@ async def apply_image_updates(
                     f"Stack-Neustart fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
                     status_code=502,
                 )
+            if prune:
+                prune_results.append(
+                    await _cleanup_unused_images(
+                        previous_ids=previous_ids,
+                        current_ids_cmd=cmd_project_image_ids(stack),
+                    )
+                )
+
+    if names_to_upgrade:
+        previous_ids = set()
+        if prune and restart:
+            previous_ids = await _collect_ids(cmd_named_image_ids(names_to_upgrade))
+        for name in names_to_upgrade:
+            img_cmd = (
+                "docker inspect --format '{{.Config.Image}}' -- " + shlex.quote(name)
+            )
+            stdout, stderr, code = await _ssh_run(
+                settings,
+                ip,
+                img_cmd,
+                port=port,
+                username=user,
+                cmd_timeout=min(60.0, pull_timeout),
+            )
+            image = (stdout or "").strip()
+            if code != 0 or not image:
+                raise DockerControlError(
+                    f"Image für „{name}“ nicht lesbar: {(stderr or stdout or '').strip()[:180]}",
+                    status_code=502,
+                )
+            stdout, stderr, code = await _run(
+                f"docker pull -- {shlex.quote(image)}", stream=True
+            )
+            logs.append((stdout or stderr or "").strip()[:2000])
+            if code != 0:
+                raise DockerControlError(
+                    f"docker pull {image} fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                    status_code=502,
+                )
+            pulled.append(image)
+            if restart:
+                stdout, stderr, code = await _run(
+                    f"docker restart -- {shlex.quote(name)}", stream=True
+                )
+                logs.append((stdout or stderr or "").strip()[:800])
+                if code != 0:
+                    raise DockerControlError(
+                        f"Neustart „{name}“ fehlgeschlagen: {(stderr or stdout or '').strip()[:200]}",
+                        status_code=502,
+                    )
+        if prune and restart:
+            prune_results.append(
+                await _cleanup_unused_images(
+                    previous_ids=previous_ids,
+                    current_ids_cmd=cmd_named_image_ids(names_to_upgrade),
+                )
+            )
+
+    prune_info = prune_results[-1] if len(prune_results) == 1 else None
+    if len(prune_results) > 1:
+        warnings = [p.get("warning") for p in prune_results if p.get("warning")]
+        deleted = sum(int(p.get("deleted") or 0) for p in prune_results)
+        reclaimed = next(
+            (p.get("reclaimed") for p in reversed(prune_results) if p.get("reclaimed")),
+            "",
+        )
+        warning = "; ".join(str(w) for w in warnings if w) or None
+        message = (
+            format_unused_image_cleanup_message(warning=warning)
+            if warning
+            else format_unused_image_cleanup_message(
+                dangling_deleted=deleted,
+                reclaimed=str(reclaimed or ""),
+            )
+        )
+        prune_info = {
+            "ok": warning is None,
+            "deleted": deleted,
+            "reclaimed": reclaimed or "",
+            "message": message,
+            "warning": warning,
+        }
+
+    if stacks_to_upgrade and not names_to_upgrade:
+        stack_label = stacks_to_upgrade[0] if len(stacks_to_upgrade) == 1 else None
+        if stack_label:
+            base = (
+                f"Stack „{stack_label}“ Images geholt"
+                + (" und neu gestartet." if restart else " (ohne Neustart).")
+            )
+        else:
+            base = (
+                f"{len(stacks_to_upgrade)} Stack(s) Images geholt"
+                + (" und neu gestartet." if restart else " (ohne Neustart).")
+            )
+        if prune_info and prune_info.get("message"):
+            base = f"{base} {prune_info['message']}"
         return {
             "ok": True,
             "parent_id": parent_id,
-            "project": project,
+            "project": last_project or stack_label,
+            "projects": stacks_to_upgrade,
             "restarted": restart,
+            "pruned": bool(prune and restart),
+            "prune": prune_info,
             "log": "\n".join(x for x in logs if x),
-            "message": (
-                f"Stack „{project}“ Images geholt"
-                + (" und neu gestartet." if restart else " (ohne Neustart).")
-            ),
+            "message": base,
         }
 
-    if not safe_names:
-        raise DockerControlError(
-            "Bitte Container-Namen oder ein Compose-Projekt angeben.",
-            status_code=400,
+    message = (
+        f"{len(pulled)} Image(s) geholt"
+        + (" und Container neu gestartet." if restart else " (ohne Neustart).")
+    )
+    if stacks_to_upgrade:
+        message = (
+            f"{len(stacks_to_upgrade)} Stack(s) und {len(pulled)} Image(s) geholt"
+            + (" und neu gestartet." if restart else " (ohne Neustart).")
         )
-    pulled: list[str] = []
-    for name in safe_names:
-        img_cmd = (
-            "docker inspect --format '{{.Config.Image}}' -- " + shlex.quote(name)
-        )
-        stdout, stderr, code = await _ssh_run(
-            settings,
-            ip,
-            img_cmd,
-            port=port,
-            username=user,
-            cmd_timeout=min(60.0, pull_timeout),
-        )
-        image = (stdout or "").strip()
-        if code != 0 or not image:
-            raise DockerControlError(
-                f"Image für „{name}“ nicht lesbar: {(stderr or stdout or '').strip()[:180]}",
-                status_code=502,
-            )
-        stdout, stderr, code = await _run(
-            f"docker pull -- {shlex.quote(image)}", stream=True
-        )
-        logs.append((stdout or stderr or "").strip()[:2000])
-        if code != 0:
-            raise DockerControlError(
-                f"docker pull {image} fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
-                status_code=502,
-            )
-        pulled.append(image)
-        if restart:
-            stdout, stderr, code = await _run(
-                f"docker restart -- {shlex.quote(name)}", stream=True
-            )
-            logs.append((stdout or stderr or "").strip()[:800])
-            if code != 0:
-                raise DockerControlError(
-                    f"Neustart „{name}“ fehlgeschlagen: {(stderr or stdout or '').strip()[:200]}",
-                    status_code=502,
-                )
+    if prune_info and prune_info.get("message"):
+        message = f"{message} {prune_info['message']}"
     return {
         "ok": True,
         "parent_id": parent_id,
+        "project": last_project,
+        "projects": stacks_to_upgrade,
         "images": pulled,
         "restarted": restart,
+        "pruned": bool(prune and restart),
+        "prune": prune_info,
         "log": "\n".join(x for x in logs if x),
-        "message": (
-            f"{len(pulled)} Image(s) geholt"
-            + (" und Container neu gestartet." if restart else " (ohne Neustart).")
-        ),
+        "message": message,
     }

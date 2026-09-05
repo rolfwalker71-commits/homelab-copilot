@@ -163,7 +163,7 @@
       data-image-scan
       data-parent-id="{{ item.containers[0].parent_id }}"
       {% if item.compose_project %}data-project="{{ item.compose_project }}"{% endif %}
-      title="Neuere Images prüfen">Images</button>
+      title="Images prüfen (Digest-Vergleich, kein Pull)">Images</button>
     <button type="button" class="btn btn-ghost btn-xs topo-stack-restart"
       data-compose-restart
       data-parent-id="{{ item.containers[0].parent_id }}"
@@ -916,7 +916,7 @@
             <button type="button" class="btn btn-ghost btn-sm"
               data-image-scan
               data-parent-id="{{ g.id }}"
-              title="Docker-Images prüfen">
+              title="Images prüfen (Digest-Vergleich, kein Pull)">
               Images prüfen
             </button>
           </div>
@@ -2502,7 +2502,8 @@
       const lines = updates.map((u) => (u.stack ? u.stack + '/' : '') + u.name + ' · ' + (u.image || '')).join('\n');
       if (!confirm(
         (data.count || updates.length) + ' Image-Update(s) gefunden:\n\n' +
-        lines + '\n\nJetzt pullen und Container/Stack neu starten?'
+        lines + '\n\nJetzt pullen und Container/Stack neu starten?\n\n' +
+        'Ungenutzte Images danach entfernen (alte Versionen dieses Stacks und hängende Images — nichts, was andere Container noch nutzen).'
       )) return;
       const apply = await fetch('/api/docker/image-updates/apply', {
         method: 'POST',
@@ -2512,6 +2513,7 @@
           project: project || null,
           names: project ? [] : updates.map((u) => u.name),
           restart: true,
+          prune: true,
           confirm: true,
         }),
       });
