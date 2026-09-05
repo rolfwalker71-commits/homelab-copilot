@@ -25,6 +25,12 @@
     <span class="nav-ico">{{ ico('schedule', 15) }}</span>
     Zeitplan
   </a>
+  <a href="/modules/backup_verifier/check"
+     class="btn btn-sm {% if active_view == 'check' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'check' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('check', 15) }}</span>
+    Prüfen
+  </a>
   <a href="/modules/backup_verifier/history"
      class="btn btn-sm {% if active_view == 'history' %}btn-primary{% else %}btn-ghost{% endif %}"
      {% if active_view == 'history' %}aria-current="page"{% endif %}>

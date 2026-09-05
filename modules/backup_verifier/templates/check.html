@@ -1,0 +1,449 @@
+{% extends "base.html" %}
+{% block title %}Backups prüfen — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-6 animate-in">
+  <p class="eyebrow">Modul · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Backups prüfen</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)]">
+    Compose-Stacks ohne Zeitplan auswählen, Startzeit setzen, nicht überlappende Slots berechnen
+    und in einem Schritt anlegen. Es wird kein Backup sofort gestartet.
+  </p>
+</section>
+
+{% include "_subnav.html" %}
+
+<div id="setup-banner" class="mb-6 hidden animate-in setup-banner text-sm" role="status"></div>
+<p id="check-status" class="sr-only" role="status" aria-live="polite"></p>
+
+<article class="surface p-4 sm:p-5 animate-in">
+  <div class="flex flex-wrap items-start justify-between gap-3">
+    <div class="min-w-0">
+      <h2 class="font-display text-lg font-bold leading-snug break-words">Ohne Zeitplan</h2>
+      <p class="mt-1 text-sm text-[var(--muted)]">
+        Stacks aus der Topologie, für die noch kein Zeitplan (parent + Projekt) existiert.
+      </p>
+    </div>
+    <div class="flex flex-wrap gap-2">
+      <button type="button" id="btn-select-all" class="btn btn-ghost btn-sm">Alle wählen</button>
+      <button type="button" id="btn-select-none" class="btn btn-ghost btn-sm">Keine</button>
+    </div>
+  </div>
+  <p id="missing-count" class="mt-3 text-sm text-[var(--muted)]">Laden…</p>
+  <ul id="missing-list" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2"></ul>
+</article>
+
+<article class="surface p-4 sm:p-5 mt-4 animate-in">
+  <h2 class="font-display text-lg font-bold leading-snug">Bereits eingeplant</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">
+    Diese Slots bleiben belegt (aktive Zeitpläne: Fenster = gewählter Abstand). Nur zur Orientierung.
+  </p>
+  <ul id="scheduled-list" class="mt-3 space-y-2 text-sm"></ul>
+</article>
+
+<article class="surface p-4 sm:p-5 mt-4 animate-in">
+  <h2 class="font-display text-lg font-bold leading-snug">Zeitfenster planen</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">
+    Erster Slot zur Startzeit, jeder weitere plus Abstand. Belegte Fenster werden übersprungen.
+    Nach Mitternacht rollt die Uhrzeit auf den nächsten Kalendertag (00:00 …), gleiches Preset.
+  </p>
+  <form id="plan-form" class="mt-4 space-y-3" novalidate>
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 max-w-3xl">
+      <div>
+        <label class="label" for="plan-preset">Rhythmus</label>
+        <select id="plan-preset" class="field">
+          <option value="daily">Täglich</option>
+          <option value="weekly">Wöchentlich</option>
+        </select>
+      </div>
+      <div>
+        <label class="label" for="plan-time">Startzeit (Europe/Berlin)</label>
+        <input id="plan-time" class="field" type="time" value="03:00" required />
+      </div>
+      <div>
+        <label class="label" for="plan-interval">Abstand (Minuten)</label>
+        <input id="plan-interval" class="field" type="number" min="1" max="180" value="10" required />
+      </div>
+    </div>
+    <div id="plan-weekly-wrap" class="hidden max-w-xl">
+      <label class="label" for="plan-weekday">Wochentag</label>
+      <select id="plan-weekday" class="field">
+        <option value="0">Sonntag</option>
+        <option value="1">Montag</option>
+        <option value="2">Dienstag</option>
+        <option value="3">Mittwoch</option>
+        <option value="4">Donnerstag</option>
+        <option value="5">Freitag</option>
+        <option value="6">Samstag</option>
+      </select>
+    </div>
+    <div>
+      <p class="label" id="plan-engine-label">Engine (für alle neuen Pläne)</p>
+      <div class="flex h-10 min-h-10 max-w-xl rounded-full bg-[var(--surface)] p-0.5" role="radiogroup" aria-labelledby="plan-engine-label">
+        <button type="button" id="plan-engine-tar" class="btn engine-btn h-full min-h-0 flex-1 rounded-full px-3 text-sm font-medium btn-primary" aria-pressed="true">Voll (tar)</button>
+        <button type="button" id="plan-engine-restic" class="btn engine-btn h-full min-h-0 flex-1 rounded-full px-3 text-sm font-medium btn-ghost" aria-pressed="false">Incremental (restic)</button>
+      </div>
+    </div>
+    <fieldset class="max-w-3xl rounded-[var(--radius)] border border-[var(--border)] p-3 sm:p-4">
+      <legend class="px-1 text-sm font-medium">Aufbewahrung (gilt für den ganzen Satz)</legend>
+      <p class="text-sm text-[var(--muted)]">Wie beim einzelnen Zeitplan: letzte N und wöchentliche Fulls. Full-alle-N nur bei restic.</p>
+      <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div id="plan-full-wrap" class="hidden">
+          <label class="label" for="plan-full-days">Full alle N Tage</label>
+          <input id="plan-full-days" class="field" type="number" min="1" max="365" value="7" />
+        </div>
+        <div>
+          <label class="label" for="plan-keep-last">Behalte letzte N Snapshots</label>
+          <input id="plan-keep-last" class="field" type="number" min="1" max="365" value="14" required />
+        </div>
+        <div>
+          <label class="label" for="plan-keep-weekly">Behalte wöchentliche Fulls</label>
+          <input id="plan-keep-weekly" class="field" type="number" min="0" max="104" value="8" required />
+        </div>
+      </div>
+    </fieldset>
+    <button type="submit" id="btn-compute" class="btn btn-primary">Plan berechnen</button>
+  </form>
+</article>
+
+<article id="preview-card" class="surface p-4 sm:p-5 mt-4 hidden animate-in">
+  <h2 class="font-display text-lg font-bold leading-snug">Vorschau</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">
+    „Übernehmen“ abwählen, wenn ein Stack doch nicht geplant werden soll.
+  </p>
+  <ul id="preview-list" class="mt-3 space-y-2"></ul>
+  <div class="mt-4 flex flex-wrap gap-2">
+    <button type="button" id="btn-apply" class="btn btn-primary">Zeitpläne anlegen</button>
+    <a class="btn btn-ghost" href="/modules/backup_verifier/schedule">Zum Zeitplan</a>
+  </div>
+</article>
+
+<dialog id="apply-dialog" class="logs-dialog" aria-labelledby="apply-dialog-title">
+  <form method="dialog" class="logs-dialog-form" id="apply-form">
+    <header class="logs-dialog-head">
+      <h2 id="apply-dialog-title" class="logs-dialog-title dialog-title-wrap">Zeitpläne anlegen</h2>
+      <button type="submit" class="btn btn-ghost btn-sm" value="cancel">Abbrechen</button>
+    </header>
+    <div class="p-4 space-y-3 text-sm">
+      <p>Es werden nur Zeitpläne gespeichert — kein Backup startet jetzt.</p>
+      <ul id="apply-summary" class="space-y-1.5 break-words leading-snug"></ul>
+      <p id="apply-retention" class="rounded-2xl bg-[var(--surface)] px-3 py-2 text-[var(--muted)]"></p>
+      <button type="button" id="apply-go" class="btn btn-primary w-full min-h-12">Jetzt anlegen</button>
+      <p id="apply-msg" class="text-[var(--muted)]" role="status"></p>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const API = '/api/modules/backup_verifier';
+  let gaps = { missing: [], scheduled: [], defaults: {} };
+  let lastPlan = [];
+  let planEngine = 'tar';
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function setStatus(msg) {
+    const el = document.getElementById('check-status');
+    if (el) el.textContent = msg || '';
+  }
+
+  function hostLabel(s) {
+    return String(s && (s.guest_name || s.parent_id) || '').trim();
+  }
+
+  function stackHostHtml(s) {
+    const stack = esc(s && s.stack || 'Stack');
+    const host = hostLabel(s);
+    const ip = String(s && s.guest_ip || '').trim();
+    const title = [s && s.parent_id, ip].filter(Boolean).join(' · ');
+    let html = '<strong class="break-words leading-snug">' + stack + '</strong>';
+    if (host) {
+      html += ' · <span title="' + esc(title) + '">' + esc(host) + '</span>';
+    }
+    return html;
+  }
+
+  function stackKey(s) {
+    return encodeURIComponent(s.parent_id) + '|' + encodeURIComponent(s.stack);
+  }
+
+  function setEngine(next) {
+    planEngine = next === 'restic' ? 'restic' : 'tar';
+    const tarBtn = document.getElementById('plan-engine-tar');
+    const resticBtn = document.getElementById('plan-engine-restic');
+    const fullWrap = document.getElementById('plan-full-wrap');
+    if (tarBtn) {
+      tarBtn.classList.toggle('btn-primary', planEngine === 'tar');
+      tarBtn.classList.toggle('btn-ghost', planEngine !== 'tar');
+      tarBtn.setAttribute('aria-pressed', planEngine === 'tar' ? 'true' : 'false');
+    }
+    if (resticBtn) {
+      resticBtn.classList.toggle('btn-primary', planEngine === 'restic');
+      resticBtn.classList.toggle('btn-ghost', planEngine !== 'restic');
+      resticBtn.setAttribute('aria-pressed', planEngine === 'restic' ? 'true' : 'false');
+    }
+    if (fullWrap) fullWrap.classList.toggle('hidden', planEngine !== 'restic');
+  }
+
+  function syncPreset() {
+    const weekly = document.getElementById('plan-preset').value === 'weekly';
+    document.getElementById('plan-weekly-wrap').classList.toggle('hidden', !weekly);
+  }
+
+  function invalidatePreview() {
+    lastPlan = [];
+    document.getElementById('preview-card').classList.add('hidden');
+  }
+
+  function selectedMissing() {
+    return [...document.querySelectorAll('#missing-list input[type="checkbox"]:checked')].map((el) => ({
+      parent_id: el.dataset.parentId,
+      stack: el.dataset.stack,
+      guest_name: el.dataset.guest || '',
+    }));
+  }
+
+  function retentionText() {
+    const keepLast = document.getElementById('plan-keep-last').value || '14';
+    const keepWeekly = document.getElementById('plan-keep-weekly').value || '8';
+    const fullDays = document.getElementById('plan-full-days').value || '7';
+    const bits = [
+      planEngine === 'restic' ? 'Incremental (restic)' : 'Voll (tar)',
+      'behalte letzte ' + keepLast,
+      'wöchentlich ' + keepWeekly,
+    ];
+    if (planEngine === 'restic') bits.push('Full alle ' + fullDays + ' Tage');
+    return bits.join(' · ');
+  }
+
+  async function loadStatus() {
+    const res = await fetch(API + '/status');
+    const data = await res.json();
+    const banner = document.getElementById('setup-banner');
+    const parts = [];
+    if (!data.ssh_key_present) parts.push('SSH-Schlüssel fehlt — Remote-Backups nicht möglich.');
+    const pipe = (data.pipeline || []).filter((p) => p.enabled);
+    if (pipe.length) parts.push('Pipeline: ' + pipe.map((p) => p.label || p.kind).join(' → '));
+    else parts.push('Keine Ziele — unter „Ziele“ konfigurieren.');
+    if (data.scheduler === 'in_process') {
+      parts.push('Scheduler: in der App (Europe/Berlin)' + (data.scheduler_running === false ? ' — nicht aktiv, Container prüfen.' : '.'));
+    }
+    if (parts.length) {
+      banner.classList.remove('hidden');
+      banner.innerHTML = '<span class="setup-banner-ico" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.25" stroke="currentColor" stroke-width="1.75"/><path d="M12 11v5.5M12 7.75h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></span>'
+        + '<div><strong>Setup:</strong> ' + parts.join(' · ')
+        + ' <a class="underline" href="/modules/backup_verifier/destinations">Ziele</a></div>';
+    } else {
+      banner.classList.add('hidden');
+    }
+  }
+
+  function renderMissing(items) {
+    const list = document.getElementById('missing-list');
+    const count = document.getElementById('missing-count');
+    count.textContent = items.length
+      ? items.length + ' Stack' + (items.length === 1 ? '' : 's') + ' ohne Zeitplan'
+      : 'Alle bekannten Compose-Stacks haben bereits einen Zeitplan.';
+    if (!items.length) {
+      list.innerHTML = '<li class="text-sm text-[var(--muted)]">Nichts offenes.</li>';
+      return;
+    }
+    list.innerHTML = items.map((s) => {
+      const id = 'miss-' + stackKey(s).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const n = Number(s.containers) || 0;
+      const extra = n ? (n + ' Container') : '';
+      return `
+        <li>
+          <label class="entity-card flex min-h-12 cursor-pointer items-start gap-3" for="${id}">
+            <input id="${id}" type="checkbox" class="host-select mt-1 h-5 w-5 shrink-0"
+              data-parent-id="${esc(s.parent_id)}" data-stack="${esc(s.stack)}" data-guest="${esc(s.guest_name || '')}" />
+            <span class="min-w-0">
+              ${stackHostHtml(s)}
+              ${extra ? '<span class="mt-0.5 block text-sm text-[var(--muted)]">' + esc(extra) + '</span>' : ''}
+            </span>
+          </label>
+        </li>`;
+    }).join('');
+  }
+
+  function renderScheduled(items) {
+    const list = document.getElementById('scheduled-list');
+    if (!items.length) {
+      list.innerHTML = '<li class="text-[var(--muted)]">Noch keine Zeitpläne.</li>';
+      return;
+    }
+    list.innerHTML = items.map((s) => {
+      const time = s.start_hm || '—';
+      const on = s.enabled ? 'aktiv' : 'aus';
+      return `
+        <li class="entity-card flex flex-wrap items-center justify-between gap-2">
+          <span class="min-w-0">${stackHostHtml(s)}</span>
+          <span class="flex flex-wrap items-center gap-2 text-[var(--muted)]">
+            <span class="chip ${s.enabled ? 'chip-info' : 'chip-paused'}">${esc(time)} · ${on}</span>
+            <code class="text-xs">${esc(s.cron_expr || '')}</code>
+          </span>
+        </li>`;
+    }).join('');
+  }
+
+  function renderPreview(plan) {
+    const card = document.getElementById('preview-card');
+    const list = document.getElementById('preview-list');
+    lastPlan = plan;
+    card.classList.toggle('hidden', !plan.length);
+    list.innerHTML = plan.map((p, i) => {
+      const id = 'prev-' + i;
+      const wrap = p.wrapped
+        ? '<span class="chip chip-paused mt-1">nach Mitternacht</span>'
+        : '';
+      const shifted = p.shifted
+        ? '<span class="chip chip-info mt-1">verschoben</span>'
+        : '';
+      return `
+        <li>
+          <label class="entity-card flex min-h-12 cursor-pointer items-start gap-3" for="${id}">
+            <input id="${id}" type="checkbox" class="host-select mt-1 h-5 w-5 shrink-0" checked
+              data-parent-id="${esc(p.parent_id)}" data-stack="${esc(p.stack)}" data-time="${esc(p.start_hm)}" />
+            <span class="min-w-0 flex-1">
+              ${stackHostHtml(p)}
+              <span class="mt-0.5 block text-sm">Start <strong class="tabular-nums">${esc(p.start_hm)}</strong></span>
+              <span class="flex flex-wrap gap-1">${shifted}${wrap}</span>
+            </span>
+            <span class="shrink-0 text-sm text-[var(--muted)]">Übernehmen</span>
+          </label>
+        </li>`;
+    }).join('');
+  }
+
+  function adoptedRows() {
+    return [...document.querySelectorAll('#preview-list input[type="checkbox"]:checked')].map((el) => ({
+      parent_id: el.dataset.parentId,
+      stack: el.dataset.stack,
+      time: el.dataset.time,
+    }));
+  }
+
+  async function loadGaps() {
+    const res = await fetch(API + '/schedules/gaps');
+    const data = await res.json();
+    gaps = data;
+    const d = data.defaults || {};
+    if (d.start) document.getElementById('plan-time').value = d.start;
+    if (d.interval) document.getElementById('plan-interval').value = d.interval;
+    if (d.restic_keep_last) document.getElementById('plan-keep-last').value = d.restic_keep_last;
+    if (d.restic_keep_weekly != null) document.getElementById('plan-keep-weekly').value = d.restic_keep_weekly;
+    if (d.restic_full_every_days) document.getElementById('plan-full-days').value = d.restic_full_every_days;
+    setEngine(d.engine || 'tar');
+    renderMissing(data.missing || []);
+    renderScheduled(data.scheduled || []);
+    invalidatePreview();
+    setStatus((data.missing || []).length + ' Stacks ohne Zeitplan');
+  }
+
+  document.getElementById('plan-engine-tar')?.addEventListener('click', () => { setEngine('tar'); invalidatePreview(); });
+  document.getElementById('plan-engine-restic')?.addEventListener('click', () => { setEngine('restic'); invalidatePreview(); });
+  document.getElementById('plan-preset')?.addEventListener('change', () => { syncPreset(); invalidatePreview(); });
+  ['plan-time', 'plan-interval', 'plan-weekday', 'plan-keep-last', 'plan-keep-weekly', 'plan-full-days'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', invalidatePreview);
+  });
+
+  document.getElementById('btn-select-all')?.addEventListener('click', () => {
+    document.querySelectorAll('#missing-list input[type="checkbox"]').forEach((el) => { el.checked = true; });
+    invalidatePreview();
+  });
+  document.getElementById('btn-select-none')?.addEventListener('click', () => {
+    document.querySelectorAll('#missing-list input[type="checkbox"]').forEach((el) => { el.checked = false; });
+    invalidatePreview();
+  });
+  document.getElementById('missing-list')?.addEventListener('change', invalidatePreview);
+
+  document.getElementById('plan-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const stacks = selectedMissing();
+    if (!stacks.length) {
+      alert('Bitte mindestens einen Stack ohne Zeitplan auswählen.');
+      return;
+    }
+    const res = await fetch(API + '/schedules/plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        start: document.getElementById('plan-time').value || '03:00',
+        interval: Number(document.getElementById('plan-interval').value) || 10,
+        preset: document.getElementById('plan-preset').value || 'daily',
+        weekday: Number(document.getElementById('plan-weekday').value) || 0,
+        stacks,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(data.detail || 'Plan berechnen fehlgeschlagen');
+      return;
+    }
+    renderPreview(data.plan || []);
+    setStatus((data.plan || []).length + ' Slots berechnet');
+    document.getElementById('preview-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  document.getElementById('btn-apply')?.addEventListener('click', () => {
+    const rows = adoptedRows();
+    if (!rows.length) {
+      alert('Keine Zeile zum Übernehmen markiert.');
+      return;
+    }
+    const dlg = document.getElementById('apply-dialog');
+    document.getElementById('apply-summary').innerHTML = rows.map((r) => {
+      const meta = lastPlan.find((p) => p.parent_id === r.parent_id && p.stack === r.stack) || r;
+      return '<li>' + stackHostHtml(meta) + ' → <strong class="tabular-nums">' + esc(r.time) + '</strong></li>';
+    }).join('');
+    document.getElementById('apply-retention').textContent = 'Aufbewahrung: ' + retentionText();
+    document.getElementById('apply-msg').textContent = '';
+    dlg.showModal();
+  });
+
+  document.getElementById('apply-go')?.addEventListener('click', async () => {
+    const rows = adoptedRows();
+    if (!rows.length) return;
+    const btn = document.getElementById('apply-go');
+    btn.disabled = true;
+    const res = await fetch(API + '/schedules/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirm: true,
+        preset: document.getElementById('plan-preset').value || 'daily',
+        weekday: Number(document.getElementById('plan-weekday').value) || 0,
+        engine: planEngine,
+        restic_full_every_days: Number(document.getElementById('plan-full-days').value) || 7,
+        restic_keep_last: Number(document.getElementById('plan-keep-last').value) || 14,
+        restic_keep_weekly: Number(document.getElementById('plan-keep-weekly').value) || 8,
+        items: rows,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    btn.disabled = false;
+    if (!res.ok) {
+      document.getElementById('apply-msg').textContent = data.detail || 'Anlegen fehlgeschlagen';
+      return;
+    }
+    document.getElementById('apply-dialog').close();
+    setStatus(data.message || 'Zeitpläne angelegt');
+    await loadGaps();
+    alert((data.message || 'Zeitpläne angelegt') + '\n\nSie erscheinen jetzt unter Zeitplan.');
+  });
+
+  async function refreshAll() {
+    await Promise.all([loadStatus(), loadGaps()]);
+  }
+  document.getElementById('btn-refresh-all')?.addEventListener('click', refreshAll);
+  syncPreset();
+  refreshAll();
+})();
+</script>
+{% endblock %}

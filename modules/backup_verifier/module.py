@@ -52,6 +52,21 @@ from backup_verifier.restore_paths import (
     normalize_dest_place,
     normalize_scope,
 )
+from backup_verifier.planner import (
+    DEFAULT_ENGINE,
+    DEFAULT_FULL_EVERY_DAYS,
+    DEFAULT_INTERVAL,
+    DEFAULT_KEEP_LAST,
+    DEFAULT_KEEP_WEEKLY,
+    DEFAULT_PRESET,
+    DEFAULT_START,
+    PlanError,
+    classify_stacks,
+    existing_start_minutes,
+    format_hhmm,
+    plan_slots,
+    stack_key,
+)
 from backup_verifier.scheduler import (
     next_run_after,
     run_schedule_loop,
@@ -606,6 +621,37 @@ class SchedulePayload(BaseModel):
     restic_keep_weekly: int = Field(default=8, ge=0, le=104)
 
 
+class PlanStackRef(BaseModel):
+    parent_id: str = Field(..., min_length=1)
+    stack: str = Field(..., min_length=1)
+    guest_name: str = ""
+
+
+class SchedulePlanPayload(BaseModel):
+    start: str = Field(default=DEFAULT_START)
+    interval: int = Field(default=DEFAULT_INTERVAL, ge=1, le=180)
+    preset: str = Field(default=DEFAULT_PRESET, pattern="^(daily|weekly)$")
+    weekday: int = Field(default=0, ge=0, le=6)
+    stacks: list[PlanStackRef] = Field(default_factory=list)
+
+
+class ScheduleBatchItem(BaseModel):
+    parent_id: str = Field(..., min_length=1)
+    stack: str = Field(..., min_length=1)
+    time: str = Field(..., min_length=4, max_length=5)
+
+
+class ScheduleBatchPayload(BaseModel):
+    confirm: bool = False
+    preset: str = Field(default=DEFAULT_PRESET, pattern="^(daily|weekly)$")
+    weekday: int = Field(default=0, ge=0, le=6)
+    engine: str = Field(default=DEFAULT_ENGINE, pattern="^(tar|restic)$")
+    restic_full_every_days: int = Field(default=DEFAULT_FULL_EVERY_DAYS, ge=1, le=365)
+    restic_keep_last: int = Field(default=DEFAULT_KEEP_LAST, ge=1, le=365)
+    restic_keep_weekly: int = Field(default=DEFAULT_KEEP_WEEKLY, ge=0, le=104)
+    items: list[ScheduleBatchItem] = Field(default_factory=list)
+
+
 @router.get("/status")
 async def module_status() -> dict[str, Any]:
     bs = get_backup_settings()
@@ -618,7 +664,7 @@ async def module_status() -> dict[str, Any]:
         pipeline = [dest_mod.public_destination(r) for r in rows]
     return {
         "module": "backup_verifier",
-        "version": "0.3.0",
+        "version": "0.3.1",
         "time": format_de(now_berlin()),
         "copilot_dir": str(bs.copilot_dir),
         "lxc_dir": bs.backup_lxc_dir,
@@ -1417,6 +1463,22 @@ async def drill_run_now(background: BackgroundTasks) -> dict[str, Any]:
     return {"ok": True, "started": True, "message": "Restore-Drill gestartet."}
 
 
+def _enrich_schedule_row(
+    row: dict[str, Any], snapshot: Any, now: Any
+) -> dict[str, Any]:
+    nxt = (
+        next_run_after(str(row.get("cron_expr") or ""), now)
+        if row.get("enabled")
+        else None
+    )
+    item = _with_guest(row, snapshot, overwrite=True)
+    item["next_run"] = format_de(nxt) if nxt else None
+    item["next_run_iso"] = iso_utc(nxt) if nxt else None
+    hm = schedule_clock_hm(item, nxt)
+    item["start_hm"] = f"{hm[0]:02d}:{hm[1]:02d}" if hm else None
+    return item
+
+
 @router.get("/schedules")
 async def list_schedules(request: Request) -> dict[str, Any]:
     store = _get_store()
@@ -1425,12 +1487,7 @@ async def list_schedules(request: Request) -> dict[str, Any]:
     now = now_berlin()
     enriched: list[dict[str, Any]] = []
     for row in schedules:
-        nxt = next_run_after(str(row.get("cron_expr") or ""), now) if row.get("enabled") else None
-        item = _with_guest(row, snapshot, overwrite=True)
-        item["next_run"] = format_de(nxt) if nxt else None
-        item["next_run_iso"] = iso_utc(nxt) if nxt else None
-        hm = schedule_clock_hm(item, nxt)
-        item["start_hm"] = f"{hm[0]:02d}:{hm[1]:02d}" if hm else None
+        item = _enrich_schedule_row(row, snapshot, now)
         enriched.append(item)
     start_counts: dict[str, int] = {}
     for item in enriched:
@@ -1454,6 +1511,197 @@ async def list_schedules(request: Request) -> dict[str, Any]:
             "Zeitpläne laufen in der App (Europe/Berlin). "
             "Kein Host-Crontab nötig — alte curl-Einträge kannst du löschen."
         ),
+    }
+
+
+def _schedule_defaults() -> dict[str, Any]:
+    return {
+        "start": DEFAULT_START,
+        "interval": DEFAULT_INTERVAL,
+        "preset": DEFAULT_PRESET,
+        "engine": DEFAULT_ENGINE,
+        "restic_full_every_days": DEFAULT_FULL_EVERY_DAYS,
+        "restic_keep_last": DEFAULT_KEEP_LAST,
+        "restic_keep_weekly": DEFAULT_KEEP_WEEKLY,
+        "timezone": "Europe/Berlin",
+        "wrap": "next_day",
+    }
+
+
+@router.get("/schedules/gaps")
+async def schedule_gaps(request: Request) -> dict[str, Any]:
+    """Compose stacks without a schedule, plus already planned ones (read-only)."""
+    store = _get_store()
+    snapshot = _snapshot(request)
+    now = now_berlin()
+    discovered = await list_backup_stacks(snapshot)
+    schedules = [
+        _enrich_schedule_row(row, snapshot, now)
+        for row in await store.list_schedules()
+    ]
+    split = classify_stacks(discovered, schedules)
+    scheduled = split["scheduled"]
+    scheduled.sort(key=schedule_start_sort_key)
+    occupied = [format_hhmm(m) for m in existing_start_minutes(scheduled)]
+    return {
+        "ok": True,
+        "missing": split["missing"],
+        "scheduled": scheduled,
+        "occupied": occupied,
+        "defaults": _schedule_defaults(),
+        "time": format_de(now),
+        "timezone": "Europe/Berlin",
+        "hint": (
+            "Fehlend = Compose-Stack aus der Topologie ohne Zeitplan "
+            "für dieselbe parent_id + Projekt. "
+            "Nur aktivierte Zeitpläne blockieren Slots."
+        ),
+    }
+
+
+@router.post("/schedules/plan")
+async def schedule_plan(
+    payload: SchedulePlanPayload, request: Request
+) -> dict[str, Any]:
+    store = _get_store()
+    snapshot = _snapshot(request)
+    discovered = await list_backup_stacks(snapshot)
+    by_key = {
+        stack_key(str(s.get("parent_id") or ""), str(s.get("stack") or "")): s
+        for s in discovered
+    }
+    schedules = [
+        _enrich_schedule_row(row, snapshot, now_berlin())
+        for row in await store.list_schedules()
+    ]
+    already = {
+        stack_key(str(s.get("parent_id") or ""), str(s.get("stack") or ""))
+        for s in schedules
+    }
+    selected: list[dict[str, Any]] = []
+    for ref in payload.stacks:
+        key = stack_key(ref.parent_id, ref.stack)
+        if key in already:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Für {ref.stack} existiert bereits ein Zeitplan — "
+                    "nicht erneut einplanen."
+                ),
+            )
+        info = by_key.get(key, {})
+        selected.append(
+            {
+                "parent_id": ref.parent_id,
+                "stack": ref.stack,
+                "guest_name": ref.guest_name or info.get("guest_name") or "",
+                "guest_ip": info.get("guest_ip") or "",
+            }
+        )
+    try:
+        plan = plan_slots(
+            start_hm=payload.start,
+            interval_minutes=payload.interval,
+            selected=selected,
+            existing_starts=existing_start_minutes(schedules),
+        )
+    except PlanError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    for row in plan:
+        try:
+            row["cron_expr"] = cron_mod.preset_to_cron(
+                payload.preset, row["start_hm"], payload.weekday
+            )
+        except cron_mod.CronError as exc:
+            raise HTTPException(status_code=400, detail=exc.message) from exc
+    occupied = [format_hhmm(m) for m in existing_start_minutes(schedules)]
+    return {
+        "ok": True,
+        "plan": plan,
+        "occupied": occupied,
+        "interval": payload.interval,
+        "preset": payload.preset,
+        "weekday": payload.weekday,
+        "timezone": "Europe/Berlin",
+        "wrap": "next_day",
+        "wrap_note": (
+            "Slots nach Mitternacht rollen auf den nächsten Kalendertag; "
+            "Cron nutzt die Uhrzeit (00:00 …) mit demselben Preset."
+        ),
+    }
+
+
+@router.post("/schedules/batch")
+async def schedule_batch(payload: ScheduleBatchPayload) -> dict[str, Any]:
+    """Create many schedules after explicit confirm. Does not start backups."""
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Anlegen erfordert Bestätigung (confirm=true).",
+        )
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Keine Zeitpläne ausgewählt.")
+    store = _get_store()
+    existing = await store.list_schedules()
+    already = {
+        stack_key(str(s.get("parent_id") or ""), str(s.get("stack") or ""))
+        for s in existing
+    }
+    seen: set[str] = set()
+    prepared: list[SchedulePayload] = []
+    for item in payload.items:
+        key = stack_key(item.parent_id, item.stack)
+        if key in already:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Für {item.stack} existiert bereits ein Zeitplan — "
+                    "nicht erneut anlegen."
+                ),
+            )
+        if key in seen:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Stack {item.stack} ist im Plan doppelt.",
+            )
+        seen.add(key)
+        prepared.append(
+            SchedulePayload(
+                parent_id=item.parent_id,
+                stack=item.stack,
+                preset=payload.preset,
+                time=item.time,
+                weekday=payload.weekday,
+                enabled=True,
+                engine=payload.engine,
+                restic_full_every_days=payload.restic_full_every_days,
+                restic_keep_last=payload.restic_keep_last,
+                restic_keep_weekly=payload.restic_keep_weekly,
+            )
+        )
+    created: list[dict[str, Any]] = []
+    for row in prepared:
+        result = await _persist_schedule(row, schedule_id=None)
+        created.append(
+            {
+                "id": result.get("id"),
+                "parent_id": row.parent_id,
+                "stack": row.stack,
+                "time": row.time,
+                "cron_expr": result.get("cron_expr"),
+            }
+        )
+    return {
+        "ok": True,
+        "created": created,
+        "count": len(created),
+        "started": False,
+        "message": (
+            f"{len(created)} "
+            f"{'Zeitplan' if len(created) == 1 else 'Zeitpläne'} angelegt. "
+            "Es wurde kein Backup gestartet."
+        ),
+        "schedule_url": "/modules/backup_verifier/schedule",
     }
 
 
@@ -1531,10 +1779,10 @@ async def sync_schedules() -> dict[str, Any]:
 
 class BackupVerifierModule:
     name = "backup_verifier"
-    version = "0.3.0"
+    version = "0.3.1"
     description = (
         "Compose-Stack-Backups (Voll/tar oder Incremental/restic) mit flexiblen Zielen "
-        "(Host → Copilot → SFTP), Verify, Verlauf, Zeitplan und Restore."
+        "(Host → Copilot → SFTP), Verify, Verlauf, Zeitplan, Lückenprüfung und Restore."
     )
     enabled = True
     meta = {
@@ -1582,6 +1830,14 @@ class BackupVerifierModule:
                 request,
                 "schedule.html",
                 _page_ctx("schedule"),
+            )
+
+        @app.get("/modules/backup_verifier/check", response_class=HTMLResponse)
+        async def backup_check_page(request: Request) -> HTMLResponse:
+            return templates.TemplateResponse(
+                request,
+                "check.html",
+                _page_ctx("check"),
             )
 
         @app.get("/modules/backup_verifier/history", response_class=HTMLResponse)
