@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     proxmox_verify_ssl: bool = False
     proxmox_node: str = ""  # optional: limit to one node
 
+    # Second standalone Proxmox (not a cluster member of PROXMOX_HOST)
+    proxmox_2_host: str = ""
+    proxmox_2_port: int = 8006
+    proxmox_2_user: str = "root@pam"
+    proxmox_2_token_id: str = ""
+    proxmox_2_token_secret: str = ""
+    proxmox_2_password: str = ""
+    proxmox_2_verify_ssl: bool = False
+
     # --- Docker discovery ---
     # Prefer local socket when the copilot itself runs with docker.sock mounted.
     docker_socket: str = "/var/run/docker.sock"
@@ -77,12 +86,16 @@ class Settings(BaseSettings):
 
     @property
     def proxmox_configured(self) -> bool:
-        has_auth = bool(self.proxmox_token_secret) or bool(self.proxmox_password)
-        return bool(self.proxmox_host) and has_auth
+        return bool(self.proxmox_endpoints())
 
     @property
     def proxmox_base_url(self) -> str:
         return f"https://{self.proxmox_host}:{self.proxmox_port}/api2/json"
+
+    def proxmox_endpoints(self) -> list:
+        from app.core.proxmox import endpoints_from_settings
+
+        return endpoints_from_settings(self)
 
 
 @lru_cache

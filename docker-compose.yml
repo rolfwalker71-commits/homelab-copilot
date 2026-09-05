@@ -21,6 +21,14 @@ services:
       PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET:-}
       PROXMOX_PASSWORD: ${PROXMOX_PASSWORD:-}
       PROXMOX_VERIFY_SSL: ${PROXMOX_VERIFY_SSL:-false}
+      # Second standalone PVE (not a cluster member of PROXMOX_HOST)
+      PROXMOX_2_HOST: ${PROXMOX_2_HOST:-}
+      PROXMOX_2_PORT: ${PROXMOX_2_PORT:-8006}
+      PROXMOX_2_USER: ${PROXMOX_2_USER:-root@pam}
+      PROXMOX_2_TOKEN_ID: ${PROXMOX_2_TOKEN_ID:-}
+      PROXMOX_2_TOKEN_SECRET: ${PROXMOX_2_TOKEN_SECRET:-}
+      PROXMOX_2_PASSWORD: ${PROXMOX_2_PASSWORD:-}
+      PROXMOX_2_VERIFY_SSL: ${PROXMOX_2_VERIFY_SSL:-false}
       # false = discover Docker via SSH to LXCs (production default). true only with docker.sock below.
       DOCKER_USE_LOCAL_SOCKET: ${DOCKER_USE_LOCAL_SOCKET:-false}
       DOCKER_SSH_USER: ${DOCKER_SSH_USER:-root}

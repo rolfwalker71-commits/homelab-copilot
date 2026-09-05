@@ -20,6 +20,13 @@ import httpx
 from app.config import Settings
 from app.core.locale import format_de, iso_utc, now_berlin
 from app.core.models import EntityKind, EntityStatus, TopologyEntity, TopologySnapshot
+from app.core.proxmox import (
+    ProxmoxEndpoint,
+    ProxmoxNodeUnboundError,
+    format_proxmox_api_error,
+    strip_unbound_metrics,
+    unbound_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,9 @@ class DiscoveryEngine:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._manual_hosts_fn: ManualHostsFn | None = None
+        self._node_endpoints: dict[str, ProxmoxEndpoint] = {}
+        self._unbound_via: dict[str, str] = {}
+        self._discovery_done = False
 
     def set_manual_hosts_provider(self, fn: ManualHostsFn | None) -> None:
         """Reuse the patcher host store (name, IP, SSH user/port)."""
@@ -205,22 +215,38 @@ class DiscoveryEngine:
     # Proxmox
     # ------------------------------------------------------------------
 
-    def _proxmox_headers(self) -> dict[str, str]:
-        s = self.settings
-        if s.proxmox_token_id and s.proxmox_token_secret:
-            # token_id may be "user@realm!tokenname" or just "tokenname"
-            token_id = s.proxmox_token_id
-            if "!" not in token_id:
-                token_id = f"{s.proxmox_user}!{token_id}"
-            return {"Authorization": f"PVEAPIToken={token_id}={s.proxmox_token_secret}"}
-        return {}
+    @staticmethod
+    def _client_base_url(client: httpx.AsyncClient, fallback: str = "") -> str:
+        return str(getattr(client, "_pve_base_url", None) or fallback)
 
-    async def _proxmox_ticket(self, client: httpx.AsyncClient) -> dict[str, str]:
+    def _attach_endpoint(self, client: httpx.AsyncClient, endpoint: ProxmoxEndpoint) -> None:
+        setattr(client, "_pve_endpoint", endpoint)
+        setattr(client, "_pve_base_url", endpoint.base_url)
+
+    def _proxmox_headers(self, endpoint: ProxmoxEndpoint | None = None) -> dict[str, str]:
+        ep = endpoint or (self.settings.proxmox_endpoints() or [None])[0]
+        if ep is None:
+            return {}
+        return ep.auth_headers()
+
+    async def _proxmox_ticket(
+        self, client: httpx.AsyncClient, endpoint: ProxmoxEndpoint | None = None
+    ) -> dict[str, str]:
         """Password auth fallback: obtain ticket + CSRF token."""
-        s = self.settings
+        ep = endpoint or getattr(client, "_pve_endpoint", None)
+        if ep is None:
+            s = self.settings
+            ep = ProxmoxEndpoint(
+                id="primary",
+                host=s.proxmox_host,
+                port=s.proxmox_port,
+                user=s.proxmox_user,
+                password=s.proxmox_password,
+                verify_ssl=s.proxmox_verify_ssl,
+            )
         resp = await client.post(
-            f"{s.proxmox_base_url}/access/ticket",
-            data={"username": s.proxmox_user, "password": s.proxmox_password},
+            f"{ep.base_url}/access/ticket",
+            data={"username": ep.user, "password": ep.password},
         )
         resp.raise_for_status()
         data = resp.json()["data"]
@@ -232,7 +258,7 @@ class DiscoveryEngine:
     async def _proxmox_get(
         self, client: httpx.AsyncClient, path: str, headers: dict[str, str]
     ) -> Any:
-        url = f"{self.settings.proxmox_base_url}{path}"
+        url = f"{self._client_base_url(client, self.settings.proxmox_base_url)}{path}"
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         return resp.json().get("data")
@@ -244,7 +270,7 @@ class DiscoveryEngine:
         headers: dict[str, str],
         data: dict[str, Any] | None = None,
     ) -> Any:
-        url = f"{self.settings.proxmox_base_url}{path}"
+        url = f"{self._client_base_url(client, self.settings.proxmox_base_url)}{path}"
         resp = await client.post(url, headers=headers, data=data or None)
         if resp.status_code == 403:
             raise PermissionError(
@@ -264,7 +290,7 @@ class DiscoveryEngine:
         path: str,
         headers: dict[str, str],
     ) -> Any:
-        url = f"{self.settings.proxmox_base_url}{path}"
+        url = f"{self._client_base_url(client, self.settings.proxmox_base_url)}{path}"
         resp = await client.delete(url, headers=headers)
         if resp.status_code == 403:
             raise PermissionError(
@@ -298,7 +324,10 @@ class DiscoveryEngine:
         )
 
     async def _probe_token_acl(
-        self, client: httpx.AsyncClient, headers: dict[str, str]
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        endpoint: ProxmoxEndpoint | None = None,
     ) -> list[str]:
         """Detect privilege-separated tokens without VM.Audit / Sys.Audit.
 
@@ -319,7 +348,7 @@ class DiscoveryEngine:
                 "API-Token hat keine effektiven Rechte (/access/permissions ist leer). "
                 "Bei Privilege Separation erbt der Token NICHT die Rechte von root@pam. "
                 "In der Proxmox-UI unter Datacenter → Permissions dem Token "
-                f"{self._token_acl_subject()} die Rolle PVEAuditor (oder VM.Audit + Sys.Audit) "
+                f"{self._token_acl_subject(endpoint)} die Rolle PVEAuditor (oder VM.Audit + Sys.Audit) "
                 "auf Pfad `/` mit Propagate zuweisen — danach Discovery erneut starten."
             )
             return hints
@@ -332,7 +361,7 @@ class DiscoveryEngine:
             hints.append(
                 "API-Token fehlt VM.Audit — LXC/VM-Listen bleiben leer. "
                 "Rolle PVEAuditor (oder VM.Audit) auf `/` für "
-                f"{self._token_acl_subject()} setzen."
+                f"{self._token_acl_subject(endpoint)} setzen."
             )
         if "Sys.Audit" not in flat and "Administrator" not in flat:
             hints.append(
@@ -341,63 +370,257 @@ class DiscoveryEngine:
             )
         return hints
 
-    def _token_acl_subject(self) -> str:
+    def _token_acl_subject(self, endpoint: ProxmoxEndpoint | None = None) -> str:
+        if endpoint is not None:
+            return endpoint.token_acl_subject()
         s = self.settings
         tid = s.proxmox_token_id or "?"
         if "!" in tid:
             return tid
         return f"{s.proxmox_user}!{tid}"
 
+    def remember_from_snapshot(self, snapshot: TopologySnapshot | None) -> None:
+        """Hydrate node→API map from cached topology (before first refresh)."""
+        if snapshot is None or self._discovery_done:
+            return
+        by_id = {ep.id: ep for ep in self.settings.proxmox_endpoints()}
+        via_fallback = self._primary_via_label()
+        for node in snapshot.nodes:
+            name = (node.name or "").strip()
+            if not name:
+                continue
+            meta = node.meta or {}
+            if meta.get("api_unbound"):
+                self._unbound_via[name] = str(meta.get("api_via") or via_fallback)
+                continue
+            ep_id = str(meta.get("pve_endpoint_id") or "")
+            ep = by_id.get(ep_id)
+            if ep is not None:
+                self._node_endpoints[name] = ep
+
+    def _primary_via_label(self) -> str:
+        for name, ep in self._node_endpoints.items():
+            if ep.id == "primary":
+                return name
+        return "dem verbundenen Host"
+
+    def _require_endpoint_for_node(self, node: str) -> ProxmoxEndpoint:
+        node = (node or "").strip()
+        if node in self._unbound_via:
+            raise ProxmoxNodeUnboundError(node, self._unbound_via[node])
+        ep = self._node_endpoints.get(node)
+        if ep is not None:
+            return ep
+        endpoints = self.settings.proxmox_endpoints()
+        if not endpoints:
+            raise RuntimeError("Proxmox ist nicht konfiguriert.")
+        if not self._node_endpoints and len(endpoints) == 1:
+            return endpoints[0]
+        raise ProxmoxNodeUnboundError(node, self._primary_via_label())
+
+    def _endpoint_for_guest_id(self, guest_id: str) -> ProxmoxEndpoint:
+        _kind, node, _vmid = self._guest_id_parts(guest_id)
+        return self._require_endpoint_for_node(node)
+
     async def _discover_proxmox(
         self,
     ) -> tuple[list[TopologyEntity], list[TopologyEntity], list[str]]:
-        s = self.settings
+        endpoints = self.settings.proxmox_endpoints()
+        if not endpoints:
+            return [], [], [
+                "Keine Proxmox-Auth: PROXMOX_TOKEN_SECRET oder PROXMOX_PASSWORD setzen."
+            ]
+
+        gathered = await asyncio.gather(
+            *[self._discover_proxmox_endpoint(ep) for ep in endpoints],
+            return_exceptions=True,
+        )
+
+        extra_owned: set[str] = set()
+        parsed: list[tuple[ProxmoxEndpoint, list[TopologyEntity], list[TopologyEntity], list[str], set[str]]] = []
+        errors: list[str] = []
+        for ep, raw in zip(endpoints, gathered):
+            if isinstance(raw, BaseException):
+                msg = f"Proxmox {ep.host}: {format_proxmox_api_error(raw)}"
+                logger.warning(msg)
+                errors.append(msg)
+                continue
+            nodes_e, guests_e, errs_e, owned_e = raw
+            parsed.append((ep, nodes_e, guests_e, errs_e, owned_e))
+            if ep.id != "primary":
+                extra_owned.update(owned_e)
+            errors.extend(errs_e)
+
+        nodes: list[TopologyEntity] = []
+        guests: list[TopologyEntity] = []
+        seen_node: set[str] = set()
+        seen_guest: set[tuple[str, int]] = set()
+        self._node_endpoints = {}
+        self._unbound_via = {}
+
+        for ep, nodes_e, guests_e, _errs, owned_e in parsed:
+            for n in nodes_e:
+                if ep.id == "primary" and n.name in extra_owned:
+                    continue
+                if n.name in seen_node:
+                    continue
+                seen_node.add(n.name)
+                nodes.append(n)
+                if n.name in owned_e:
+                    self._node_endpoints[n.name] = ep
+                elif (n.meta or {}).get("api_unbound"):
+                    self._unbound_via[n.name] = str(
+                        (n.meta or {}).get("api_via") or self._primary_via_label()
+                    )
+            for g in guests_e:
+                if ep.id == "primary" and g.node and g.node in extra_owned:
+                    continue
+                key = (g.node or "", int(g.vmid or 0))
+                if key in seen_guest:
+                    continue
+                seen_guest.add(key)
+                guests.append(g)
+
+        via = self._primary_via_label()
+        owned = set(self._node_endpoints)
+        for g in guests:
+            name = (g.node or "").strip()
+            if name and name not in owned and name not in seen_node:
+                seen_node.add(name)
+                self._unbound_via[name] = via
+                stamp = format_de()
+                stamp_iso = iso_utc()
+                nodes.append(
+                    TopologyEntity(
+                        id=f"node:{name}",
+                        kind=EntityKind.NODE,
+                        name=name,
+                        status=EntityStatus.UNKNOWN,
+                        node=name,
+                        hostname=name,
+                        meta={
+                            "api_unbound": True,
+                            "api_via": via,
+                            "api_error": unbound_message(via),
+                            "pve_endpoint_id": "",
+                        },
+                        discovered_at=stamp,
+                        discovered_at_iso=stamp_iso,
+                    )
+                )
+            elif name and name not in owned:
+                self._unbound_via[name] = str(
+                    self._unbound_via.get(name) or via
+                )
+
+        self._discovery_done = True
+        return nodes, guests, errors
+
+    async def _probe_node_owned(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        node_name: str,
+    ) -> tuple[bool, str | None]:
+        """True when this API can serve ``GET /nodes/{node}/status``."""
+        try:
+            raw = await self._proxmox_get(
+                client, f"/nodes/{quote(node_name)}/status", headers
+            )
+            return isinstance(raw, dict), None
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code if exc.response is not None else 0
+            detail = format_proxmox_api_error(exc)
+            if code in {401, 403}:
+                return True, detail
+            return False, detail
+        except Exception as exc:
+            return False, format_proxmox_api_error(exc)
+
+    async def _discover_proxmox_endpoint(
+        self, ep: ProxmoxEndpoint
+    ) -> tuple[list[TopologyEntity], list[TopologyEntity], list[str], set[str]]:
         nodes: list[TopologyEntity] = []
         guests: list[TopologyEntity] = []
         errors: list[str] = []
+        owned_names: set[str] = set()
         stamp = format_de()
         stamp_iso = iso_utc()
 
         async with httpx.AsyncClient(
-            verify=s.proxmox_verify_ssl,
+            verify=ep.verify_ssl,
             timeout=httpx.Timeout(20.0),
         ) as client:
-            headers = self._proxmox_headers()
-            if not headers and s.proxmox_password:
-                headers = await self._proxmox_ticket(client)
+            self._attach_endpoint(client, ep)
+            headers = self._proxmox_headers(ep)
+            if not headers and ep.password:
+                headers = await self._proxmox_ticket(client, ep)
             if not headers:
                 return nodes, guests, [
-                    "Keine Proxmox-Auth: PROXMOX_TOKEN_SECRET oder PROXMOX_PASSWORD setzen."
-                ]
+                    f"{ep.host}: Keine Proxmox-Auth — Token oder Passwort setzen."
+                ], owned_names
 
-            # Surface ACL issues early (empty guest lists are usually permissions, not parsing)
-            errors.extend(await self._probe_token_acl(client, headers))
+            errors.extend(await self._probe_token_acl(client, headers, ep))
 
             node_list = await self._proxmox_get(client, "/nodes", headers)
-            node_names: list[str] = []
+            listed: list[tuple[str, dict[str, Any]]] = []
             for n in node_list or []:
-                node_name = n.get("node", "")
+                if not isinstance(n, dict):
+                    continue
+                node_name = str(n.get("node") or "").strip()
                 if not node_name:
                     continue
-                if s.proxmox_node and node_name != s.proxmox_node:
+                if ep.node_filter and node_name != ep.node_filter:
                     continue
-                node_names.append(node_name)
-                node_entity = TopologyEntity(
-                    id=f"node:{node_name}",
-                    kind=EntityKind.NODE,
-                    name=node_name,
-                    status=_status_from_str(n.get("status")),
-                    node=node_name,
-                    hostname=node_name,
-                    meta=self._node_resource_meta(n if isinstance(n, dict) else {}),
-                    discovered_at=stamp,
-                    discovered_at_iso=stamp_iso,
+                listed.append((node_name, n))
+
+            if len(listed) == 1:
+                owned_names.add(listed[0][0])
+                probe_err: dict[str, str | None] = {}
+            else:
+                probe_err = {}
+                for node_name, _raw in listed:
+                    ok, detail = await self._probe_node_owned(client, headers, node_name)
+                    if ok:
+                        owned_names.add(node_name)
+                    else:
+                        probe_err[node_name] = detail
+
+            via_label = next(iter(owned_names), "") or ep.host or "dem verbundenen Host"
+
+            for node_name, raw in listed:
+                owned = node_name in owned_names
+                meta = self._node_resource_meta(raw)
+                meta["pve_endpoint_id"] = ep.id if owned else ""
+                meta["pve_endpoint"] = ep.host if owned else ""
+                if not owned:
+                    meta = strip_unbound_metrics(meta)
+                    meta["api_unbound"] = True
+                    meta["api_via"] = via_label
+                    meta["api_error"] = unbound_message(via_label)
+                    if probe_err.get(node_name):
+                        meta["api_http"] = probe_err[node_name]
+                    status = EntityStatus.UNKNOWN
+                else:
+                    status = _status_from_str(raw.get("status"))
+                nodes.append(
+                    TopologyEntity(
+                        id=f"node:{node_name}",
+                        kind=EntityKind.NODE,
+                        name=node_name,
+                        status=status,
+                        node=node_name,
+                        hostname=node_name,
+                        meta=meta,
+                        discovered_at=stamp,
+                        discovered_at_iso=stamp_iso,
+                    )
                 )
-                nodes.append(node_entity)
 
-            await self._enrich_node_ips(client, headers, nodes)
+            await self._enrich_node_ips(
+                client, headers, [n for n in nodes if n.name in owned_names], endpoint=ep
+            )
 
-            # Prefer cluster/resources — covers all nodes in one call when ACL allows
             seen_vmids: set[tuple[str, int]] = set()
             try:
                 resources = await self._proxmox_get(
@@ -405,7 +628,7 @@ class DiscoveryEngine:
                 )
                 for raw in resources or []:
                     node_name = raw.get("node") or ""
-                    if s.proxmox_node and node_name != s.proxmox_node:
+                    if ep.node_filter and node_name != ep.node_filter:
                         continue
                     vmid = int(raw.get("vmid") or 0)
                     if not node_name or not vmid:
@@ -413,18 +636,27 @@ class DiscoveryEngine:
                     rtype = (raw.get("type") or "").lower()
                     kind = EntityKind.LXC if rtype == "lxc" else EntityKind.QEMU
                     seen_vmids.add((node_name, vmid))
-                    guests.append(
-                        await self._enrich_guest(
-                            client, headers, node_name, raw, kind, stamp, stamp_iso
+                    if node_name in owned_names:
+                        guests.append(
+                            await self._enrich_guest(
+                                client, headers, node_name, raw, kind, stamp, stamp_iso
+                            )
                         )
-                    )
+                    else:
+                        guests.append(
+                            self._guest_entity_plain(
+                                node_name, raw, kind, stamp, stamp_iso
+                            )
+                        )
             except Exception as exc:
-                msg = f"Cluster-Resources (VMs) fehlgeschlagen: {self._exc_text(exc)}"
+                msg = (
+                    f"Cluster-Resources (VMs) auf {ep.host} fehlgeschlagen: "
+                    f"{format_proxmox_api_error(exc)}"
+                )
                 logger.warning(msg)
                 errors.append(msg)
 
-            for node_name in node_names:
-                # LXC (per-node; fills gaps if cluster/resources was empty/denied)
+            for node_name in sorted(owned_names):
                 try:
                     lxcs = await self._proxmox_get(
                         client, f"/nodes/{quote(node_name)}/lxc", headers
@@ -441,13 +673,12 @@ class DiscoveryEngine:
                         )
                 except Exception as exc:
                     msg = (
-                        f"LXC-Liste auf Node {node_name} fehlgeschlagen: "
-                        f"{self._exc_text(exc)}"
+                        f"LXC-Liste auf Node {node_name} ({ep.host}) fehlgeschlagen: "
+                        f"{format_proxmox_api_error(exc)}"
                     )
                     logger.warning(msg)
                     errors.append(msg)
 
-                # QEMU
                 try:
                     vms = await self._proxmox_get(
                         client, f"/nodes/{quote(node_name)}/qemu", headers
@@ -464,27 +695,58 @@ class DiscoveryEngine:
                         )
                 except Exception as exc:
                     msg = (
-                        f"QEMU-Liste auf Node {node_name} fehlgeschlagen: "
-                        f"{self._exc_text(exc)}"
+                        f"QEMU-Liste auf Node {node_name} ({ep.host}) fehlgeschlagen: "
+                        f"{format_proxmox_api_error(exc)}"
                     )
                     logger.warning(msg)
                     errors.append(msg)
 
-            if nodes and not guests and not any("VM.Audit" in e or "keine effektiven Rechte" in e for e in errors):
+            if (
+                owned_names
+                and not guests
+                and not any("VM.Audit" in e or "keine effektiven Rechte" in e for e in errors)
+            ):
                 errors.append(
-                    "Nodes gefunden, aber 0 Guests — vermutlich fehlende Token-ACL "
-                    "(VM.Audit). Proxmox liefert dann HTTP 200 mit leerer Liste."
+                    f"{ep.host}: Nodes gefunden, aber 0 Guests — vermutlich fehlende "
+                    "Token-ACL (VM.Audit). Proxmox liefert dann HTTP 200 mit leerer Liste."
                 )
 
-        return nodes, guests, errors
+        return nodes, guests, errors, owned_names
+
+    def _guest_entity_plain(
+        self,
+        node: str,
+        raw: dict[str, Any],
+        kind: EntityKind,
+        stamp: str,
+        stamp_iso: str,
+    ) -> TopologyEntity:
+        """Guest row without calling the listing API for config/agent (foreign node)."""
+        vmid = int(raw.get("vmid") or 0)
+        name = raw.get("name") or f"{kind.value}-{vmid}"
+        return TopologyEntity(
+            id=f"{kind.value}:{node}:{vmid}",
+            kind=kind,
+            name=name,
+            status=_status_from_str(raw.get("status")),
+            node=node,
+            vmid=vmid,
+            hostname=name,
+            parent_id=f"node:{node}",
+            meta=self._guest_resource_meta(raw),
+            discovered_at=stamp,
+            discovered_at_iso=stamp_iso,
+        )
 
     async def _enrich_node_ips(
         self,
         client: httpx.AsyncClient,
         headers: dict[str, str],
         nodes: list[TopologyEntity],
+        *,
+        endpoint: ProxmoxEndpoint | None = None,
     ) -> None:
-        """Attach SSH-reachable IPs to Proxmox nodes (cluster/status + PROXMOX_HOST)."""
+        """Attach SSH-reachable IPs to Proxmox nodes (cluster/status + API host)."""
         if not nodes:
             return
         s = self.settings
@@ -504,15 +766,18 @@ class DiscoveryEngine:
         except Exception as exc:
             logger.debug("cluster/status for node IPs: %s", exc)
 
-        mgmt = (s.proxmox_host or "").strip()
+        mgmt = ((endpoint.host if endpoint else s.proxmox_host) or "").strip()
+        node_filter = (endpoint.node_filter if endpoint else s.proxmox_node) or ""
         for node in nodes:
             if node.ip_addresses:
+                continue
+            if (node.meta or {}).get("api_unbound"):
                 continue
             ip = by_name.get(node.name or "")
             if not ip and mgmt:
                 if (
-                    not s.proxmox_node
-                    or s.proxmox_node == node.name
+                    not node_filter
+                    or node_filter == node.name
                     or len(nodes) == 1
                 ):
                     ip = mgmt
@@ -724,20 +989,15 @@ class DiscoveryEngine:
         if timeframe not in {"hour", "day", "week", "month", "year"}:
             timeframe = "hour"
 
-        async with httpx.AsyncClient(
-            verify=self.settings.proxmox_verify_ssl,
-            timeout=httpx.Timeout(20.0, connect=8.0),
-        ) as client:
-            headers = self._proxmox_headers()
-            if not headers and self.settings.proxmox_password:
-                headers = await self._proxmox_ticket(client)
-            if not headers:
-                raise RuntimeError("Keine Proxmox-Credentials verfügbar.")
+        client, headers = await self._proxmox_authed_client(node=node)
+        try:
             path = (
                 f"/nodes/{quote(node)}/{kind}/{vmid}/rrddata"
                 f"?timeframe={quote(timeframe)}&cf=AVERAGE"
             )
             rows = await self._proxmox_get(client, path, headers) or []
+        finally:
+            await client.aclose()
 
         cpu: list[float | None] = []
         net: list[float | None] = []
@@ -776,18 +1036,32 @@ class DiscoveryEngine:
             "net": net,
         }
 
-    async def _proxmox_authed_client(self) -> tuple[httpx.AsyncClient, dict[str, str]]:
+    async def _proxmox_authed_client(
+        self,
+        *,
+        node: str | None = None,
+        endpoint: ProxmoxEndpoint | None = None,
+    ) -> tuple[httpx.AsyncClient, dict[str, str]]:
         """Open an authenticated Proxmox HTTP client (caller must close)."""
         if not self.settings.proxmox_configured:
             raise RuntimeError("Proxmox ist nicht konfiguriert.")
+        ep = endpoint
+        if ep is None and node:
+            ep = self._require_endpoint_for_node(node)
+        if ep is None:
+            endpoints = self.settings.proxmox_endpoints()
+            if not endpoints:
+                raise RuntimeError("Proxmox ist nicht konfiguriert.")
+            ep = endpoints[0]
         client = httpx.AsyncClient(
-            verify=self.settings.proxmox_verify_ssl,
+            verify=ep.verify_ssl,
             timeout=httpx.Timeout(20.0, connect=8.0),
         )
+        self._attach_endpoint(client, ep)
         try:
-            headers = self._proxmox_headers()
-            if not headers and self.settings.proxmox_password:
-                headers = await self._proxmox_ticket(client)
+            headers = self._proxmox_headers(ep)
+            if not headers and ep.password:
+                headers = await self._proxmox_ticket(client, ep)
             if not headers:
                 await client.aclose()
                 raise RuntimeError("Keine Proxmox-Credentials verfügbar.")
@@ -805,7 +1079,7 @@ class DiscoveryEngine:
         if not node or node.startswith("__"):
             raise ValueError(f"Ungültiger Node-Name: {node}")
 
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         try:
             raw = await self._proxmox_get(
                 client, f"/nodes/{quote(node)}/status", headers
@@ -926,7 +1200,7 @@ class DiscoveryEngine:
         if timeframe not in {"hour", "day", "week", "month", "year"}:
             timeframe = "hour"
 
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         try:
             path = (
                 f"/nodes/{quote(node)}/rrddata"
@@ -1000,7 +1274,7 @@ class DiscoveryEngine:
         if not node or node.startswith("__"):
             raise ValueError(f"Ungültiger Node-Name: {node}")
 
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         try:
             rows = await self._proxmox_get(
                 client, f"/nodes/{quote(node)}/storage", headers
@@ -1059,7 +1333,7 @@ class DiscoveryEngine:
         except ValueError as exc:
             raise ValueError(f"Ungültige Guest-ID: {guest_id}") from exc
 
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         try:
             status = await self._proxmox_get(
                 client,
@@ -1121,7 +1395,7 @@ class DiscoveryEngine:
         except ValueError as exc:
             raise ValueError(f"Ungültige Guest-ID: {guest_id}") from exc
 
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         try:
             try:
                 rows = await self._proxmox_get(
@@ -1214,7 +1488,7 @@ class DiscoveryEngine:
         except SnapshotNameError as exc:
             raise ValueError(exc.message) from exc
         kind, node, vmid = self._guest_id_parts(guest_id)
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         try:
             try:
                 upid = await self._proxmox_post(
@@ -1278,7 +1552,7 @@ class DiscoveryEngine:
         if name == "current":
             raise ValueError("Der Marker „current“ kann nicht gelöscht werden.")
         kind, node, vmid = self._guest_id_parts(guest_id)
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         try:
             try:
                 upid = await self._proxmox_delete(
@@ -1363,7 +1637,7 @@ class DiscoveryEngine:
 
         kind, node, vmid = self._guest_id_parts(guest_id)
         kind_label = "LXC" if kind == "lxc" else "VM"
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         task: dict[str, Any] | None = None
         upid: Any = None
         try:
@@ -1490,7 +1764,7 @@ class DiscoveryEngine:
         smart: list[dict[str, Any]] = []
         acl_notes: list[str] = []
 
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         try:
             zfs_rows = await self._proxmox_get_optional(
                 client, f"/nodes/{quote(node)}/disks/zfs", headers, acl_notes
@@ -1662,7 +1936,7 @@ class DiscoveryEngine:
             "shutdown": "heruntergefahren",
             "reboot": "neu gestartet",
         }
-        client, headers = await self._proxmox_authed_client()
+        client, headers = await self._proxmox_authed_client(node=node)
         try:
             try:
                 upid = await self._proxmox_post(

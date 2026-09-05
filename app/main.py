@@ -95,6 +95,7 @@ async def lifespan(app: FastAPI):
 
     app.state.topology_store = store
     app.state.discovery_engine = engine
+    engine.remember_from_snapshot(store.snapshot)
     app.state.settings = settings
     app.state.app_store = app_store
     app.state.inventory_store = inventory

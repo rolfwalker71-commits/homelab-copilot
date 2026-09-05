@@ -2225,6 +2225,14 @@ html[data-theme="dark"] .topo-node-status-pill.status-running {
   color: color-mix(in srgb, var(--muted) 85%, var(--text));
 }
 
+.topo-node-api-error {
+  margin: 0.4rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--danger, #b3261e);
+  overflow-wrap: anywhere;
+}
+
 .topo-node-body {
   display: flex;
   flex-direction: column;

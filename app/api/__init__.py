@@ -36,6 +36,13 @@ class SetupPayload(BaseModel):
     proxmox_token_secret: str = ""
     proxmox_password: str = ""
     proxmox_verify_ssl: bool = False
+    proxmox_2_host: str = ""
+    proxmox_2_port: int = 8006
+    proxmox_2_user: str = "root@pam"
+    proxmox_2_token_id: str = ""
+    proxmox_2_token_secret: str = ""
+    proxmox_2_password: str = ""
+    proxmox_2_verify_ssl: bool = False
     docker_use_local_socket: bool = True
     docker_ssh_user: str = "root"
 
@@ -167,6 +174,13 @@ async def setup_status() -> dict[str, Any]:
         "has_token_secret": bool(s.proxmox_token_secret),
         "has_password": bool(s.proxmox_password),
         "proxmox_verify_ssl": s.proxmox_verify_ssl,
+        "proxmox_2_host": s.proxmox_2_host,
+        "proxmox_2_port": s.proxmox_2_port,
+        "proxmox_2_user": s.proxmox_2_user,
+        "proxmox_2_token_id": s.proxmox_2_token_id,
+        "has_token_secret_2": bool(s.proxmox_2_token_secret),
+        "has_password_2": bool(s.proxmox_2_password),
+        "proxmox_2_verify_ssl": s.proxmox_2_verify_ssl,
         "docker_use_local_socket": s.docker_use_local_socket,
         "docker_ssh_user": s.docker_ssh_user,
         "docker_ssh_key_present": _ssh_key_present(s),
@@ -183,11 +197,20 @@ async def apply_setup(payload: SetupPayload) -> dict[str, Any]:
     """
     s = get_settings()
     raw = payload.model_dump()
+    # Old setup clients omit host-2 fields — do not wipe env-configured extras.
+    if "proxmox_2_host" not in payload.model_fields_set:
+        for key in list(raw):
+            if key.startswith("proxmox_2_"):
+                raw.pop(key, None)
     # Do not wipe secrets when the setup form leaves password fields blank
     if not raw.get("proxmox_token_secret"):
         raw.pop("proxmox_token_secret", None)
     if not raw.get("proxmox_password"):
         raw.pop("proxmox_password", None)
+    if not raw.get("proxmox_2_token_secret"):
+        raw.pop("proxmox_2_token_secret", None)
+    if not raw.get("proxmox_2_password"):
+        raw.pop("proxmox_2_password", None)
     for key, value in raw.items():
         if hasattr(s, key):
             object.__setattr__(s, key, value)
@@ -473,17 +496,25 @@ async def guest_power(
 
 
 def _proxmox_node_http_error(exc: Exception, *, label: str) -> HTTPException:
+    from app.core.proxmox import ProxmoxNodeUnboundError, format_proxmox_api_error
+
+    if isinstance(exc, ProxmoxNodeUnboundError):
+        return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, ValueError):
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, RuntimeError):
         return HTTPException(status_code=503, detail=str(exc))
-    return HTTPException(status_code=502, detail=f"{label}: {exc}")
+    formatted = format_proxmox_api_error(exc)
+    return HTTPException(status_code=502, detail=f"{label}: {formatted}")
 
 
 @router.get("/nodes/{node}/status")
 async def node_status(node: str, request: Request) -> dict[str, Any]:
     """Live Proxmox node status (loadavg, rootfs, versions, memory, CPU)."""
     engine = request.app.state.discovery_engine
+    store = getattr(request.app.state, "topology_store", None)
+    if store is not None:
+        engine.remember_from_snapshot(store.snapshot)
     try:
         return await engine.fetch_node_status(node)
     except Exception as exc:

@@ -7,7 +7,8 @@
   <p class="eyebrow">Konfiguration</p>
   <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Setup-Assistent</h1>
   <p class="mt-2 max-w-xl text-[var(--muted)]">
-    Proxmox einmal verbinden. Hostnames und IPs werden danach automatisch erkannt.
+    Proxmox verbinden. Eigenständige Hosts (kein gemeinsames Cluster) brauchen jeweils
+    eine eigene API — nicht nur einen zweiten Node-Namen auf dem ersten Host.
     Für dauerhafte Konfiguration Umgebungsvariablen im Container setzen.
   </p>
   <p class="mt-3 max-w-xl rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 text-sm text-[var(--muted)]">
@@ -86,6 +87,56 @@
            {% if settings.proxmox_verify_ssl %}checked{% endif %} />
     <label for="proxmox_verify_ssl" class="text-sm">SSL-Zertifikat prüfen</label>
   </div>
+
+  <div class="border-t border-[var(--border)] pt-5 space-y-4">
+    <h3 class="font-semibold">Zweiter Proxmox-Host (standalone)</h3>
+    <p class="text-sm text-[var(--muted)]">
+      Eigenständiger zweiter PVE, <strong class="text-[var(--text)]">kein</strong> Cluster-Mitglied
+      von Host&nbsp;1. Copilot spricht ihn nur über diese eigene URL/Token an —
+      niemals über die API von Host&nbsp;1 (<code class="text-[var(--text)]">/nodes/pve02/status</code>).
+      Leer lassen, wenn du nur einen Host hast. Dauerhaft:
+      <code class="text-[var(--text)]">PROXMOX_2_HOST</code> und Token in
+      <code class="text-[var(--text)]">.env</code> / Compose.
+    </p>
+    <div>
+      <label class="label" for="proxmox_2_host">Zweiter Host / IP</label>
+      <input class="field" id="proxmox_2_host" name="proxmox_2_host" type="text"
+             value="{{ settings.proxmox_2_host }}" placeholder="z. B. 192.168.5.102" autocomplete="off" />
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="label" for="proxmox_2_port">Port</label>
+        <input class="field" id="proxmox_2_port" name="proxmox_2_port" type="number" value="{{ settings.proxmox_2_port }}" />
+      </div>
+      <div>
+        <label class="label" for="proxmox_2_user">Benutzer</label>
+        <input class="field" id="proxmox_2_user" name="proxmox_2_user" type="text" value="{{ settings.proxmox_2_user }}" />
+      </div>
+    </div>
+    <div>
+      <label class="label" for="proxmox_2_token_id">API-Token ID</label>
+      <input class="field" id="proxmox_2_token_id" name="proxmox_2_token_id" type="text"
+             value="{{ settings.proxmox_2_token_id }}" placeholder="copilot oder root@pam!copilot" />
+    </div>
+    <div>
+      <label class="label" for="proxmox_2_token_secret">API-Token Secret</label>
+      <input class="field" id="proxmox_2_token_secret" name="proxmox_2_token_secret" type="password"
+             value="" placeholder="{% if settings.proxmox_2_token_secret %}•••••••• (gesetzt){% else %}Secret{% endif %}"
+             autocomplete="new-password" />
+    </div>
+    <div>
+      <label class="label" for="proxmox_2_password">Oder Passwort (Fallback)</label>
+      <input class="field" id="proxmox_2_password" name="proxmox_2_password" type="password"
+             value="" autocomplete="new-password" />
+    </div>
+    <div class="flex items-center gap-3">
+      <input id="proxmox_2_verify_ssl" name="proxmox_2_verify_ssl" type="checkbox"
+             class="h-5 w-5 rounded border-[var(--border)]"
+             {% if settings.proxmox_2_verify_ssl %}checked{% endif %} />
+      <label for="proxmox_2_verify_ssl" class="text-sm">SSL-Zertifikat prüfen (Host 2)</label>
+    </div>
+  </div>
+
   <div class="flex items-center gap-3">
     <input id="docker_use_local_socket" name="docker_use_local_socket" type="checkbox"
            class="h-5 w-5 rounded border-[var(--border)]"
@@ -210,11 +261,20 @@
       proxmox_token_secret: form.proxmox_token_secret.value,
       proxmox_password: form.proxmox_password.value,
       proxmox_verify_ssl: form.proxmox_verify_ssl.checked,
+      proxmox_2_host: form.proxmox_2_host.value.trim(),
+      proxmox_2_port: Number(form.proxmox_2_port.value) || 8006,
+      proxmox_2_user: form.proxmox_2_user.value.trim() || 'root@pam',
+      proxmox_2_token_id: form.proxmox_2_token_id.value.trim(),
+      proxmox_2_token_secret: form.proxmox_2_token_secret.value,
+      proxmox_2_password: form.proxmox_2_password.value,
+      proxmox_2_verify_ssl: form.proxmox_2_verify_ssl.checked,
       docker_use_local_socket: form.docker_use_local_socket.checked,
       docker_ssh_user: form.docker_ssh_user.value.trim() || 'root',
     };
     if (!data.proxmox_token_secret) delete data.proxmox_token_secret;
     if (!data.proxmox_password) delete data.proxmox_password;
+    if (!data.proxmox_2_token_secret) delete data.proxmox_2_token_secret;
+    if (!data.proxmox_2_password) delete data.proxmox_2_password;
 
     msg.textContent = 'Speichere…';
     try {
