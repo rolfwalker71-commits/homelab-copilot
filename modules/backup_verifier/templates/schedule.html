@@ -24,6 +24,7 @@
     <div>
       <label class="label" for="sched-stack">Stack</label>
       <select id="sched-stack" class="field" required></select>
+      <p id="sched-dup-note" class="mt-1.5 hidden text-sm text-[var(--warn)]" role="status"></p>
     </div>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 max-w-xl">
       <div>
@@ -123,6 +124,93 @@
     return encodeURIComponent(parentId) + '|' + encodeURIComponent(stack);
   }
 
+  function parseClockMinutes(s) {
+    if (s && typeof s.start_hm === 'string' && /^\d{1,2}:\d{2}$/.test(s.start_hm)) {
+      const parts = s.start_hm.split(':').map(Number);
+      if (parts[0] >= 0 && parts[0] <= 23 && parts[1] >= 0 && parts[1] <= 59) {
+        return parts[0] * 60 + parts[1];
+      }
+    }
+    const nr = String(s && s.next_run || '');
+    const nm = nr.match(/(\d{2}):(\d{2}):\d{2}/);
+    if (nm) return Number(nm[1]) * 60 + Number(nm[2]);
+    const cron = String(s && s.cron_expr || '').trim().split(/\s+/);
+    if (cron.length >= 2 && /^\d+$/.test(cron[0]) && /^\d+$/.test(cron[1])) {
+      const minute = Number(cron[0]);
+      const hour = Number(cron[1]);
+      if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        return hour * 60 + minute;
+      }
+    }
+    return (24 * 60) + 1;
+  }
+
+  function clockKey(s) {
+    const mins = parseClockMinutes(s);
+    if (mins > 24 * 60) return '';
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+  }
+
+  function decorateSchedules(items) {
+    const counts = {};
+    for (const s of items) {
+      if (!s.enabled) continue;
+      const key = s.start_hm || clockKey(s);
+      if (!key) continue;
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    return items
+      .map((s) => {
+        const key = s.start_hm || clockKey(s) || null;
+        const same = !!(s.enabled && key && counts[key] > 1);
+        return Object.assign({}, s, {
+          start_hm: key,
+          same_start: !!(s.same_start || same),
+        });
+      })
+      .sort((a, b) => {
+        const da = parseClockMinutes(a) - parseClockMinutes(b);
+        if (da) return da;
+        const iso = String(a.next_run_iso || '').localeCompare(String(b.next_run_iso || ''));
+        if (iso) return iso;
+        return Number(a.id || 0) - Number(b.id || 0);
+      });
+  }
+
+  function existingScheduleForStack(parentId, project, exceptId) {
+    return schedulesCache.find((s) =>
+      String(s.parent_id) === String(parentId) &&
+      String(s.stack) === String(project) &&
+      String(s.id) !== String(exceptId || '')
+    ) || null;
+  }
+
+  function updateDupNote() {
+    const note = document.getElementById('sched-dup-note');
+    const sel = document.getElementById('sched-stack');
+    if (!note || !sel) return;
+    const parsed = parseStackVal(sel.value);
+    const editingId = document.getElementById('sched-id').value;
+    if (!parsed) {
+      note.classList.add('hidden');
+      note.textContent = '';
+      return;
+    }
+    const existing = existingScheduleForStack(parsed.parent_id, parsed.project, editingId);
+    if (!existing) {
+      note.classList.add('hidden');
+      note.textContent = '';
+      return;
+    }
+    const host = hostLabel(existing) || existing.parent_id;
+    note.textContent =
+      'Für ' + host + ' auf ' + existing.stack +
+      ' existiert bereits ein Zeitplan (' + existing.cron_expr + ').';
+    note.classList.remove('hidden');
+  }
+
   function hostLabel(s) {
     return String(s && (s.guest_name || s.parent_id) || '').trim();
   }
@@ -175,6 +263,7 @@
     setSchedEngine('tar');
     syncPresetUI();
     setEditMode(false);
+    updateDupNote();
   }
 
   function fillForm(s) {
@@ -208,6 +297,7 @@
     }
     syncPresetUI();
     setEditMode(true, stackHostText(s));
+    updateDupNote();
     document.getElementById('sched-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
     document.getElementById('sched-stack').focus();
   }
@@ -244,6 +334,7 @@
     }).join('');
     const empty = '<option value="">Kein Compose-Stack gefunden</option>';
     document.getElementById('sched-stack').innerHTML = opts || empty;
+    updateDupNote();
   }
 
   function parseStackVal(val) {
@@ -259,16 +350,21 @@
     const res = await fetch(API + '/schedules');
     const data = await res.json();
     const list = document.getElementById('sched-list');
-    const items = data.schedules || [];
+    const items = decorateSchedules(data.schedules || []);
     schedulesCache = items;
     list.innerHTML = items.length ? items.map((s) => {
       const label = stackHostText(s);
+      const overlap = !!s.same_start;
+      const rowCls = overlap
+        ? 'border-[color-mix(in_srgb,var(--warn)_55%,var(--outline))] bg-[color-mix(in_srgb,var(--warn)_12%,var(--card))]'
+        : 'border-[var(--border)]';
       return `
-      <li class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] p-2">
+      <li class="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-2 ${rowCls}">
         <span>${stackHostHtml(s)} · <code>${esc(s.cron_expr)}</code> · ${s.enabled ? 'aktiv' : 'aus'}
           · ${s.engine === 'restic' ? 'restic' : 'tar'}
           ${s.next_run ? `<br><span class="text-[var(--muted)]">Nächster Lauf: ${esc(s.next_run)}</span>` : ''}
           ${s.last_fired_at ? `<br><span class="text-[var(--muted)]">Zuletzt gestartet: ${esc(s.last_fired_at)}</span>` : ''}
+          ${overlap ? '<br><span class="chip chip-paused mt-1">Gleicher Start — kann sich überschneiden</span>' : ''}
         </span>
         <span class="flex flex-wrap gap-2">
           <button type="button" class="btn btn-ghost btn-xs" data-edit-sched="${s.id}" aria-label="Zeitplan ${esc(label)} bearbeiten">Bearbeiten</button>
@@ -277,11 +373,13 @@
       </li>`;
     }).join('') : '<li class="text-[var(--muted)]">Keine Zeitpläne.</li>';
     document.getElementById('cron-preview').textContent = [data.hint, data.preview].filter(Boolean).join('\n\n');
+    updateDupNote();
   }
 
   document.getElementById('sched-engine-tar')?.addEventListener('click', () => setSchedEngine('tar'));
   document.getElementById('sched-engine-restic')?.addEventListener('click', () => setSchedEngine('restic'));
   document.getElementById('sched-preset')?.addEventListener('change', syncPresetUI);
+  document.getElementById('sched-stack')?.addEventListener('change', updateDupNote);
 
   document.getElementById('sched-cancel')?.addEventListener('click', resetForm);
 

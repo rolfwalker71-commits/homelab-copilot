@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.locale import BERLIN, format_de, now_berlin
@@ -90,6 +90,52 @@ def cron_matches(expr: str, dt: datetime) -> bool:
     if not dom_star and not dow_star:
         return dom_ok or dow_ok
     return dom_ok and dow_ok
+
+
+def cron_clock_hm(expr: str) -> tuple[int, int] | None:
+    """Hour/minute from a 5-field cron when both fields are a single number."""
+    expr = " ".join((expr or "").split())
+    m = _CRON_RE.match(expr)
+    if not m:
+        return None
+    minute_s, hour_s = m.group(1), m.group(2)
+    if not (minute_s.isdigit() and hour_s.isdigit()):
+        return None
+    minute, hour = int(minute_s), int(hour_s)
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return (hour, minute)
+    return None
+
+
+def schedule_clock_hm(
+    row: dict[str, Any],
+    nxt: datetime | None = None,
+) -> tuple[int, int] | None:
+    """Wall-clock (hour, minute) in Europe/Berlin. Prefer next_run."""
+    if nxt is not None:
+        if nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=BERLIN)
+        else:
+            nxt = nxt.astimezone(BERLIN)
+        return (nxt.hour, nxt.minute)
+    iso = str(row.get("next_run_iso") or "").strip()
+    if iso:
+        try:
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone(BERLIN)
+            return (dt.hour, dt.minute)
+        except ValueError:
+            pass
+    return cron_clock_hm(str(row.get("cron_expr") or ""))
+
+
+def schedule_start_sort_key(row: dict[str, Any]) -> tuple[int, str, int]:
+    """Chronological key: clock minutes, then next_run, then id."""
+    hm = schedule_clock_hm(row)
+    minutes = (hm[0] * 60 + hm[1]) if hm else (24 * 60 + 1)
+    return (minutes, str(row.get("next_run_iso") or ""), int(row.get("id") or 0))
 
 
 def next_run_after(expr: str, after: datetime | None = None) -> datetime | None:

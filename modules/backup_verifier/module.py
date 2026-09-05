@@ -36,7 +36,12 @@ from backup_verifier.inventory import build_inventory, resolve_guest
 from backup_verifier.jobs import JOBS
 from backup_verifier.restic import ENGINE_RESTIC, ResticError, list_restic_snapshots
 from backup_verifier.restore import RestoreError, run_restore
-from backup_verifier.scheduler import next_run_after, run_schedule_loop
+from backup_verifier.scheduler import (
+    next_run_after,
+    run_schedule_loop,
+    schedule_clock_hm,
+    schedule_start_sort_key,
+)
 from backup_verifier.store import BackupStore
 
 logger = logging.getLogger(__name__)
@@ -914,7 +919,20 @@ async def list_schedules(request: Request) -> dict[str, Any]:
         item = _with_guest(row, snapshot, overwrite=True)
         item["next_run"] = format_de(nxt) if nxt else None
         item["next_run_iso"] = iso_utc(nxt) if nxt else None
+        hm = schedule_clock_hm(item, nxt)
+        item["start_hm"] = f"{hm[0]:02d}:{hm[1]:02d}" if hm else None
         enriched.append(item)
+    start_counts: dict[str, int] = {}
+    for item in enriched:
+        key = item.get("start_hm")
+        if item.get("enabled") and key:
+            start_counts[key] = start_counts.get(key, 0) + 1
+    for item in enriched:
+        key = item.get("start_hm")
+        item["same_start"] = bool(
+            item.get("enabled") and key and start_counts.get(key, 0) > 1
+        )
+    enriched.sort(key=schedule_start_sort_key)
     return {
         "schedules": enriched,
         "scheduler": "in_process",

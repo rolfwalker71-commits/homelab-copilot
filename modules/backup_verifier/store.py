@@ -10,6 +10,7 @@ from typing import Any
 import aiosqlite
 
 from app.core.locale import format_de, iso_utc, now_berlin
+from backup_verifier.scheduler import schedule_start_sort_key
 
 logger = logging.getLogger(__name__)
 
@@ -467,7 +468,23 @@ class BackupStore:
             d = dict(r)
             d["enabled"] = bool(d.get("enabled"))
             out.append(d)
+        out.sort(key=schedule_start_sort_key)
         return out
+
+    async def find_schedules_for_stack(
+        self, parent_id: str, stack: str
+    ) -> list[dict[str, Any]]:
+        """All schedules for the same parent + compose project (any order)."""
+        parent_id = str(parent_id or "").strip()
+        stack = str(stack or "").strip()
+        if not parent_id or not stack:
+            return []
+        return [
+            row
+            for row in await self.list_schedules()
+            if str(row.get("parent_id") or "") == parent_id
+            and str(row.get("stack") or "") == stack
+        ]
 
     async def get_schedule(self, schedule_id: int) -> dict[str, Any] | None:
         db = self._require()
