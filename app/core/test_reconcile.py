@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from app.core.models import EntityKind, EntityStatus, TopologyEntity, TopologySnapshot
-from app.core.reconcile import reconcile_topology
+from app.core.reconcile import guest_source_label, is_live_rail_guest, reconcile_topology
 from app.core.tree import build_topology_tree
 
 
@@ -17,7 +17,11 @@ def _guest(
     status: EntityStatus = EntityStatus.RUNNING,
     ips: list[str] | None = None,
     kind: EntityKind = EntityKind.LXC,
+    meta: dict | None = None,
 ) -> TopologyEntity:
+    payload = {"pve_source": node}
+    if meta:
+        payload.update(meta)
     return TopologyEntity(
         id=f"{kind.value}:{node}:{vmid}",
         kind=kind,
@@ -28,6 +32,7 @@ def _guest(
         hostname=name,
         ip_addresses=ips or [],
         parent_id=f"node:{node}",
+        meta=payload,
     )
 
 
@@ -183,3 +188,67 @@ class TreeRailTests(unittest.TestCase):
         tree = build_topology_tree(snap)
         self.assertEqual([n["name"] for n in tree["nodes"]], ["pve01"])
         self.assertEqual([row["guest"].name for row in tree["nodes"][0]["guests"]], ["ok"])
+
+
+class LiveRailFilterTests(unittest.TestCase):
+    def test_unknown_nameless_resource_not_on_rail(self) -> None:
+        """Do not keep invented ``lxc-114`` when status is unknown (no config)."""
+        prev = _snap(guests=[_guest("nginxproxymanager", 103)])
+        live = _snap(
+            guests=[
+                _guest("nginxproxymanager", 103),
+                _guest("lxc-114", 114, status=EntityStatus.UNKNOWN),
+                _guest("lxc-118", 118, status=EntityStatus.UNKNOWN, node="pve02"),
+                _guest("lxc-150", 150, status=EntityStatus.UNKNOWN),
+            ]
+        )
+        out, stats = reconcile_topology(prev, live)
+        names = [g.name for g in out.guests]
+        self.assertEqual(names, ["nginxproxymanager"])
+        self.assertNotIn("lxc-114", names)
+        self.assertEqual(stats.added, 0)
+        tree = build_topology_tree(out)
+        rail_names = [row["guest"].name for row in tree["nodes"][0]["guests"]]
+        self.assertEqual(rail_names, ["nginxproxymanager"])
+
+    def test_vanished_from_all_apis_gone(self) -> None:
+        prev = _snap(
+            guests=[
+                _guest("vaultwarden", 113),
+                _guest("lxc-114", 114, status=EntityStatus.UNKNOWN),
+            ]
+        )
+        live = _snap(guests=[_guest("vaultwarden", 113)])
+        out, stats = reconcile_topology(prev, live)
+        self.assertEqual([g.name for g in out.guests], ["vaultwarden"])
+        self.assertEqual(stats.removed, 1)
+        self.assertEqual(stats.removed_ids, ("lxc:pve01:114",))
+        tree = build_topology_tree(out)
+        rail = [row["guest"].name for row in tree["nodes"][0]["guests"]]
+        self.assertNotIn("lxc-114", rail)
+
+    def test_template_dropped_from_rail(self) -> None:
+        live = _snap(
+            guests=[
+                _guest("ok", 103),
+                _guest("tmpl", 900, meta={"template": True}),
+            ]
+        )
+        out, _stats = reconcile_topology(None, live)
+        self.assertEqual([g.name for g in out.guests], ["ok"])
+        self.assertFalse(is_live_rail_guest(live.guests[1]))
+
+    def test_added_toast_includes_pve_source(self) -> None:
+        prev = _snap(guests=[_guest("vaultwarden", 113)])
+        live = _snap(
+            nodes=[_node("pve01"), _node("pve02")],
+            guests=[
+                _guest("vaultwarden", 113),
+                _guest("paperless", 105, node="pve02", meta={"pve_source": "pve02"}),
+            ]
+        )
+        _out, stats = reconcile_topology(prev, live)
+        self.assertEqual(stats.added, 1)
+        self.assertEqual(stats.added_from, (("paperless", "pve02"),))
+        self.assertIn("paperless←pve02", stats.message_de())
+        self.assertEqual(guest_source_label(live.guests[1]), "pve02")

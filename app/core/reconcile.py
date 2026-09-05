@@ -1,9 +1,10 @@
 """Reconcile a live Proxmox discovery against the cached topology.
 
-Live ``/cluster/resources`` (plus per-node LXC/QEMU lists) is the source of
-truth for PVE guests. Vanished VMIDs are dropped from the Hosts rail; a
-recreate that keeps the name (stirlingpdf 104→108) updates vmid/node/status/ip.
-Manual Linux hosts are never deleted here.
+Live qemu/lxc guests with a real status (and config on owned nodes) are the
+source of truth for the Hosts rail. Vanished VMIDs and unknown leftovers
+(``lxc-114`` without config) are dropped; a recreate that keeps the name
+(stirlingpdf 104→108) updates vmid/node/status/ip. Manual Linux hosts are
+never deleted here.
 """
 
 from __future__ import annotations
@@ -24,7 +25,18 @@ class ReconcileStats:
     unchanged: int = 0
     id_changes: tuple[tuple[str, str], ...] = ()
     removed_ids: tuple[str, ...] = ()
+    added_from: tuple[tuple[str, str], ...] = ()
     pve_kept_previous: bool = False
+
+    def _added_debug_de(self) -> str:
+        if not self.added:
+            return ""
+        if not self.added_from:
+            return f"{self.added} neu"
+        shown = self.added_from[:8]
+        bits = ", ".join(f"{name}←{src}" for name, src in shown)
+        extra = "…" if len(self.added_from) > 8 else ""
+        return f"{self.added} neu ({bits}{extra})"
 
     def message_de(self) -> str:
         if self.pve_kept_previous:
@@ -33,8 +45,9 @@ class ReconcileStats:
             f"{self.removed} Gäste entfernt",
             f"{self.updated} aktualisiert",
         ]
-        if self.added:
-            parts.append(f"{self.added} neu")
+        added_text = self._added_debug_de()
+        if added_text:
+            parts.append(added_text)
         text = ", ".join(parts)
         if self.removed == 0 and self.updated == 0 and self.added == 0:
             return f"{text} — Topologie entspricht Proxmox"
@@ -48,6 +61,7 @@ class ReconcileStats:
             "unchanged": self.unchanged,
             "id_changes": [list(pair) for pair in self.id_changes],
             "removed_ids": list(self.removed_ids),
+            "added_from": [list(pair) for pair in self.added_from],
             "pve_kept_previous": self.pve_kept_previous,
             "message": self.message_de(),
         }
@@ -77,6 +91,29 @@ def _kind(ent: TopologyEntity) -> EntityKind:
 
 def _is_pve_guest(ent: TopologyEntity) -> bool:
     return _kind(ent) in _PVE_KINDS
+
+
+def guest_source_label(ent: TopologyEntity) -> str:
+    """Toast origin: node name (pve01/pve02) or inventory/manual."""
+    meta = ent.meta or {}
+    src = str(meta.get("pve_source") or "").strip()
+    if src:
+        return src
+    node = (ent.node or "").strip()
+    if node:
+        return node
+    if str(meta.get("source") or "") == "manual":
+        return "inventory"
+    return "inventory"
+
+
+def is_live_rail_guest(ent: TopologyEntity) -> bool:
+    """True for qemu/lxc the Hosts rail may show (not template / unknown)."""
+    if not _is_pve_guest(ent):
+        return False
+    if (ent.meta or {}).get("template"):
+        return False
+    return _status_value(ent) in {"running", "stopped", "paused"}
 
 
 def _id_key(ent: TopologyEntity) -> tuple[str, str, int]:
@@ -170,7 +207,7 @@ def reconcile_topology(
 
     listed = {(n.name or "").strip() for n in live.nodes if (n.name or "").strip()}
     live_guests = guests_on_listed_nodes(
-        [g for g in live.guests if _is_pve_guest(g)],
+        [g for g in live.guests if is_live_rail_guest(g)],
         listed,
     )
     prev_guests = [
@@ -188,6 +225,7 @@ def reconcile_topology(
     out: list[TopologyEntity] = []
     added = updated = unchanged = 0
     id_changes: list[tuple[str, str]] = []
+    added_from: list[tuple[str, str]] = []
 
     for live_g in live_guests:
         prev = by_id.get(_id_key(live_g))
@@ -200,6 +238,7 @@ def reconcile_topology(
         if prev is None:
             out.append(live_g)
             added += 1
+            added_from.append((live_g.name, guest_source_label(live_g)))
             continue
         used_prev.add(prev.id)
         merged = _fill_ips_from_previous(live_g, prev)
@@ -226,6 +265,7 @@ def reconcile_topology(
         unchanged=unchanged,
         id_changes=tuple(id_changes),
         removed_ids=removed_ids,
+        added_from=tuple(added_from),
     )
     snapshot = live.model_copy(
         update={

@@ -35,6 +35,14 @@ _IP_RE = re.compile(
 )
 
 
+_RAIL_LIVE_STATUS = {
+    EntityStatus.RUNNING,
+    EntityStatus.STOPPED,
+    EntityStatus.PAUSED,
+}
+_CONFIG_MISSING_HTTP = {404, 500, 595}
+
+
 def _status_from_str(value: str | None) -> EntityStatus:
     if not value:
         return EntityStatus.UNKNOWN
@@ -46,6 +54,52 @@ def _status_from_str(value: str | None) -> EntityStatus:
     if v in {"paused", "suspended"}:
         return EntityStatus.PAUSED
     return EntityStatus.UNKNOWN
+
+
+def _kind_value(kind: EntityKind | str | None) -> str:
+    if isinstance(kind, EntityKind):
+        return kind.value
+    return str(kind or "").strip().lower()
+
+
+def resource_guest_name(
+    raw: dict[str, Any] | None,
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> str:
+    """Hostname from the resource row or config — never invent ``lxc-114``."""
+    if isinstance(raw, dict):
+        name = str(raw.get("name") or "").strip()
+        if name:
+            return name
+    if isinstance(cfg, dict):
+        name = str(cfg.get("hostname") or cfg.get("name") or "").strip()
+        if name:
+            return name
+    return ""
+
+
+def should_emit_rail_guest(
+    *,
+    kind: EntityKind | str,
+    status: EntityStatus,
+    template: bool = False,
+    name: str | None = None,
+    config_ok: bool = False,
+    config_http: int | None = None,
+) -> bool:
+    """Hosts rail: live qemu/lxc only (not templates, unknown, or missing config)."""
+    if _kind_value(kind) not in {"lxc", "qemu"}:
+        return False
+    if template:
+        return False
+    if config_http in _CONFIG_MISSING_HTTP:
+        return False
+    if status not in _RAIL_LIVE_STATUS:
+        return False
+    if not config_ok and not str(name or "").strip():
+        return False
+    return True
 
 
 ManualHostsFn = Callable[[], Awaitable[list[dict[str, Any]]]]
@@ -611,6 +665,8 @@ class DiscoveryEngine:
                     client, "/cluster/resources?type=vm", headers
                 )
                 for raw in resources or []:
+                    if not isinstance(raw, dict):
+                        continue
                     node_name = raw.get("node") or ""
                     if ep.node_filter and node_name != ep.node_filter:
                         continue
@@ -618,20 +674,21 @@ class DiscoveryEngine:
                     if not node_name or not vmid:
                         continue
                     rtype = (raw.get("type") or "").lower()
+                    if rtype not in {"lxc", "qemu"}:
+                        continue
                     kind = EntityKind.LXC if rtype == "lxc" else EntityKind.QEMU
-                    seen_vmids.add((node_name, vmid))
                     if node_name in owned_names:
-                        guests.append(
-                            await self._enrich_guest(
-                                client, headers, node_name, raw, kind, stamp, stamp_iso
-                            )
+                        guest = await self._enrich_guest(
+                            client, headers, node_name, raw, kind, stamp, stamp_iso
                         )
                     else:
-                        guests.append(
-                            self._guest_entity_plain(
-                                node_name, raw, kind, stamp, stamp_iso
-                            )
+                        guest = self._guest_entity_plain(
+                            node_name, raw, kind, stamp, stamp_iso
                         )
+                    if guest is None:
+                        continue
+                    seen_vmids.add((node_name, vmid))
+                    guests.append(guest)
             except Exception as exc:
                 msg = (
                     f"Cluster-Resources (VMs) auf {ep.host} fehlgeschlagen: "
@@ -646,15 +703,18 @@ class DiscoveryEngine:
                         client, f"/nodes/{quote(node_name)}/lxc", headers
                     )
                     for ct in lxcs or []:
+                        if not isinstance(ct, dict):
+                            continue
                         vmid = int(ct.get("vmid") or 0)
-                        if (node_name, vmid) in seen_vmids:
+                        if not vmid or (node_name, vmid) in seen_vmids:
+                            continue
+                        guest = await self._enrich_guest(
+                            client, headers, node_name, ct, EntityKind.LXC, stamp, stamp_iso
+                        )
+                        if guest is None:
                             continue
                         seen_vmids.add((node_name, vmid))
-                        guests.append(
-                            await self._enrich_guest(
-                                client, headers, node_name, ct, EntityKind.LXC, stamp, stamp_iso
-                            )
-                        )
+                        guests.append(guest)
                 except Exception as exc:
                     msg = (
                         f"LXC-Liste auf Node {node_name} ({ep.host}) fehlgeschlagen: "
@@ -668,15 +728,18 @@ class DiscoveryEngine:
                         client, f"/nodes/{quote(node_name)}/qemu", headers
                     )
                     for vm in vms or []:
+                        if not isinstance(vm, dict):
+                            continue
                         vmid = int(vm.get("vmid") or 0)
-                        if (node_name, vmid) in seen_vmids:
+                        if not vmid or (node_name, vmid) in seen_vmids:
+                            continue
+                        guest = await self._enrich_guest(
+                            client, headers, node_name, vm, EntityKind.QEMU, stamp, stamp_iso
+                        )
+                        if guest is None:
                             continue
                         seen_vmids.add((node_name, vmid))
-                        guests.append(
-                            await self._enrich_guest(
-                                client, headers, node_name, vm, EntityKind.QEMU, stamp, stamp_iso
-                            )
-                        )
+                        guests.append(guest)
                 except Exception as exc:
                     msg = (
                         f"QEMU-Liste auf Node {node_name} ({ep.host}) fehlgeschlagen: "
@@ -704,20 +767,40 @@ class DiscoveryEngine:
         kind: EntityKind,
         stamp: str,
         stamp_iso: str,
-    ) -> TopologyEntity:
-        """Guest row without calling the listing API for config/agent (foreign node)."""
+    ) -> TopologyEntity | None:
+        """Guest row without config/agent (foreign node). No invented ``lxc-114``."""
         vmid = int(raw.get("vmid") or 0)
-        name = raw.get("name") or f"{kind.value}-{vmid}"
+        name = resource_guest_name(raw)
+        status = _status_from_str(raw.get("status") if isinstance(raw, dict) else None)
+        template = bool(raw.get("template")) if isinstance(raw, dict) else False
+        if not should_emit_rail_guest(
+            kind=kind,
+            status=status,
+            template=template,
+            name=name,
+            config_ok=False,
+        ):
+            logger.info(
+                "Hosts-Rail: %s %s/%s übersprungen (kein Config, Status=%s, Name=%r)",
+                kind.value,
+                node,
+                vmid,
+                status.value,
+                name,
+            )
+            return None
+        meta = self._guest_resource_meta(raw)
+        meta["pve_source"] = node
         return TopologyEntity(
             id=f"{kind.value}:{node}:{vmid}",
             kind=kind,
             name=name,
-            status=_status_from_str(raw.get("status")),
+            status=status,
             node=node,
             vmid=vmid,
             hostname=name,
             parent_id=f"node:{node}",
-            meta=self._guest_resource_meta(raw),
+            meta=meta,
             discovered_at=stamp,
             discovered_at_iso=stamp_iso,
         )
@@ -770,6 +853,28 @@ class DiscoveryEngine:
                 node.meta = dict(node.meta or {})
                 node.meta["ssh_ip"] = ip
 
+    async def _fetch_guest_config(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        node: str,
+        kind: EntityKind,
+        vmid: int,
+    ) -> tuple[dict[str, Any] | None, int | None]:
+        """GET ``/nodes/{node}/{lxc|qemu}/{vmid}/config``. HTTP set on status errors."""
+        path = f"/nodes/{quote(node)}/{kind.value}/{vmid}/config"
+        try:
+            cfg = await self._proxmox_get(client, path, headers)
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code if exc.response is not None else 0
+            return None, int(code or 0) or None
+        except Exception as exc:
+            logger.debug("Config %s %s/%s: %s", kind.value, node, vmid, exc)
+            return None, None
+        if isinstance(cfg, dict):
+            return cfg, 200
+        return None, 200
+
     async def _enrich_guest(
         self,
         client: httpx.AsyncClient,
@@ -779,59 +884,77 @@ class DiscoveryEngine:
         kind: EntityKind,
         stamp: str,
         stamp_iso: str,
-    ) -> TopologyEntity:
-        vmid = int(raw.get("vmid", 0))
-        name = raw.get("name") or f"{kind.value}-{vmid}"
+    ) -> TopologyEntity | None:
+        vmid = int(raw.get("vmid", 0) or 0)
+        status = _status_from_str(raw.get("status") if isinstance(raw, dict) else None)
+        template = bool(raw.get("template")) if isinstance(raw, dict) else False
+        cfg, config_http = await self._fetch_guest_config(
+            client, headers, node, kind, vmid
+        )
+        config_ok = isinstance(cfg, dict) and config_http not in _CONFIG_MISSING_HTTP
+        name = resource_guest_name(raw, cfg=cfg)
+        if not should_emit_rail_guest(
+            kind=kind,
+            status=status,
+            template=template,
+            name=name,
+            config_ok=config_ok,
+            config_http=config_http,
+        ):
+            logger.info(
+                "Hosts-Rail: %s %s/%s übersprungen (HTTP %s, Status=%s, Name=%r)",
+                kind.value,
+                node,
+                vmid,
+                config_http,
+                status.value,
+                name,
+            )
+            return None
+        if not name:
+            name = f"{kind.value}-{vmid}"
+        meta = self._guest_resource_meta(raw)
+        meta["pve_source"] = node
         entity = TopologyEntity(
             id=f"{kind.value}:{node}:{vmid}",
             kind=kind,
             name=name,
-            status=_status_from_str(raw.get("status")),
+            status=status,
             node=node,
             vmid=vmid,
             hostname=name,
             parent_id=f"node:{node}",
-            meta=self._guest_resource_meta(raw),
+            meta=meta,
             discovered_at=stamp,
             discovered_at_iso=stamp_iso,
         )
 
-        # Config for tags / LXC nets (also when stopped — tags still useful in UI)
-        try:
-            if kind == EntityKind.LXC:
-                cfg = await self._proxmox_get(
-                    client, f"/nodes/{quote(node)}/lxc/{vmid}/config", headers
-                )
-                self._apply_lxc_config_meta(entity.meta, cfg or {})
-                cfg_ips = sorted(set(self._ips_from_lxc_config(cfg or {})))
-                if cfg_ips:
-                    entity.ip_addresses = cfg_ips
-            elif kind == EntityKind.QEMU:
-                if not entity.meta.get("tags_list"):
-                    cfg = await self._proxmox_get(
-                        client, f"/nodes/{quote(node)}/qemu/{vmid}/config", headers
+        if kind == EntityKind.LXC and isinstance(cfg, dict):
+            self._apply_lxc_config_meta(entity.meta, cfg)
+            cfg_ips = sorted(set(self._ips_from_lxc_config(cfg)))
+            if cfg_ips:
+                entity.ip_addresses = cfg_ips
+        elif kind == EntityKind.QEMU:
+            if isinstance(cfg, dict) and not entity.meta.get("tags_list"):
+                cfg_tags = cfg.get("tags")
+                if cfg_tags:
+                    tags_list = self._parse_proxmox_tags(cfg_tags)
+                    entity.meta["tags"] = (
+                        cfg_tags if isinstance(cfg_tags, str) else ";".join(tags_list)
                     )
-                    cfg_tags = (cfg or {}).get("tags")
-                    if cfg_tags:
-                        tags_list = self._parse_proxmox_tags(cfg_tags)
-                        entity.meta["tags"] = (
-                            cfg_tags if isinstance(cfg_tags, str) else ";".join(tags_list)
-                        )
-                        entity.meta["tags_list"] = tags_list
-                if entity.status == EntityStatus.RUNNING:
-                    try:
-                        ifaces = await self._proxmox_get(
-                            client,
-                            f"/nodes/{quote(node)}/qemu/{vmid}/agent/network-get-interfaces",
-                            headers,
-                        )
-                        entity.ip_addresses = sorted(
-                            set(self._ips_from_qemu_agent(ifaces))
-                        )
-                    except Exception as exc:
-                        logger.debug("QEMU agent IPs for %s failed: %s", entity.id, exc)
-        except Exception as exc:
-            logger.debug("Config enrichment for %s failed: %s", entity.id, exc)
+                    entity.meta["tags_list"] = tags_list
+            if entity.status == EntityStatus.RUNNING:
+                try:
+                    ifaces = await self._proxmox_get(
+                        client,
+                        f"/nodes/{quote(node)}/qemu/{vmid}/agent/network-get-interfaces",
+                        headers,
+                    )
+                    entity.ip_addresses = sorted(
+                        set(self._ips_from_qemu_agent(ifaces))
+                    )
+                except Exception as exc:
+                    logger.debug("QEMU agent IPs for %s failed: %s", entity.id, exc)
 
         return entity
 
