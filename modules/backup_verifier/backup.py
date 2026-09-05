@@ -26,6 +26,7 @@ from backup_verifier.destinations import (
     resolve_auth,
 )
 from backup_verifier.inventory import build_inventory
+from backup_verifier.restic import ENGINE_RESTIC, ResticError, run_restic_backup
 from backup_verifier import sshutil
 from backup_verifier.store import BackupStore
 from backup_verifier.verify import (
@@ -159,6 +160,10 @@ async def run_backup(
     settings: Settings | None = None,
     bsettings: BackupSettings | None = None,
     quiesce: bool | None = None,
+    engine: str = "tar",
+    restic_full_every_days: int = 7,
+    restic_keep_last: int = 14,
+    restic_keep_weekly: int = 8,
     on_progress: ProgressFn | None = None,
     on_log: LogFn | None = None,
 ) -> dict[str, Any]:
@@ -166,6 +171,7 @@ async def run_backup(
     bsettings = bsettings or get_backup_settings()
     project = validate_docker_name(project, kind="Compose-Projekt")
     lock = _lock_for(parent_id, project)
+    eng = ENGINE_RESTIC if str(engine).strip().lower() == ENGINE_RESTIC else "tar"
 
     if lock.locked():
         raise BackupError(
@@ -181,6 +187,10 @@ async def run_backup(
             settings=settings,
             bsettings=bsettings,
             quiesce=bsettings.backup_quiesce if quiesce is None else quiesce,
+            engine=eng,
+            restic_full_every_days=max(1, min(int(restic_full_every_days or 7), 365)),
+            restic_keep_last=max(1, min(int(restic_keep_last or 14), 365)),
+            restic_keep_weekly=max(0, min(int(restic_keep_weekly or 8), 104)),
             on_progress=on_progress,
             on_log=on_log,
         )
@@ -214,6 +224,10 @@ async def _run_backup_locked(
     settings: Settings,
     bsettings: BackupSettings,
     quiesce: bool,
+    engine: str = "tar",
+    restic_full_every_days: int = 7,
+    restic_keep_last: int = 14,
+    restic_keep_weekly: int = 8,
     on_progress: ProgressFn | None = None,
     on_log: LogFn | None = None,
 ) -> dict[str, Any]:
@@ -235,6 +249,7 @@ async def _run_backup_locked(
         parent_id=parent_id,
         guest_name=inventory["guest_name"],
         preflight=inventory,
+        engine=engine,
     )
     await _emit_progress(
         on_progress,
@@ -263,6 +278,29 @@ async def _run_backup_locked(
     for g in inventory.get("gaps") or []:
         await log(f"Hinweis: {g}")
 
+    pipeline = await get_pipeline(store)
+    if engine == ENGINE_RESTIC:
+        await log("Engine: Incremental (restic)")
+        try:
+            return await run_restic_backup(
+                store,
+                run_id=run_id,
+                parent_id=parent_id,
+                project=project,
+                inventory=inventory,
+                settings=settings,
+                bsettings=bsettings,
+                quiesce=quiesce,
+                pipeline=pipeline,
+                full_every_days=restic_full_every_days,
+                keep_last=restic_keep_last,
+                keep_weekly=restic_keep_weekly,
+                on_progress=on_progress,
+                log=log,
+            )
+        except ResticError as exc:
+            raise BackupError(exc.message) from exc
+
     stamp = _stamp()
     archive_name = _archive_basename(project, stamp)
     work_rel = f"{project}/{stamp}"
@@ -282,7 +320,6 @@ async def _run_backup_locked(
     started = False
     stopped = False
 
-    pipeline = await get_pipeline(store)
     durable = [d for d in pipeline if d.get("kind") != KIND_HOST]
     if not durable:
         raise BackupError("Keine dauerhaften Backup-Ziele aktiv (Copilot/SFTP).")

@@ -98,6 +98,17 @@ CREATE TABLE IF NOT EXISTS backup_destinations (
 );
 CREATE INDEX IF NOT EXISTS idx_backup_destinations_order
     ON backup_destinations(sort_order ASC, id ASC);
+
+CREATE TABLE IF NOT EXISTS restic_secrets (
+    parent_id TEXT NOT NULL,
+    project TEXT NOT NULL,
+    password TEXT NOT NULL,
+    last_full_at TEXT NOT NULL DEFAULT '',
+    last_full_at_iso TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    created_at_iso TEXT NOT NULL,
+    PRIMARY KEY (parent_id, project)
+);
 """
 
 
@@ -131,6 +142,34 @@ class BackupStore:
         if "last_fired_at" not in sched_cols:
             await db.execute(
                 "ALTER TABLE schedules ADD COLUMN last_fired_at TEXT NOT NULL DEFAULT ''"
+            )
+        if "engine" not in sched_cols:
+            await db.execute(
+                "ALTER TABLE schedules ADD COLUMN engine TEXT NOT NULL DEFAULT 'tar'"
+            )
+        if "restic_full_every_days" not in sched_cols:
+            await db.execute(
+                "ALTER TABLE schedules ADD COLUMN restic_full_every_days INTEGER NOT NULL DEFAULT 7"
+            )
+        if "restic_keep_last" not in sched_cols:
+            await db.execute(
+                "ALTER TABLE schedules ADD COLUMN restic_keep_last INTEGER NOT NULL DEFAULT 14"
+            )
+        if "restic_keep_weekly" not in sched_cols:
+            await db.execute(
+                "ALTER TABLE schedules ADD COLUMN restic_keep_weekly INTEGER NOT NULL DEFAULT 8"
+            )
+        if "engine" not in cols:
+            await db.execute(
+                "ALTER TABLE backup_runs ADD COLUMN engine TEXT NOT NULL DEFAULT 'tar'"
+            )
+        if "snapshot_id" not in cols:
+            await db.execute("ALTER TABLE backup_runs ADD COLUMN snapshot_id TEXT")
+        if "bytes_added" not in cols:
+            await db.execute("ALTER TABLE backup_runs ADD COLUMN bytes_added INTEGER")
+        if "bytes_processed" not in cols:
+            await db.execute(
+                "ALTER TABLE backup_runs ADD COLUMN bytes_processed INTEGER"
             )
 
     async def close(self) -> None:
@@ -247,21 +286,24 @@ class BackupStore:
         parent_id: str,
         guest_name: str,
         preflight: dict[str, Any] | None = None,
+        engine: str = "tar",
     ) -> int:
         db = self._require()
         now = now_berlin()
+        eng = "restic" if str(engine).strip().lower() == "restic" else "tar"
         cur = await db.execute(
             """
             INSERT INTO backup_runs (
-                stack, parent_id, guest_name, status,
+                stack, parent_id, guest_name, status, engine,
                 created_at, created_at_iso, preflight_json,
                 lxc_status, copilot_status, synology_status, verify_status
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, 'pending', 'pending', 'pending', 'pending')
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, 'pending', 'pending', 'pending', 'pending')
             """,
             (
                 stack,
                 parent_id,
                 guest_name,
+                eng,
                 format_de(now),
                 iso_utc(now),
                 json.dumps(preflight or {}, ensure_ascii=False),
@@ -297,6 +339,10 @@ class BackupStore:
             "destinations_json",
             "log_text",
             "error_message",
+            "engine",
+            "snapshot_id",
+            "bytes_added",
+            "bytes_processed",
         }
         cols: list[str] = []
         vals: list[Any] = []
@@ -441,15 +487,29 @@ class BackupStore:
         preset: str,
         enabled: bool,
         note: str = "",
+        engine: str = "tar",
+        restic_full_every_days: int = 7,
+        restic_keep_last: int = 14,
+        restic_keep_weekly: int = 8,
     ) -> int:
         db = self._require()
         now = now_berlin()
-        if schedule_id:
+        eng = "restic" if str(engine).strip().lower() == "restic" else "tar"
+        full_days = max(1, min(int(restic_full_every_days or 7), 365))
+        keep_last = max(1, min(int(restic_keep_last or 14), 365))
+        keep_weekly = max(0, min(int(restic_keep_weekly or 8), 104))
+        if schedule_id is not None:
+            existing = await self.get_schedule(schedule_id)
+            if not existing:
+                raise ValueError(f"Zeitplan {schedule_id} nicht gefunden")
             await db.execute(
                 """
                 UPDATE schedules SET
                     stack = ?, parent_id = ?, cron_expr = ?, preset = ?,
-                    enabled = ?, note = ?, updated_at = ?, updated_at_iso = ?
+                    enabled = ?, note = ?, engine = ?,
+                    restic_full_every_days = ?, restic_keep_last = ?,
+                    restic_keep_weekly = ?,
+                    updated_at = ?, updated_at_iso = ?
                 WHERE id = ?
                 """,
                 (
@@ -459,19 +519,24 @@ class BackupStore:
                     preset,
                     1 if enabled else 0,
                     note,
+                    eng,
+                    full_days,
+                    keep_last,
+                    keep_weekly,
                     format_de(now),
                     iso_utc(now),
                     schedule_id,
                 ),
             )
             await db.commit()
-            return schedule_id
+            return int(schedule_id)
         cur = await db.execute(
             """
             INSERT INTO schedules (
                 stack, parent_id, cron_expr, preset, enabled,
-                created_at, created_at_iso, note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, created_at_iso, note, engine,
+                restic_full_every_days, restic_keep_last, restic_keep_weekly
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stack,
@@ -482,10 +547,75 @@ class BackupStore:
                 format_de(now),
                 iso_utc(now),
                 note,
+                eng,
+                full_days,
+                keep_last,
+                keep_weekly,
             ),
         )
         await db.commit()
         return int(cur.lastrowid)
+
+    async def get_restic_password(self, parent_id: str, project: str) -> str | None:
+        db = self._require()
+        async with db.execute(
+            "SELECT password FROM restic_secrets WHERE parent_id = ? AND project = ?",
+            (parent_id, project),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        pw = (row["password"] or "").strip()
+        return pw or None
+
+    async def get_restic_secret_meta(
+        self, parent_id: str, project: str
+    ) -> dict[str, Any] | None:
+        """Metadata only — never includes the password."""
+        db = self._require()
+        async with db.execute(
+            """
+            SELECT parent_id, project, last_full_at, last_full_at_iso, created_at
+            FROM restic_secrets WHERE parent_id = ? AND project = ?
+            """,
+            (parent_id, project),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def get_or_create_restic_password(
+        self, parent_id: str, project: str
+    ) -> str:
+        existing = await self.get_restic_password(parent_id, project)
+        if existing:
+            return existing
+        import secrets
+
+        password = secrets.token_urlsafe(32)
+        db = self._require()
+        now = now_berlin()
+        await db.execute(
+            """
+            INSERT INTO restic_secrets (
+                parent_id, project, password, created_at, created_at_iso
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (parent_id, project, password, format_de(now), iso_utc(now)),
+        )
+        await db.commit()
+        return password
+
+    async def mark_restic_full(self, parent_id: str, project: str) -> None:
+        db = self._require()
+        now = now_berlin()
+        await db.execute(
+            """
+            UPDATE restic_secrets SET last_full_at = ?, last_full_at_iso = ?
+            WHERE parent_id = ? AND project = ?
+            """,
+            (format_de(now), iso_utc(now), parent_id, project),
+        )
+        await db.commit()
 
     async def delete_schedule(self, schedule_id: int) -> None:
         db = self._require()

@@ -26,15 +26,28 @@
           <th class="py-2 pr-2 font-medium">Status</th>
           <th class="py-2 pr-2 font-medium">Ziele</th>
           <th class="py-2 pr-2 font-medium">Größe</th>
+          <th class="py-2 pr-2 font-medium">Snapshot</th>
           <th class="py-2 pr-2 font-medium">Verify</th>
           <th class="py-2 font-medium">Aktion</th>
         </tr>
       </thead>
       <tbody id="history-body">
-        <tr><td class="py-3 text-[var(--muted)]" colspan="7">Laden…</td></tr>
+        <tr><td class="py-3 text-[var(--muted)]" colspan="8">Laden…</td></tr>
       </tbody>
     </table>
   </div>
+  <article class="mt-6 rounded-lg border border-[var(--border)] p-3 sm:p-4">
+    <h3 class="font-medium">restic-Snapshots</h3>
+    <p class="mt-1 text-xs text-[var(--muted)]">Snapshots eines Stacks auflisten und wiederherstellen — unabhängig vom einzelnen Lauf.</p>
+    <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto] max-w-2xl items-end">
+      <div>
+        <label class="label" for="snap-stack">Stack</label>
+        <select id="snap-stack" class="field"></select>
+      </div>
+      <button type="button" id="snap-load" class="btn btn-ghost">Snapshots laden</button>
+    </div>
+    <ul id="snap-list" class="mt-3 space-y-2 text-sm"></ul>
+  </article>
   <details id="run-detail" class="mt-4 hidden">
     <summary class="cursor-pointer font-medium">Lauf-Details</summary>
     <pre id="run-detail-body" class="mt-2 max-h-64 overflow-auto rounded-lg border border-[var(--border)] p-3 text-xs whitespace-pre-wrap"></pre>
@@ -53,6 +66,10 @@
         <input type="checkbox" id="restore-confirm" class="h-5 w-5" />
         Ich bestätige den Restore
       </label>
+      <div id="restore-snap-wrap" class="hidden space-y-1">
+        <label class="label" for="restore-snapshot">restic-Snapshot</label>
+        <select id="restore-snapshot" class="field"></select>
+      </div>
       <label class="label" for="restore-source">Quelle</label>
       <select id="restore-source" class="field">
         <option value="copilot">Copilot</option>
@@ -69,6 +86,10 @@
 (function () {
   const API = '/api/modules/backup_verifier';
   let restoreRunId = null;
+  let restoreEngine = 'tar';
+  let restoreParent = '';
+  let restoreStack = '';
+  let stacksCache = [];
 
   function toast(el, msg, ok) {
     if (!el) return;
@@ -100,22 +121,32 @@
     const body = document.getElementById('history-body');
     const runs = data.runs || [];
     if (!runs.length) {
-      body.innerHTML = '<tr><td class="py-3 text-[var(--muted)]" colspan="7">Noch keine Läufe.</td></tr>';
+      body.innerHTML = '<tr><td class="py-3 text-[var(--muted)]" colspan="8">Noch keine Läufe.</td></tr>';
       return;
     }
     body.innerHTML = runs.map((r) => {
-      const size = r.size_bytes != null ? (r.size_bytes / (1024 * 1024)).toFixed(1) + ' MiB' : '—';
+      let size = '—';
+      if (r.engine === 'restic' && (r.bytes_added != null || r.bytes_processed != null)) {
+        const add = r.bytes_added != null ? '+' + (r.bytes_added / (1024 * 1024)).toFixed(1) + ' MiB' : '';
+        const proc = r.bytes_processed != null ? (r.bytes_processed / (1024 * 1024)).toFixed(1) + ' MiB gescannt' : '';
+        size = [add, proc].filter(Boolean).join(' · ') || '—';
+      } else if (r.size_bytes != null) {
+        size = (r.size_bytes / (1024 * 1024)).toFixed(1) + ' MiB';
+      }
+      const snap = r.snapshot_id ? String(r.snapshot_id).slice(0, 12) : (r.engine === 'restic' ? '—' : 'tar');
+      const eng = r.engine === 'restic' ? 'restic' : 'tar';
       return `<tr class="border-b border-[var(--border)] align-middle">
         <td class="py-2 pr-2 whitespace-nowrap">${r.created_at || ''}</td>
-        <td class="py-2 pr-2"><div class="font-medium break-words">${r.stack}</div><div class="text-[var(--muted)] text-xs">${r.guest_name || ''}</div></td>
+        <td class="py-2 pr-2"><div class="font-medium break-words">${r.stack}</div><div class="text-[var(--muted)] text-xs">${r.guest_name || ''} · ${eng}</div></td>
         <td class="py-2 pr-2"><span class="chip chip-${r.status === 'success' ? 'running' : r.status === 'failed' ? 'stopped' : r.status === 'partial' ? 'partial' : 'unknown'}">${r.status}</span></td>
         <td class="py-2 pr-2"><div class="flex flex-wrap items-center gap-1">${hopChips(r)}</div></td>
         <td class="py-2 pr-2 whitespace-nowrap">${size}</td>
+        <td class="py-2 pr-2 font-mono text-xs">${snap}</td>
         <td class="py-2 pr-2">${r.verify_status || '—'}</td>
         <td class="py-2 whitespace-nowrap">
           <div class="flex flex-wrap items-center gap-1">
             <button type="button" class="btn btn-ghost btn-xs" data-detail="${r.id}">Log</button>
-            ${['success','partial'].includes(r.status) ? `<button type="button" class="btn btn-ghost btn-xs" data-restore="${r.id}" data-stack="${r.stack}">Restore</button>` : ''}
+            ${['success','partial'].includes(r.status) ? `<button type="button" class="btn btn-ghost btn-xs" data-restore="${r.id}" data-stack="${r.stack}" data-engine="${eng}" data-parent="${r.parent_id || ''}" data-snapshot="${r.snapshot_id || ''}">Restore</button>` : ''}
           </div>
         </td>
       </tr>`;
@@ -137,10 +168,19 @@
     const restore = e.target.closest('[data-restore]');
     if (restore) {
       restoreRunId = Number(restore.getAttribute('data-restore'));
+      restoreEngine = restore.getAttribute('data-engine') || 'tar';
+      restoreParent = restore.getAttribute('data-parent') || '';
+      restoreStack = restore.getAttribute('data-stack') || '';
+      const presetSnap = restore.getAttribute('data-snapshot') || '';
       document.getElementById('restore-text').textContent =
-        'Restore für Stack „' + restore.getAttribute('data-stack') + '“ (Lauf #' + restoreRunId + '). Stack wird gestoppt.';
+        'Restore für Stack „' + restoreStack + '“ (Lauf #' + restoreRunId + '). Stack wird gestoppt.';
       document.getElementById('restore-confirm').checked = false;
       document.getElementById('restore-msg').textContent = '';
+      const wrap = document.getElementById('restore-snap-wrap');
+      if (wrap) wrap.classList.toggle('hidden', restoreEngine !== 'restic');
+      if (restoreEngine === 'restic' && restoreParent && restoreStack) {
+        loadSnapshotsInto(document.getElementById('restore-snapshot'), restoreParent, restoreStack, presetSnap);
+      }
       document.getElementById('restore-dialog').showModal();
     }
   });
@@ -152,13 +192,25 @@
       return;
     }
     toast(msg, 'Restore läuft…');
-    const res = await fetch(API + '/history/' + restoreRunId + '/restore', {
+    const snap = restoreEngine === 'restic'
+      ? (document.getElementById('restore-snapshot')?.value || null)
+      : null;
+    const url = restoreRunId
+      ? (API + '/history/' + restoreRunId + '/restore')
+      : (API + '/restic/restore');
+    const body = restoreRunId
+      ? { confirm: true, source: document.getElementById('restore-source').value, snapshot_id: snap }
+      : {
+          confirm: true,
+          parent_id: restoreParent,
+          project: restoreStack,
+          snapshot_id: snap,
+          source: document.getElementById('restore-source').value,
+        };
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        confirm: true,
-        source: document.getElementById('restore-source').value,
-      }),
+      body: JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast(msg, data.detail || 'Fehler', false);
@@ -185,8 +237,117 @@
     } catch (_) { /* keep defaults */ }
   }
 
-  document.getElementById('btn-refresh-all')?.addEventListener('click', loadHistory);
+  async function loadSnapshotsInto(sel, parentId, project, preset) {
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Laden…</option>';
+    try {
+      const url = API + '/restic/snapshots?parent_id=' + encodeURIComponent(parentId)
+        + '&project=' + encodeURIComponent(project)
+        + '&source=' + encodeURIComponent(document.getElementById('restore-source')?.value || 'copilot');
+      const res = await fetch(url);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        sel.innerHTML = '<option value="">' + (data.detail || 'Snapshots nicht lesbar') + '</option>';
+        return;
+      }
+      const snaps = data.snapshots || [];
+      if (!snaps.length) {
+        sel.innerHTML = '<option value="">Keine Snapshots</option>';
+        return;
+      }
+      sel.innerHTML = snaps.map((s) => {
+        const id = s.id || s.short_id;
+        const label = (s.short_id || String(id).slice(0, 8)) + ' · ' + (s.time || '');
+        return `<option value="${id}">${label}</option>`;
+      }).join('');
+      if (preset && [...sel.options].some((o) => o.value === preset || o.value.startsWith(preset))) {
+        const match = [...sel.options].find((o) => o.value === preset || o.value.startsWith(preset));
+        if (match) sel.value = match.value;
+      }
+    } catch (err) {
+      sel.innerHTML = '<option value="">Fehler</option>';
+    }
+  }
+
+  async function loadSnapStacks() {
+    const sel = document.getElementById('snap-stack');
+    if (!sel) return;
+    try {
+      const res = await fetch(API + '/stacks');
+      const data = await res.json();
+      stacksCache = data.stacks || [];
+      sel.innerHTML = stacksCache.length
+        ? stacksCache.map((s) => {
+            const val = encodeURIComponent(s.parent_id) + '|' + encodeURIComponent(s.stack);
+            return `<option value="${val}">${s.guest_name} · ${s.stack}</option>`;
+          }).join('')
+        : '<option value="">Kein Stack</option>';
+    } catch (_) { /* ignore */ }
+  }
+
+  document.getElementById('snap-load')?.addEventListener('click', async () => {
+    const val = document.getElementById('snap-stack')?.value || '';
+    const i = val.indexOf('|');
+    const list = document.getElementById('snap-list');
+    if (i < 0 || !list) return;
+    const parentId = decodeURIComponent(val.slice(0, i));
+    const project = decodeURIComponent(val.slice(i + 1));
+    list.innerHTML = '<li class="text-[var(--muted)]">Laden…</li>';
+    try {
+      const res = await fetch(API + '/restic/snapshots?parent_id=' + encodeURIComponent(parentId)
+        + '&project=' + encodeURIComponent(project));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        list.innerHTML = '<li class="text-[var(--danger,#c44)]">' + (data.detail || 'Fehler') + '</li>';
+        return;
+      }
+      if (data.hint && !(data.snapshots || []).length) {
+        list.innerHTML = '<li class="text-[var(--muted)]">' + data.hint + '</li>';
+        return;
+      }
+      const snaps = data.snapshots || [];
+      list.innerHTML = snaps.length ? snaps.map((s) => `
+        <li class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] p-2">
+          <span><code>${(s.short_id || String(s.id || '').slice(0, 8))}</code>
+            · ${s.time || ''}
+            ${(s.tags || []).length ? ' · ' + s.tags.join(', ') : ''}
+          </span>
+          <button type="button" class="btn btn-ghost btn-xs" data-snap-restore="${s.id}"
+            data-parent="${parentId}" data-stack="${project}">Restore</button>
+        </li>`).join('') : '<li class="text-[var(--muted)]">Keine Snapshots.</li>';
+    } catch (err) {
+      list.innerHTML = '<li class="text-[var(--danger,#c44)]">' + String(err.message || err) + '</li>';
+    }
+  });
+
+  document.getElementById('snap-list')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-snap-restore]');
+    if (!btn) return;
+    restoreRunId = null;
+    restoreEngine = 'restic';
+    restoreParent = btn.getAttribute('data-parent') || '';
+    restoreStack = btn.getAttribute('data-stack') || '';
+    const sid = btn.getAttribute('data-snap-restore') || '';
+    document.getElementById('restore-text').textContent =
+      'Restore für Stack „' + restoreStack + '“ aus Snapshot ' + sid.slice(0, 12) + '. Stack wird gestoppt.';
+    document.getElementById('restore-confirm').checked = false;
+    document.getElementById('restore-msg').textContent = '';
+    const wrap = document.getElementById('restore-snap-wrap');
+    if (wrap) wrap.classList.remove('hidden');
+    const sel = document.getElementById('restore-snapshot');
+    if (sel) {
+      sel.innerHTML = `<option value="${sid}">${sid.slice(0, 12)}</option>`;
+      sel.value = sid;
+    }
+    document.getElementById('restore-dialog').showModal();
+  });
+
+  document.getElementById('btn-refresh-all')?.addEventListener('click', () => {
+    loadHistory();
+    loadSnapStacks();
+  });
   loadRestoreSources();
+  loadSnapStacks();
   loadHistory();
   setInterval(loadHistory, 12000);
 })();

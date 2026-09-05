@@ -15,11 +15,12 @@
 <div id="setup-banner" class="mb-6 hidden animate-in setup-banner text-sm" role="status"></div>
 
 <article class="surface p-4 sm:p-5 animate-in">
-  <h2 class="font-display text-lg font-bold">Zeitplan</h2>
+  <h2 id="sched-form-title" class="font-display text-lg font-bold">Zeitplan anlegen</h2>
   <p class="mt-1 text-sm text-[var(--muted)]">
     Automatische Stack-Backups über Presets oder eigenen Cron-Ausdruck. Die App startet sie selbst.
   </p>
   <form id="sched-form" class="mt-4 space-y-3" novalidate>
+    <input type="hidden" id="sched-id" value="" />
     <div>
       <label class="label" for="sched-stack">Stack</label>
       <select id="sched-stack" class="field" required></select>
@@ -54,7 +55,34 @@
       <label class="label" for="sched-cron">Cron-Ausdruck</label>
       <input id="sched-cron" class="field" placeholder="0 3 * * *" />
     </div>
-    <button type="submit" class="btn btn-primary">Zeitplan speichern</button>
+    <div>
+      <p class="label" id="sched-engine-label">Engine</p>
+      <div class="flex h-10 min-h-10 max-w-xl rounded-full bg-[var(--surface)] p-0.5" role="radiogroup" aria-labelledby="sched-engine-label">
+        <button type="button" id="sched-engine-tar" class="btn engine-btn h-full min-h-0 flex-1 rounded-full px-3 text-sm font-medium btn-primary" aria-pressed="true">Voll (tar)</button>
+        <button type="button" id="sched-engine-restic" class="btn engine-btn h-full min-h-0 flex-1 rounded-full px-3 text-sm font-medium btn-ghost" aria-pressed="false">Incremental (restic)</button>
+      </div>
+    </div>
+    <div id="sched-restic-opts" class="hidden grid grid-cols-1 gap-3 sm:grid-cols-3 max-w-3xl">
+      <div>
+        <label class="label" for="sched-full-days">Full alle N Tage</label>
+        <input id="sched-full-days" class="field" type="number" min="1" max="365" value="7" />
+      </div>
+      <div>
+        <label class="label" for="sched-keep-last">Behalte letzte N Snapshots</label>
+        <input id="sched-keep-last" class="field" type="number" min="1" max="365" value="14" />
+      </div>
+      <div>
+        <label class="label" for="sched-keep-weekly">Behalte wöchentliche Fulls</label>
+        <input id="sched-keep-weekly" class="field" type="number" min="0" max="104" value="8" />
+      </div>
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" id="sched-enabled" class="h-4 w-4" checked /> Aktiv
+      </label>
+      <button type="submit" id="sched-submit" class="btn btn-primary">Zeitplan speichern</button>
+      <button type="button" id="sched-cancel" class="btn btn-ghost hidden">Abbrechen</button>
+    </div>
   </form>
   <ul id="sched-list" class="mt-4 space-y-2 text-sm"></ul>
   <pre id="cron-preview" class="mt-3 max-h-40 overflow-auto rounded-lg border border-[var(--border)] p-3 text-xs text-[var(--muted)] whitespace-pre-wrap"></pre>
@@ -65,6 +93,102 @@
 <script>
 (function () {
   const API = '/api/modules/backup_verifier';
+  let schedulesCache = [];
+  let schedEngine = 'tar';
+
+  function setSchedEngine(next) {
+    schedEngine = next === 'restic' ? 'restic' : 'tar';
+    const tarBtn = document.getElementById('sched-engine-tar');
+    const resticBtn = document.getElementById('sched-engine-restic');
+    const opts = document.getElementById('sched-restic-opts');
+    if (tarBtn) {
+      tarBtn.classList.toggle('btn-primary', schedEngine === 'tar');
+      tarBtn.classList.toggle('btn-ghost', schedEngine !== 'tar');
+      tarBtn.setAttribute('aria-pressed', schedEngine === 'tar' ? 'true' : 'false');
+    }
+    if (resticBtn) {
+      resticBtn.classList.toggle('btn-primary', schedEngine === 'restic');
+      resticBtn.classList.toggle('btn-ghost', schedEngine !== 'restic');
+      resticBtn.setAttribute('aria-pressed', schedEngine === 'restic' ? 'true' : 'false');
+    }
+    if (opts) opts.classList.toggle('hidden', schedEngine !== 'restic');
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function stackVal(parentId, stack) {
+    return encodeURIComponent(parentId) + '|' + encodeURIComponent(stack);
+  }
+
+  function syncPresetUI() {
+    const v = document.getElementById('sched-preset').value;
+    document.getElementById('sched-weekly-wrap').classList.toggle('hidden', v !== 'weekly');
+    document.getElementById('sched-cron-wrap').classList.toggle('hidden', v !== 'custom');
+  }
+
+  function setEditMode(editing, label) {
+    const title = document.getElementById('sched-form-title');
+    const submit = document.getElementById('sched-submit');
+    const cancel = document.getElementById('sched-cancel');
+    title.textContent = editing
+      ? ('Zeitplan bearbeiten' + (label ? ': ' + label : ''))
+      : 'Zeitplan anlegen';
+    submit.textContent = editing ? 'Änderungen speichern' : 'Zeitplan speichern';
+    cancel.classList.toggle('hidden', !editing);
+  }
+
+  function resetForm() {
+    document.getElementById('sched-id').value = '';
+    document.getElementById('sched-preset').value = 'daily';
+    document.getElementById('sched-time').value = '03:00';
+    document.getElementById('sched-weekday').value = '0';
+    document.getElementById('sched-cron').value = '';
+    document.getElementById('sched-enabled').checked = true;
+    document.getElementById('sched-full-days').value = '7';
+    document.getElementById('sched-keep-last').value = '14';
+    document.getElementById('sched-keep-weekly').value = '8';
+    setSchedEngine('tar');
+    syncPresetUI();
+    setEditMode(false);
+  }
+
+  function fillForm(s) {
+    const sel = document.getElementById('sched-stack');
+    const val = stackVal(s.parent_id, s.stack);
+    if (sel && ![...sel.options].some((o) => o.value === val)) {
+      const opt = document.createElement('option');
+      opt.value = val;
+      opt.textContent = (s.stack || 'Stack') + ' (nicht in Inventar)';
+      sel.appendChild(opt);
+    }
+    if (sel) sel.value = val;
+
+    const preset = ['daily', 'weekly', 'custom'].includes(s.preset) ? s.preset : 'custom';
+    document.getElementById('sched-preset').value = preset;
+    document.getElementById('sched-cron').value = s.cron_expr || '';
+    document.getElementById('sched-enabled').checked = !!s.enabled;
+    document.getElementById('sched-id').value = s.id || '';
+    document.getElementById('sched-full-days').value = s.restic_full_every_days || 7;
+    document.getElementById('sched-keep-last').value = s.restic_keep_last || 14;
+    document.getElementById('sched-keep-weekly').value = s.restic_keep_weekly || 8;
+    setSchedEngine(s.engine === 'restic' ? 'restic' : 'tar');
+
+    const parts = String(s.cron_expr || '').trim().split(/\s+/);
+    if (parts.length === 5 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
+      document.getElementById('sched-time').value =
+        String(parts[1]).padStart(2, '0') + ':' + String(parts[0]).padStart(2, '0');
+      if (preset === 'weekly' && /^\d+$/.test(parts[4])) {
+        document.getElementById('sched-weekday').value = String(Number(parts[4]));
+      }
+    }
+    syncPresetUI();
+    setEditMode(true, s.stack || '');
+    document.getElementById('sched-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById('sched-stack').focus();
+  }
 
   async function loadStatus() {
     const res = await fetch(API + '/status');
@@ -114,28 +238,34 @@
     const data = await res.json();
     const list = document.getElementById('sched-list');
     const items = data.schedules || [];
+    schedulesCache = items;
     list.innerHTML = items.length ? items.map((s) => `
       <li class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] p-2">
-        <span><strong>${s.stack}</strong> · <code>${s.cron_expr}</code> · ${s.enabled ? 'aktiv' : 'aus'}
-          ${s.next_run ? `<br><span class="text-[var(--muted)]">Nächster Lauf: ${s.next_run}</span>` : ''}
-          ${s.last_fired_at ? `<br><span class="text-[var(--muted)]">Zuletzt gestartet: ${s.last_fired_at}</span>` : ''}
+        <span><strong>${esc(s.stack)}</strong> · <code>${esc(s.cron_expr)}</code> · ${s.enabled ? 'aktiv' : 'aus'}
+          · ${s.engine === 'restic' ? 'restic' : 'tar'}
+          ${s.next_run ? `<br><span class="text-[var(--muted)]">Nächster Lauf: ${esc(s.next_run)}</span>` : ''}
+          ${s.last_fired_at ? `<br><span class="text-[var(--muted)]">Zuletzt gestartet: ${esc(s.last_fired_at)}</span>` : ''}
         </span>
-        <button type="button" class="btn btn-ghost btn-xs" data-del-sched="${s.id}">Löschen</button>
+        <span class="flex flex-wrap gap-2">
+          <button type="button" class="btn btn-ghost btn-xs" data-edit-sched="${s.id}" aria-label="Zeitplan ${esc(s.stack)} bearbeiten">Bearbeiten</button>
+          <button type="button" class="btn btn-ghost btn-xs" data-del-sched="${s.id}" aria-label="Zeitplan ${esc(s.stack)} löschen">Löschen</button>
+        </span>
       </li>`).join('') : '<li class="text-[var(--muted)]">Keine Zeitpläne.</li>';
     document.getElementById('cron-preview').textContent = [data.hint, data.preview].filter(Boolean).join('\n\n');
   }
 
-  document.getElementById('sched-preset')?.addEventListener('change', (e) => {
-    const v = e.target.value;
-    document.getElementById('sched-weekly-wrap').classList.toggle('hidden', v !== 'weekly');
-    document.getElementById('sched-cron-wrap').classList.toggle('hidden', v !== 'custom');
-  });
+  document.getElementById('sched-engine-tar')?.addEventListener('click', () => setSchedEngine('tar'));
+  document.getElementById('sched-engine-restic')?.addEventListener('click', () => setSchedEngine('restic'));
+  document.getElementById('sched-preset')?.addEventListener('change', syncPresetUI);
+
+  document.getElementById('sched-cancel')?.addEventListener('click', resetForm);
 
   document.getElementById('sched-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const parsed = parseStackVal(document.getElementById('sched-stack').value);
     if (!parsed) return;
     const preset = document.getElementById('sched-preset').value;
+    const editingId = document.getElementById('sched-id').value;
     const body = {
       parent_id: parsed.parent_id,
       stack: parsed.project,
@@ -143,10 +273,15 @@
       time: document.getElementById('sched-time').value || '03:00',
       weekday: Number(document.getElementById('sched-weekday').value) || 0,
       cron_expr: document.getElementById('sched-cron').value || null,
-      enabled: true,
+      enabled: document.getElementById('sched-enabled').checked,
+      engine: schedEngine,
+      restic_full_every_days: Number(document.getElementById('sched-full-days').value) || 7,
+      restic_keep_last: Number(document.getElementById('sched-keep-last').value) || 14,
+      restic_keep_weekly: Number(document.getElementById('sched-keep-weekly').value) || 8,
     };
-    const res = await fetch(API + '/schedules', {
-      method: 'POST',
+    const url = editingId ? (API + '/schedules/' + editingId) : (API + '/schedules');
+    const res = await fetch(url, {
+      method: editingId ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
@@ -155,18 +290,33 @@
       alert(data.detail || 'Speichern fehlgeschlagen');
       return;
     }
+    resetForm();
     await loadSchedules();
   });
 
   document.getElementById('sched-list')?.addEventListener('click', async (e) => {
+    const editBtn = e.target.closest('[data-edit-sched]');
+    if (editBtn) {
+      const id = Number(editBtn.getAttribute('data-edit-sched'));
+      const row = schedulesCache.find((s) => Number(s.id) === id);
+      if (row) fillForm(row);
+      return;
+    }
     const btn = e.target.closest('[data-del-sched]');
     if (!btn) return;
-    await fetch(API + '/schedules/' + btn.getAttribute('data-del-sched'), { method: 'DELETE' });
+    const delId = btn.getAttribute('data-del-sched');
+    await fetch(API + '/schedules/' + delId, { method: 'DELETE' });
+    if (document.getElementById('sched-id').value === String(delId)) resetForm();
     await loadSchedules();
   });
 
   async function refreshAll() {
+    const editingId = document.getElementById('sched-id').value;
     await Promise.all([loadStatus(), loadStacks(), loadSchedules()]);
+    if (editingId) {
+      const row = schedulesCache.find((s) => String(s.id) === String(editingId));
+      if (row) fillForm(row);
+    }
   }
   document.getElementById('btn-refresh-all')?.addEventListener('click', refreshAll);
   refreshAll();

@@ -2,6 +2,8 @@
 
 Compose-**stack** backups (not per-container) with a configurable destination pipeline, checksum verify, history, schedule, and restore.
 
+Default engine is **Voll (tar)** — full `.tar.gz` archives. **Incremental (restic)** is opt-in per run or schedule (Paperless-Größe: erster Lauf lang, danach nur Deltas).
+
 ## What it does
 
 1. **Preflight inventory** via `docker inspect` — compose files, `.env`, named volumes, readable bind mounts, plus gap warnings.
@@ -41,11 +43,13 @@ Default **quiesce**: `docker compose stop` before volume tar, then `up -d` / `st
   - `GET|PUT /destinations` — sorted list (secrets masked); full replace on PUT
   - `POST /destinations/check` — connection test for one destination payload
   - `GET /preflight?parent_id=&project=`
-  - `POST /run` — body `{parent_id, project, quiesce?}` → background job (`job_id`); poll `GET /jobs/{id}` for percent/phase; `?wait=true` sync. **TOTP-gated** (not for host cron).
-  - `GET /jobs/{id}` — Fortschritt (percent, phase, log_lines, destination hops)
+  - `POST /run` — body `{parent_id, project, quiesce?, engine?: tar|restic, restic_*?}` → background job (`job_id`); poll `GET /jobs/{id}` for percent/phase; `?wait=true` sync. **TOTP-gated** (not for host cron).
+  - `GET /jobs/{id}` — Fortschritt (percent, phase, log_lines, destination hops, snapshot_id)
   - `GET /history`, `GET /history/{id}`
-  - `POST /history/{id}/restore` — `{confirm: true, source: "<destination id|copilot|synology>"}`
-  - `GET|POST /schedules`, `DELETE /schedules/{id}`, `POST /schedules/sync`
+  - `POST /history/{id}/restore` — `{confirm: true, source: "<destination id|copilot|synology>", snapshot_id?}`
+  - `GET /restic/snapshots?parent_id=&project=` — restic-Snapshots eines Stacks
+  - `POST /restic/restore` — `{confirm, parent_id, project, snapshot_id, source}`
+  - `GET|POST /schedules`, `PUT|PATCH /schedules/{id}`, `DELETE /schedules/{id}`, `POST /schedules/sync`
 
 ## Schedule (in-process)
 
@@ -73,8 +77,24 @@ Optional env seed / paths (see `.env.example`):
 - `BACKUP_QUIESCE`
 - `BACKUP_API_BASE` — unused for firing (legacy host-cron URL; schedules are in-process)
 - `BACKUP_SSH_TIMEOUT` / `BACKUP_ARCHIVE_TIMEOUT` / `BACKUP_TRANSFER_TIMEOUT`
+- `RESTIC_INSTALL` — default `true`: first restic run installs `restic` on the LXC via apt/apk
 
-DB: `$DATA_DIR/backup_verifier.db`
+DB: `$DATA_DIR/backup_verifier.db` (restic repo password lives here, never in git)
+
+## Incremental (restic)
+
+Opt-in on **Backup** / **Zeitplan**: Engine *Incremental (restic)*.
+
+1. First run per host: install `restic` on the LXC if missing (`RESTIC_INSTALL`).
+2. Repo password is generated once per stack and stored in SQLite (`restic_secrets`).
+3. Working repo on the LXC: `$BACKUP_LXC_DIR/restic/{project}`. Durable copy: `$BACKUP_COPILOT_DIR/restic/{parent}/{project}`. SFTP dests get the same repo tree (`…/restic/{parent}/{project}`).
+4. Same inventory as tar (compose, named volume mountpoints, readable binds). Quiesce still stops the stack.
+5. Every N days (default 7): `restic forget --keep-last/--keep-weekly --prune` and `restic check`. Restic has no classic full backup — a snapshot is always a complete restore point.
+6. Restore: Verlauf → Snapshots listen → Snapshot wählen → gleiche Ziele wie tar.
+
+**Paperless:** choose the paperless stack, Engine Incremental, Preflight, confirm. First run copies all media (can take hours; raise `BACKUP_ARCHIVE_TIMEOUT` if needed). Later runs send only new/changed chunks.
+
+Do **not** run restic by hand or add crontab. Passwords are not shown in the UI or logs.
 
 ## Honesty
 

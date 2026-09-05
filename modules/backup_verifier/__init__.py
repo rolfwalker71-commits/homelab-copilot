@@ -1,1 +1,1 @@
-"""Smart Backup Integrity Verifier — Compose-stack backups with 3-copy verify."""
+"""Smart Backup Integrity Verifier — Compose-stack backups (tar / restic)."""

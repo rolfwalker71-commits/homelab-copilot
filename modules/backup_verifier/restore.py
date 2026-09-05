@@ -20,6 +20,7 @@ from backup_verifier.destinations import (
     resolve_auth,
 )
 from backup_verifier.inventory import build_inventory
+from backup_verifier.restic import ENGINE_RESTIC, ResticError, run_restic_restore
 from backup_verifier import sshutil
 from backup_verifier.store import BackupStore
 from backup_verifier.verify import verify_local_file
@@ -40,6 +41,7 @@ async def run_restore(
     snapshot: TopologySnapshot | None,
     confirm: bool,
     source: str = "copilot",
+    snapshot_id: str | None = None,
     settings: Settings | None = None,
     bsettings: BackupSettings | None = None,
 ) -> dict[str, Any]:
@@ -62,7 +64,14 @@ async def run_restore(
     parent_id = run["parent_id"]
     archive_sha = (run.get("archive_sha256") or "").lower()
     archive_name = run.get("archive_name") or ""
-    if not archive_name or not archive_sha:
+    engine = str(run.get("engine") or "tar").strip().lower()
+    snap = (snapshot_id or run.get("snapshot_id") or "").strip()
+    if engine == ENGINE_RESTIC:
+        if not snap:
+            raise RestoreError(
+                "restic-Restore braucht eine Snapshot-ID (Lauf ohne Snapshot)."
+            )
+    elif not archive_name or not archive_sha:
         raise RestoreError("Backup-Metadaten unvollständig (Archiv/Checksum fehlen).")
 
     restore_id = await store.create_restore(backup_run_id=run_id, source=source)
@@ -74,6 +83,81 @@ async def run_restore(
         )
 
     try:
+        if engine == ENGINE_RESTIC:
+            inventory = await build_inventory(
+                settings,
+                parent_id=parent_id,
+                project=project,
+                snapshot=snapshot,
+                lxc_backup_dir=bsettings.backup_lxc_dir,
+            )
+            await log(f"restic-Restore Snapshot {snap[:12]}…")
+            # Stop stack
+            await log("Stoppe Stack vor Restore …")
+            wd = inventory.get("working_dir")
+            is_local = bool(inventory["local"])
+            ip = inventory["host_ip"]
+            timeout = bsettings.backup_ssh_timeout
+            if wd:
+                stop_cmd = f"cd {shlex.quote(wd)} && docker compose stop"
+            else:
+                stop_cmd = f"docker compose -p {shlex.quote(project)} stop"
+            if is_local:
+                await sshutil.local_run_ok(stop_cmd, timeout=timeout)
+            else:
+                assert ip is not None
+                await sshutil.ssh_run_ok(settings, ip, stop_cmd, timeout=timeout)
+            restic_up = False
+            try:
+                await run_restic_restore(
+                    store,
+                    restore_id=restore_id,
+                    parent_id=parent_id,
+                    project=project,
+                    snapshot_id=snap,
+                    source=source,
+                    inventory=inventory,
+                    settings=settings,
+                    bsettings=bsettings,
+                    log=log,
+                )
+            except ResticError as exc:
+                raise RestoreError(exc.message) from exc
+            finally:
+                if not restic_up:
+                    try:
+                        await log("Starte Stack (docker compose up -d) …")
+                        if wd:
+                            up_cmd = f"cd {shlex.quote(wd)} && docker compose up -d"
+                        else:
+                            up_cmd = f"docker compose -p {shlex.quote(project)} up -d"
+                        if is_local:
+                            await sshutil.local_run_ok(up_cmd, timeout=timeout)
+                        else:
+                            assert ip is not None
+                            await sshutil.ssh_run_ok(settings, ip, up_cmd, timeout=timeout)
+                        restic_up = True
+                    except Exception:
+                        logger.exception("Stack nach restic-Restore nicht gestartet")
+            if not restic_up:
+                raise RestoreError("Stack nach Restore nicht gestartet.")
+            now = now_berlin()
+            await store.update_restore(
+                restore_id,
+                status="success",
+                finished_at=format_de(now),
+                finished_at_iso=iso_utc(now),
+            )
+            await log("Restore erfolgreich")
+            return {
+                "ok": True,
+                "restore_id": restore_id,
+                "backup_run_id": run_id,
+                "snapshot_id": snap,
+                "status": "success",
+                "message": f"Stack „{project}“ aus restic-Snapshot {snap[:12]} wiederhergestellt.",
+            }
+
         local_archive = await _resolve_archive(
             store,
             run=run,

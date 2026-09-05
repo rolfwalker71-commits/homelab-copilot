@@ -7,6 +7,7 @@
   <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Backup Verifier</h1>
   <p class="mt-2 max-w-3xl text-[var(--muted)]">
     Compose-Stack-Backups über eine konfigurierbare Pipeline (Host → Copilot → SFTP) mit Checksum-Verify.
+    Engine: Voll (tar) oder Incremental (restic) — Restore unter Verlauf.
   </p>
   <aside class="mt-4 max-w-3xl rounded-lg border border-[var(--border)] bg-[var(--surface-2,transparent)] p-3 text-sm text-[var(--muted)]" role="note">
     <strong class="text-[var(--text)]">Hinweis:</strong>
@@ -32,9 +33,31 @@
         <option value="">Laden…</option>
       </select>
     </div>
+    <div>
+      <p class="label" id="engine-label">Engine</p>
+      <div class="flex h-10 min-h-10 max-w-xl rounded-full bg-[var(--surface)] p-0.5" role="radiogroup" aria-labelledby="engine-label">
+        <button type="button" id="engine-tar" class="btn engine-btn h-full min-h-0 flex-1 rounded-full px-3 text-sm font-medium btn-primary" aria-pressed="true">Voll (tar)</button>
+        <button type="button" id="engine-restic" class="btn engine-btn h-full min-h-0 flex-1 rounded-full px-3 text-sm font-medium btn-ghost" aria-pressed="false">Incremental (restic)</button>
+      </div>
+      <p class="mt-1 text-xs text-[var(--muted)]">Voll bleibt Standard. restic nur für große Stacks (z. B. Paperless) — erster Lauf dauert länger.</p>
+    </div>
+    <div id="restic-opts" class="hidden grid grid-cols-1 gap-3 sm:grid-cols-3 max-w-3xl">
+      <div>
+        <label class="label" for="restic-full-days">Full alle N Tage</label>
+        <input id="restic-full-days" class="field" type="number" min="1" max="365" value="7" />
+      </div>
+      <div>
+        <label class="label" for="restic-keep-last">Behalte letzte N Snapshots</label>
+        <input id="restic-keep-last" class="field" type="number" min="1" max="365" value="14" />
+      </div>
+      <div>
+        <label class="label" for="restic-keep-weekly">Behalte wöchentliche Fulls</label>
+        <input id="restic-keep-weekly" class="field" type="number" min="0" max="104" value="8" />
+      </div>
+    </div>
     <div class="flex items-center gap-3">
       <input id="quiesce" type="checkbox" class="h-5 w-5 rounded border-[var(--border)]" checked />
-      <label for="quiesce" class="text-sm">Quiesce (Stack stoppen vor Volume-Tar)</label>
+      <label for="quiesce" class="text-sm" id="quiesce-label">Quiesce (Stack stoppen vor der Sicherung)</label>
     </div>
     <div class="flex flex-wrap gap-2">
       <button type="button" id="btn-preflight" class="btn btn-ghost">Preflight / Inventar</button>
@@ -74,6 +97,25 @@
   let preflightKey = '';
   let pollTimer = null;
   let backupBusy = false;
+  let engine = 'tar';
+
+  function setEngine(next) {
+    engine = next === 'restic' ? 'restic' : 'tar';
+    const tarBtn = document.getElementById('engine-tar');
+    const resticBtn = document.getElementById('engine-restic');
+    const opts = document.getElementById('restic-opts');
+    if (tarBtn) {
+      tarBtn.classList.toggle('btn-primary', engine === 'tar');
+      tarBtn.classList.toggle('btn-ghost', engine !== 'tar');
+      tarBtn.setAttribute('aria-pressed', engine === 'tar' ? 'true' : 'false');
+    }
+    if (resticBtn) {
+      resticBtn.classList.toggle('btn-primary', engine === 'restic');
+      resticBtn.classList.toggle('btn-ghost', engine !== 'restic');
+      resticBtn.setAttribute('aria-pressed', engine === 'restic' ? 'true' : 'false');
+    }
+    if (opts) opts.classList.toggle('hidden', engine !== 'restic');
+  }
 
   function toast(el, msg, ok) {
     if (!el) return;
@@ -224,6 +266,13 @@
         bar.style.background = failed
           ? 'var(--danger)'
           : 'color-mix(in srgb, var(--primary) 55%, #2e7d32)';
+      }
+      if (msg && !failed && (job.snapshot_id || job.bytes_added != null)) {
+        const bits = [];
+        if (job.snapshot_id) bits.push('Snapshot ' + String(job.snapshot_id).slice(0, 12));
+        if (job.bytes_added != null) bits.push('+' + job.bytes_added + ' Bytes');
+        if (job.bytes_processed != null) bits.push('gescannt ' + job.bytes_processed);
+        if (bits.length) msg.textContent = (job.message ? job.message + ' · ' : '') + bits.join(' · ');
       }
       if (msg && failed && job.error) {
         msg.textContent = job.error;
@@ -505,6 +554,8 @@
     };
   }
 
+  document.getElementById('engine-tar')?.addEventListener('click', () => setEngine('tar'));
+  document.getElementById('engine-restic')?.addEventListener('click', () => setEngine('restic'));
   document.getElementById('stack-select')?.addEventListener('change', resetPreflightGate);
 
   document.getElementById('btn-preflight')?.addEventListener('click', async () => {
@@ -565,6 +616,10 @@
           parent_id: parsed.parent_id,
           project: parsed.project,
           quiesce: document.getElementById('quiesce').checked,
+          engine: engine,
+          restic_full_every_days: Number(document.getElementById('restic-full-days')?.value) || 7,
+          restic_keep_last: Number(document.getElementById('restic-keep-last')?.value) || 14,
+          restic_keep_weekly: Number(document.getElementById('restic-keep-weekly')?.value) || 8,
         }),
       });
       const data = await res.json().catch(() => ({}));

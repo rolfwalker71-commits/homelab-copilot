@@ -73,6 +73,10 @@ class BackupJob:
             "history_run_url": f"{hist}?run={self.run_id}" if self.run_id else hist,
             "done": self.status in ("success", "partial", "failed"),
             "ok": self.status in ("success", "partial"),
+            "engine": str(run.get("engine") or ""),
+            "snapshot_id": run.get("snapshot_id") or "",
+            "bytes_added": run.get("bytes_added"),
+            "bytes_processed": run.get("bytes_processed"),
         }
 
 

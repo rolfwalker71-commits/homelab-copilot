@@ -31,6 +31,7 @@ from backup_verifier import cron as cron_mod
 from backup_verifier import destinations as dest_mod
 from backup_verifier.inventory import build_inventory
 from backup_verifier.jobs import JOBS
+from backup_verifier.restic import ENGINE_RESTIC, ResticError, list_restic_snapshots
 from backup_verifier.restore import RestoreError, run_restore
 from backup_verifier.scheduler import next_run_after, run_schedule_loop
 from backup_verifier.store import BackupStore
@@ -215,6 +216,10 @@ async def _run_enqueued_backup(
     project: str,
     snapshot: Any,
     quiesce: bool | None,
+    engine: str = "tar",
+    restic_full_every_days: int = 7,
+    restic_keep_last: int = 14,
+    restic_keep_weekly: int = 8,
 ) -> None:
     JOBS.set_running(job_id)
     job = JOBS.get(job_id)
@@ -245,6 +250,10 @@ async def _run_enqueued_backup(
             project=project,
             snapshot=snapshot,
             quiesce=quiesce,
+            engine=engine,
+            restic_full_every_days=restic_full_every_days,
+            restic_keep_last=restic_keep_last,
+            restic_keep_weekly=restic_keep_weekly,
             on_progress=on_progress,
             on_log=on_log,
         )
@@ -323,6 +332,10 @@ def _enqueue_backup(
     project: str,
     snapshot: Any,
     quiesce: bool | None = None,
+    engine: str = "tar",
+    restic_full_every_days: int = 7,
+    restic_keep_last: int = 14,
+    restic_keep_weekly: int = 8,
 ):
     job = JOBS.create(parent_id=parent_id, project=project)
 
@@ -334,6 +347,10 @@ def _enqueue_backup(
             project=project,
             snapshot=snapshot,
             quiesce=quiesce,
+            engine=engine,
+            restic_full_every_days=restic_full_every_days,
+            restic_keep_last=restic_keep_last,
+            restic_keep_weekly=restic_keep_weekly,
         )
 
     return job, _bg
@@ -350,6 +367,10 @@ async def _fire_scheduled_backup(app: FastAPI, schedule: dict[str, Any]) -> None
         parent_id=str(schedule["parent_id"]),
         project=str(schedule["stack"]),
         snapshot=snap,
+        engine=str(schedule.get("engine") or "tar"),
+        restic_full_every_days=int(schedule.get("restic_full_every_days") or 7),
+        restic_keep_last=int(schedule.get("restic_keep_last") or 14),
+        restic_keep_weekly=int(schedule.get("restic_keep_weekly") or 8),
     )
     asyncio.create_task(coro(), name=f"backup-sched-{job.id}")
 
@@ -358,12 +379,17 @@ class RunPayload(BaseModel):
     parent_id: str = Field(..., min_length=1)
     project: str = Field(..., min_length=1)
     quiesce: bool | None = None
+    engine: str = Field(default="tar", pattern="^(tar|restic)$")
+    restic_full_every_days: int = Field(default=7, ge=1, le=365)
+    restic_keep_last: int = Field(default=14, ge=1, le=365)
+    restic_keep_weekly: int = Field(default=8, ge=0, le=104)
 
 
 class RestorePayload(BaseModel):
     confirm: bool = False
     # Destination id (int as string), "copilot", "synology", or kind/label
     source: str = Field(default="copilot", min_length=1, max_length=64)
+    snapshot_id: str | None = Field(default=None, max_length=64)
 
 
 class DestinationsPayload(BaseModel):
@@ -384,6 +410,10 @@ class SchedulePayload(BaseModel):
     cron_expr: str | None = None
     enabled: bool = True
     note: str = ""
+    engine: str = Field(default="tar", pattern="^(tar|restic)$")
+    restic_full_every_days: int = Field(default=7, ge=1, le=365)
+    restic_keep_last: int = Field(default=14, ge=1, le=365)
+    restic_keep_weekly: int = Field(default=8, ge=0, le=104)
 
 
 @router.get("/status")
@@ -398,7 +428,7 @@ async def module_status() -> dict[str, Any]:
         pipeline = [dest_mod.public_destination(r) for r in rows]
     return {
         "module": "backup_verifier",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "time": format_de(now_berlin()),
         "copilot_dir": str(bs.copilot_dir),
         "lxc_dir": bs.backup_lxc_dir,
@@ -408,6 +438,7 @@ async def module_status() -> dict[str, Any]:
             "synology": bs.backup_synology_keep,
         },
         "quiesce_default": bs.backup_quiesce,
+        "restic_install": bs.restic_install,
         "pipeline": pipeline,
         "synology": {
             "configured": any(
@@ -524,6 +555,10 @@ async def run_backup_endpoint(
                 project=payload.project,
                 snapshot=snap,
                 quiesce=payload.quiesce,
+                engine=payload.engine,
+                restic_full_every_days=payload.restic_full_every_days,
+                restic_keep_last=payload.restic_keep_last,
+                restic_keep_weekly=payload.restic_keep_weekly,
             )
             status = str((result or {}).get("status") or "success")
             await _notify_backup_finished(
@@ -557,6 +592,10 @@ async def run_backup_endpoint(
         project=payload.project,
         snapshot=snap,
         quiesce=payload.quiesce,
+        engine=payload.engine,
+        restic_full_every_days=payload.restic_full_every_days,
+        restic_keep_last=payload.restic_keep_last,
+        restic_keep_weekly=payload.restic_keep_weekly,
     )
     background.add_task(_bg)
     return {
@@ -613,6 +652,109 @@ async def restore_endpoint(
             snapshot=_snapshot(request),
             confirm=payload.confirm,
             source=payload.source,
+            snapshot_id=payload.snapshot_id,
+        )
+        return result
+    except RestoreError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    except DockerControlError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+class ResticRestorePayload(BaseModel):
+    parent_id: str = Field(..., min_length=1)
+    project: str = Field(..., min_length=1)
+    snapshot_id: str = Field(..., min_length=8, max_length=64)
+    confirm: bool = False
+    source: str = Field(default="copilot", min_length=1, max_length=64)
+
+
+@router.get("/restic/snapshots")
+async def restic_snapshots(
+    request: Request,
+    parent_id: str = Query(..., min_length=1),
+    project: str = Query(..., min_length=1),
+    source: str = Query("copilot", min_length=1, max_length=64),
+) -> dict[str, Any]:
+    store = _get_store()
+    bs = get_backup_settings()
+    meta = await store.get_restic_secret_meta(parent_id, project)
+    if not meta:
+        return {
+            "ok": True,
+            "engine": ENGINE_RESTIC,
+            "snapshots": [],
+            "hint": (
+                "Noch kein restic-Backup für diesen Stack. "
+                "Engine „Incremental (restic)“ wählen und einmal sichern."
+            ),
+        }
+    try:
+        inv = await build_inventory(
+            get_settings(),
+            parent_id=parent_id,
+            project=project,
+            snapshot=_snapshot(request),
+            lxc_backup_dir=bs.backup_lxc_dir,
+        )
+        snaps = await list_restic_snapshots(
+            store,
+            parent_id=parent_id,
+            project=project,
+            inventory=inv,
+            settings=get_settings(),
+            bsettings=bs,
+            source=source,
+        )
+    except ResticError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    except DockerControlError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return {
+        "ok": True,
+        "engine": ENGINE_RESTIC,
+        "parent_id": parent_id,
+        "project": project,
+        "snapshots": snaps,
+        "has_password": True,
+        "last_full_at": meta.get("last_full_at"),
+    }
+
+
+@router.post("/restic/restore")
+async def restic_restore_endpoint(
+    payload: ResticRestorePayload,
+    request: Request,
+) -> dict[str, Any]:
+    """Restore a restic snapshot (uses latest matching run for history linkage)."""
+    store = _get_store()
+    runs = await store.list_runs(limit=50, stack=payload.project)
+    run = next(
+        (
+            r
+            for r in runs
+            if r.get("parent_id") == payload.parent_id
+            and str(r.get("engine") or "") == ENGINE_RESTIC
+            and r.get("status") in ("success", "partial")
+        ),
+        None,
+    )
+    if not run:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Kein erfolgreicher restic-Lauf für diesen Stack — "
+                "zuerst ein Incremental-Backup ausführen."
+            ),
+        )
+    try:
+        result = await run_restore(
+            store,
+            run_id=int(run["id"]),
+            snapshot=_snapshot(request),
+            confirm=payload.confirm,
+            source=payload.source,
+            snapshot_id=payload.snapshot_id,
         )
         return result
     except RestoreError as exc:
@@ -656,9 +798,14 @@ async def list_schedules() -> dict[str, Any]:
     }
 
 
-@router.post("/schedules")
-async def save_schedule(payload: SchedulePayload) -> dict[str, Any]:
+async def _persist_schedule(
+    payload: SchedulePayload, *, schedule_id: int | None
+) -> dict[str, Any]:
     store = _get_store()
+    if schedule_id is not None:
+        existing = await store.get_schedule(schedule_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Zeitplan nicht gefunden.")
     try:
         if payload.preset == "custom":
             if not payload.cron_expr:
@@ -671,18 +818,40 @@ async def save_schedule(payload: SchedulePayload) -> dict[str, Any]:
     except cron_mod.CronError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
 
-    sid = await store.upsert_schedule(
-        schedule_id=payload.id,
-        stack=payload.stack,
-        parent_id=payload.parent_id,
-        cron_expr=expr,
-        preset=payload.preset,
-        enabled=payload.enabled,
-        note=payload.note,
-    )
+    try:
+        sid = await store.upsert_schedule(
+            schedule_id=schedule_id,
+            stack=payload.stack,
+            parent_id=payload.parent_id,
+            cron_expr=expr,
+            preset=payload.preset,
+            enabled=payload.enabled,
+            note=payload.note,
+            engine=payload.engine,
+            restic_full_every_days=payload.restic_full_every_days,
+            restic_keep_last=payload.restic_keep_last,
+            restic_keep_weekly=payload.restic_keep_weekly,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     schedules = await store.list_schedules()
     sync = cron_mod.sync_crontab(schedules)
     return {"ok": True, "id": sid, "cron_expr": expr, "crontab": sync}
+
+
+@router.post("/schedules")
+async def save_schedule(payload: SchedulePayload) -> dict[str, Any]:
+    return await _persist_schedule(payload, schedule_id=payload.id)
+
+
+@router.put("/schedules/{schedule_id}")
+async def update_schedule(schedule_id: int, payload: SchedulePayload) -> dict[str, Any]:
+    return await _persist_schedule(payload, schedule_id=schedule_id)
+
+
+@router.patch("/schedules/{schedule_id}")
+async def patch_schedule(schedule_id: int, payload: SchedulePayload) -> dict[str, Any]:
+    return await _persist_schedule(payload, schedule_id=schedule_id)
 
 
 @router.delete("/schedules/{schedule_id}")
@@ -703,10 +872,10 @@ async def sync_schedules() -> dict[str, Any]:
 
 class BackupVerifierModule:
     name = "backup_verifier"
-    version = "0.2.0"
+    version = "0.3.0"
     description = (
-        "Compose-Stack-Backups mit flexiblen Zielen (Host-Staging → Copilot → SFTP), "
-        "Checksum-Verify, Verlauf und Zeitplan."
+        "Compose-Stack-Backups (Voll/tar oder Incremental/restic) mit flexiblen Zielen "
+        "(Host → Copilot → SFTP), Verify, Verlauf, Zeitplan und Restore."
     )
     enabled = True
     meta = {
