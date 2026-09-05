@@ -762,6 +762,11 @@ async def _mirror_to_sftp(
     project: str,
     timeout: float,
     log: LogFn,
+    on_progress: ProgressFn | None = None,
+    run_id: int | None = None,
+    phase: str | None = None,
+    percent_start: int = 70,
+    percent_end: int = 92,
 ) -> str:
     if not (copilot_repo / "config").is_file():
         raise ResticError("Copilot-restic-Repo fehlt — SFTP-Kopie nicht möglich.")
@@ -771,7 +776,20 @@ async def _mirror_to_sftp(
         raise ResticError("SFTP-Ziel: Host/Pfad unvollständig.")
     remote = f"{remote_base}/{sftp_repo_rel(parent_id, project)}"
     auth = resolve_auth(dest, settings)
-    await log(f"Spiegele restic-Repo nach {dest.get('label') or 'SFTP'}: {remote}")
+    hop_label = str(dest.get("label") or "SFTP")
+    await log(f"Spiegele restic-Repo nach {hop_label}: {remote}")
+
+    async def hop_progress(message: str, file_pct: int) -> None:
+        span = max(1, int(percent_end) - int(percent_start))
+        mapped = int(percent_start) + int(span * max(0, min(100, file_pct)) / 100)
+        await _emit_progress(
+            on_progress,
+            phase=phase or f"→ {hop_label}",
+            percent=mapped,
+            message=message,
+            run_id=run_id,
+        )
+
     stats = await sshutil.sftp_mirror_put(
         settings,
         host,
@@ -784,10 +802,11 @@ async def _mirror_to_sftp(
         password=auth.get("password"),
         port=auth["port"],
         log=log,
-        label=str(dest.get("label") or "SFTP"),
+        label=hop_label,
+        on_progress=hop_progress,
     )
     await log(
-        f"{dest.get('label') or 'SFTP'}: {stats['copied']} neu, "
+        f"{hop_label}: {stats['copied']} neu, "
         f"{stats['skipped']} unverändert, {stats['deleted']} entfernt"
     )
     return remote
@@ -1110,6 +1129,7 @@ async def run_restic_backup(
             kind = dest.get("kind")
             label = dest.get("label") or kind
             pct = 70 + int(22 * (idx / max(n_dur, 1)))
+            pct_end = 70 + int(22 * ((idx + 1) / max(n_dur, 1)))
             await _emit_progress(
                 on_progress,
                 phase=f"→ {label}",
@@ -1173,6 +1193,11 @@ async def run_restic_backup(
                         project=project,
                         timeout=transfer_timeout,
                         log=log,
+                        on_progress=on_progress,
+                        run_id=run_id,
+                        phase=f"→ {label}",
+                        percent_start=pct,
+                        percent_end=pct_end,
                     )
                     hop = _hop_entry(dest, status="ok", verify="ok", path=remote)
                     hop_results.append(hop)
