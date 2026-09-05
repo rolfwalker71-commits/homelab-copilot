@@ -11,6 +11,7 @@ Supported 24.04 LTS only gets a quiet “Nächstes LTS verfügbar”.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -45,6 +46,22 @@ _UBUNTU_META: dict[str, tuple[str, bool, date]] = {
     "26.04": ("resolute", True, date(2026, 4, 23)),
 }
 
+# Full names for pinned meta-release Dist blocks (fallback: title-cased codename).
+_UBUNTU_TITLE: dict[str, str] = {
+    "22.04": "Jammy Jellyfish",
+    "24.04": "Noble Numbat",
+    "24.10": "Oracular Oriole",
+    "25.04": "Plucky Puffin",
+    "25.10": "Questing Quokka",
+    "26.04": "Resolute Raccoon",
+}
+
+_ARCHIVE_MIRROR = "http://archive.ubuntu.com/ubuntu"
+_OLD_RELEASES_MIRROR = "http://old-releases.ubuntu.com/ubuntu"
+
+# DistUpgradeFetcher / apt log: 'resolute.tar.gz' or 'resolute.tar.gz.gpg'
+_UPGRADE_TARBALL_RE = re.compile(r"\b([a-z]{4,})\.tar\.gz(?:\.gpg)?\b")
+
 # Debian: suggestion only. Perform is Ubuntu (do-release-upgrade).
 _DEBIAN_NEXT: dict[str, tuple[str, str]] = {
     "bookworm": ("trixie", "13"),
@@ -78,6 +95,25 @@ def next_ubuntu_series(version: str) -> str | None:
 def ubuntu_codename(version: str) -> str:
     meta = _UBUNTU_META.get(version)
     return meta[0] if meta else ""
+
+
+def ubuntu_full_name(version: str) -> str:
+    """Animal title for meta-release ``Name:`` (e.g. Plucky Puffin)."""
+    titled = _UBUNTU_TITLE.get(version)
+    if titled:
+        return titled
+    code = ubuntu_codename(version)
+    return code.title() if code else version
+
+
+def ubuntu_version_for_codename(codename: str) -> str:
+    code = (codename or "").strip().lower()
+    if not code:
+        return ""
+    for ver, meta in _UBUNTU_META.items():
+        if meta[0] == code:
+            return ver
+    return ""
 
 
 def ubuntu_pretty(version: str, *, lts: bool | None = None) -> str:
@@ -117,6 +153,125 @@ def ubuntu_series_is_eol(version: str, today: date | None = None) -> bool:
         return not ubuntu_is_supported_lts(version)
     eol = ubuntu_interim_eol_date(version)
     return bool(eol and today >= eol)
+
+
+def ubuntu_is_current_devel(version: str, today: date | None = None) -> bool:
+    """True only if the series is listed but not yet released (needs ``-d``)."""
+    today = today or date.today()
+    if not version or version not in _UBUNTU_META:
+        return False
+    return not ubuntu_is_released(version, today)
+
+
+def should_use_devel_flag(hop: "ReleaseHop", today: date | None = None) -> bool:
+    """``do-release-upgrade -d`` only when this hop's target is current devel."""
+    return ubuntu_is_current_devel(hop.target, today)
+
+
+def ubuntu_upgrade_tool_mirror(version: str, today: date | None = None) -> str:
+    """old-releases for EOL series (25.04/25.10 as of 2026-09), else archive."""
+    if ubuntu_series_is_eol(version, today):
+        return _OLD_RELEASES_MIRROR
+    return _ARCHIVE_MIRROR
+
+
+def upgrade_tool_url_candidates(version: str, today: date | None = None) -> list[str]:
+    """DistUpgrade tarball URLs. EOL: old-releases first, archive as fallback."""
+    code = ubuntu_codename(version)
+    if not code:
+        return []
+    if ubuntu_series_is_eol(version, today):
+        hosts = [_OLD_RELEASES_MIRROR, _ARCHIVE_MIRROR]
+    else:
+        hosts = [_ARCHIVE_MIRROR]
+    urls: list[str] = []
+    for host in hosts:
+        for pocket in (f"{code}-updates", code):
+            urls.append(
+                f"{host}/dists/{pocket}/main/dist-upgrader-all/current/{code}.tar.gz"
+            )
+    return urls
+
+
+def _meta_release_block(
+    version: str, *, supported: bool, today: date | None = None
+) -> str:
+    code = ubuntu_codename(version)
+    title = ubuntu_full_name(version)
+    meta = _UBUNTU_META.get(version)
+    pub = meta[2] if meta else date(2000, 1, 1)
+    date_s = pub.strftime("%a, %d %B %Y 00:00:00 UTC")
+    mirror = ubuntu_upgrade_tool_mirror(version, today)
+    pocket = f"{code}-updates"
+    tool = f"{mirror}/dists/{pocket}/main/dist-upgrader-all/current/{code}.tar.gz"
+    lts = " LTS" if is_ubuntu_lts(version) else ""
+    notes = (
+        f"{mirror}/dists/{pocket}/main/dist-upgrader-all/current/ReleaseAnnouncement"
+        if supported and not ubuntu_series_is_eol(version, today)
+        else "http://changelogs.ubuntu.com/EOLReleaseAnnouncement"
+    )
+    return (
+        f"Dist: {code}\n"
+        f"Name: {title}\n"
+        f"Version: {version}{lts}\n"
+        f"Date: {date_s}\n"
+        f"Supported: {1 if supported else 0}\n"
+        f"Description: This is the {version}{lts} release\n"
+        f"Release-File: {mirror}/dists/{pocket}/Release\n"
+        f"ReleaseNotes: {notes}\n"
+        f"UpgradeTool: {tool}\n"
+        f"UpgradeToolSignature: {tool}.gpg\n"
+    )
+
+
+def build_meta_release_pin(
+    *, source: str, target: str, today: date | None = None
+) -> str:
+    """Local meta-release: current + hop target only. Target is Supported: 1.
+
+    Official changelogs skip Supported: 0 interims (plucky/questing) and jump
+    to the next Supported: 1 (resolute). Pinning prevents that skip.
+    """
+    today = today or date.today()
+    src_supported = not ubuntu_series_is_eol(source, today)
+    return (
+        _meta_release_block(source, supported=src_supported, today=today)
+        + "\n"
+        + _meta_release_block(target, supported=True, today=today)
+    )
+
+
+def detect_fetched_upgrade_codename(text: str) -> str:
+    """Last known Ubuntu codename mentioned as ``*.tar.gz`` in upgrader output."""
+    found = ""
+    for match in _UPGRADE_TARBALL_RE.finditer(text or ""):
+        name = match.group(1)
+        if ubuntu_version_for_codename(name):
+            found = name
+    return found
+
+
+def hop_failure_message(hop: "ReleaseHop", code: int, blob: str) -> str:
+    """German error: intended hop, leaked tarball if any, Proxmox snap rollback."""
+    leaked = detect_fetched_upgrade_codename(blob)
+    want = (hop.target_codename or ubuntu_codename(hop.target) or "").lower()
+    head = f"do-release-upgrade fehlgeschlagen ({hop.label}, exit {code}):"
+    extra = ""
+    if leaked and leaked != want:
+        ver = ubuntu_version_for_codename(leaked)
+        extra = (
+            f" Falsches Upgrade-Ziel: {leaked}.tar.gz"
+            + (f" (Ubuntu {ver})" if ver else "")
+            + f" statt {want}.tar.gz ({hop.target})."
+        )
+    snap = (
+        " Ein Proxmox-Snapshot (hlops-*) vor dem Versuch kann zur Rückkehr "
+        "genutzt werden."
+    )
+    tail = (blob or "").strip()[:600]
+    if tail:
+        return f"{head}{extra}{snap} {tail}"
+    return f"{head}{extra}{snap}"
 
 
 def next_ubuntu_lts(version: str, today: date | None = None) -> str | None:

@@ -25,8 +25,13 @@ from patcher.config import get_patcher_settings
 from patcher.detect import HostDetect, check_reboot_required, detect_host
 from patcher.release import (
     ReleaseHop,
+    build_meta_release_pin,
+    hop_failure_message,
+    should_use_devel_flag,
     suggest_release_upgrade,
+    ubuntu_codename,
     ubuntu_series_is_eol,
+    upgrade_tool_url_candidates,
 )
 from patcher.sshutil import ssh_probe, ssh_run
 from patcher.targets import PatchTarget
@@ -71,29 +76,126 @@ echo PROMPT_SET={value}
 """
 
 
-def _release_upgrade_cmd(*, container: bool) -> str:
-    """Non-interactive do-release-upgrade; LXC skips snap where possible."""
+_HLOPS_UPGRADER_DIR = "/var/tmp/ubuntu-release-upgrader"
+_HLOPS_APT_SANDBOX = "/etc/apt/apt.conf.d/zz-hlops-release-upgrade"
+_HLOPS_META = "/etc/update-manager/meta-release"
+_HLOPS_META_BAK = "/etc/update-manager/meta-release.hlops-bak"
+
+
+def _release_upgrade_cmd(hop: ReleaseHop, *, container: bool) -> str:
+    """Pin this hop's DistUpgrade tarball; LXC-safe fetch; never ``-d`` unless devel.
+
+    Official meta-release marks EOL interims Supported: 0, so do-release-upgrade
+    skips 25.04/25.10 and fetches resolute.tar.gz. We write a two-dist pin and
+    invoke that hop's tarball directly.
+    """
+    code = hop.target_codename or ubuntu_codename(hop.target)
+    use_d = should_use_devel_flag(hop)
+    meta = build_meta_release_pin(source=hop.source, target=hop.target)
+    urls = upgrade_tool_url_candidates(hop.target)
+    url_list = " ".join(urls)
     snap_skip = ""
     if container:
         snap_skip = (
             "if command -v snap >/dev/null 2>&1; then "
             "snap set system refresh.hold='2999-01-01T00:00:00Z' >/dev/null 2>&1 || true; "
-            "fi; "
+            "fi\n"
         )
-    return (
-        "export DEBIAN_FRONTEND=noninteractive LC_ALL=C "
-        "DEBIAN_PRIORITY=critical DEBCONF_NONINTERACTIVE_SEEN=true "
-        "NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 "
-        "UCF_FORCE_CONFFOLD=1 APT_LISTCHANGES_FRONTEND=none "
-        "RELEASE_UPGRADER_ALLOW_THIRD_PARTY=1; "
-        "apt-get install -y update-manager-core "
-        "-o DPkg::Lock::Timeout=60 "
-        "-o Acquire::ForceIPv4=true; "
-        f"{snap_skip}"
-        "if ! command -v do-release-upgrade >/dev/null 2>&1; then "
-        "echo 'do-release-upgrade fehlt (update-manager-core)'; exit 2; fi; "
-        "do-release-upgrade -f DistUpgradeViewNonInteractive -m server"
-    )
+    if use_d:
+        invoke = (
+            "echo HLOPS_HOP_TARGET=devel\n"
+            "do-release-upgrade -d -f DistUpgradeViewNonInteractive -m server\n"
+        )
+        fetch = ""
+    else:
+        fetch = f"""
+CODE={code}
+WORKDIR={_HLOPS_UPGRADER_DIR}
+echo "Schrittziel $CODE — DistUpgrade-Tarball (kein -d)"
+FOUND=""
+for url in {url_list}; do
+  echo "Hole DistUpgrade: $url"
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL --connect-timeout 20 -o "$WORKDIR/$CODE.tar.gz" "$url"; then
+      curl -fsSL --connect-timeout 20 -o "$WORKDIR/$CODE.tar.gz.gpg" "$url.gpg" || true
+      FOUND=$url
+      break
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if wget -q -O "$WORKDIR/$CODE.tar.gz" "$url"; then
+      wget -q -O "$WORKDIR/$CODE.tar.gz.gpg" "$url.gpg" || true
+      FOUND=$url
+      break
+    fi
+  else
+    echo "weder curl noch wget vorhanden"; exit 2
+  fi
+done
+if [ -z "$FOUND" ] || [ ! -s "$WORKDIR/$CODE.tar.gz" ]; then
+  echo "DistUpgrade-Tarball für $CODE nicht gefunden (old-releases/archive)."
+  exit 1
+fi
+echo "DistUpgrade geladen: $FOUND"
+chmod 0644 "$WORKDIR/$CODE.tar.gz" "$WORKDIR/$CODE.tar.gz.gpg" 2>/dev/null || chmod 0644 "$WORKDIR/$CODE.tar.gz"
+if command -v gpgv >/dev/null 2>&1 && [ -s "$WORKDIR/$CODE.tar.gz.gpg" ]; then
+  gpgv --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg \\
+    "$WORKDIR/$CODE.tar.gz.gpg" "$WORKDIR/$CODE.tar.gz" \\
+    || echo "Hinweis: gpgv-Prüfung fehlgeschlagen — fahre fort."
+fi
+cd "$WORKDIR"
+tar -xzf "$CODE.tar.gz"
+if [ ! -x "./$CODE" ]; then
+  echo "DistUpgrade-Skript ./$CODE fehlt nach dem Entpacken"; exit 2
+fi
+echo HLOPS_HOP_TARGET=$CODE
+"""
+        invoke = f'./"$CODE" --frontend=DistUpgradeViewNonInteractive --mode=server\n'
+
+    return f"""
+export DEBIAN_FRONTEND=noninteractive LC_ALL=C \\
+  DEBIAN_PRIORITY=critical DEBCONF_NONINTERACTIVE_SEEN=true \\
+  NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \\
+  UCF_FORCE_CONFFOLD=1 APT_LISTCHANGES_FRONTEND=none \\
+  RELEASE_UPGRADER_ALLOW_THIRD_PARTY=1 \\
+  TMPDIR={_HLOPS_UPGRADER_DIR}
+WORKDIR={_HLOPS_UPGRADER_DIR}
+HL_APT_CONF={_HLOPS_APT_SANDBOX}
+HL_META={_HLOPS_META}
+HL_META_BAK={_HLOPS_META_BAK}
+mkdir -p "$WORKDIR" /etc/update-manager /etc/apt/apt.conf.d
+chmod 0755 "$WORKDIR"
+# Leftover pin from a crashed hop
+if [ -f "$HL_META_BAK" ]; then mv -f "$HL_META_BAK" "$HL_META" || true; fi
+rm -f "$HL_APT_CONF"
+cleanup_hlops() {{
+  rm -f "$HL_APT_CONF"
+  if [ -f "$HL_META_BAK" ]; then mv -f "$HL_META_BAK" "$HL_META" || true; fi
+}}
+trap cleanup_hlops EXIT
+# Scoped to this command only (LXC: _apt cannot enter mkdtemp 0700 dirs)
+printf 'APT::Sandbox::User "root";\\n' > "$HL_APT_CONF"
+if [ -f "$HL_META" ]; then cp -a "$HL_META" "$HL_META_BAK"; fi
+cat > "$WORKDIR/meta-release" <<'HLOPS_META_EOF'
+{meta}
+HLOPS_META_EOF
+chmod 0644 "$WORKDIR/meta-release"
+cat > "$HL_META" <<'HLOPS_URI_EOF'
+[METARELEASE]
+URI = file://{_HLOPS_UPGRADER_DIR}/meta-release
+URI_LTS = file://{_HLOPS_UPGRADER_DIR}/meta-release
+URI_UNSTABLE_POSTFIX =
+URI_PROPOSED_POSTFIX =
+HLOPS_URI_EOF
+echo "meta-release gepinnt: {hop.source} → {hop.target} ({code})"
+apt-get install -y update-manager-core \\
+  -o DPkg::Lock::Timeout=60 \\
+  -o Acquire::ForceIPv4=true \\
+  -o APT::Sandbox::User=root
+{snap_skip}if ! command -v do-release-upgrade >/dev/null 2>&1; then
+  echo 'do-release-upgrade fehlt (update-manager-core)'; exit 2
+fi
+{fetch}{invoke}
+"""
 
 
 async def _emit(progress: ProgressFn | None, phase: str, percent: int, message: str) -> None:
@@ -377,7 +479,8 @@ async def _prepare_next_hop_packages(
     if ubuntu_series_is_eol(ver):
         await _emit_log(
             on_log,
-            "Zwischenstand ist ebenfalls EOL — Quellen auf old-releases.",
+            "Zwischenstand ist ebenfalls EOL — Quellen auf "
+            "old-releases.ubuntu.com (nicht archive.ubuntu.com).",
         )
         await _rewrite_ubuntu_sources(
             target,
@@ -443,11 +546,16 @@ async def _run_one_hop(
         hop.label or "Upgrade",
         percent,
         f"do-release-upgrade {hop.source} → {hop.target} "
-        f"(kann 30–90+ Minuten dauern)…",
+        f"({hop.target_codename or hop.target}, ohne -d, kann 30–90+ Minuten dauern)…",
+    )
+    await _emit_log(
+        on_log,
+        f"Schrittziel {hop.target} ({hop.target_codename}) — meta-release "
+        "gepinnt, DistUpgrade-Tarball für genau dieses Release, kein -d.",
     )
     stdout, stderr, code = await _stream_apply_cmd(
         target,
-        _release_upgrade_cmd(container=container),
+        _release_upgrade_cmd(hop, container=container),
         timeout=timeout,
         connect_timeout=connect_timeout,
         progress=progress,
@@ -461,13 +569,12 @@ async def _run_one_hop(
     if "no new release found" in low or "kein neues release" in low:
         raise ApplyError(
             f"Kein Release von {hop.source} nach {hop.target} gefunden. "
-            "Quellen (old-releases) und update-manager-core prüfen."
+            "Quellen (old-releases) und update-manager-core prüfen. "
+            "Ein Proxmox-Snapshot (hlops-*) vor dem Versuch kann zur Rückkehr "
+            "genutzt werden."
         )
     if code != 0:
-        raise ApplyError(
-            f"do-release-upgrade fehlgeschlagen ({hop.label}, exit {code}): "
-            + (stderr or stdout or "")[:800]
-        )
+        raise ApplyError(hop_failure_message(hop, code, blob or stderr or stdout or ""))
 
     detect = await detect_host(
         target, timeout=60.0, connect_timeout=connect_timeout

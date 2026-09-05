@@ -6,13 +6,19 @@ import unittest
 from datetime import date
 
 from patcher.release import (
+    build_meta_release_pin,
+    detect_fetched_upgrade_codename,
+    hop_failure_message,
     next_ubuntu_lts,
     next_ubuntu_series,
     sequential_hops,
+    should_use_devel_flag,
     suggest_debian_release,
     suggest_ubuntu_release,
     ubuntu_series_is_eol,
     ubuntu_series_is_supported,
+    ubuntu_upgrade_tool_mirror,
+    upgrade_tool_url_candidates,
 )
 
 ASOF = date(2026, 9, 5)
@@ -69,9 +75,19 @@ class UbuntuRecommendTests(unittest.TestCase):
         self.assertEqual(len(s.hops), 3)
         self.assertEqual(s.hops[0].source, "24.10")
         self.assertEqual(s.hops[0].target, "25.04")
+        self.assertEqual(s.hops[0].target_codename, "plucky")
+        self.assertEqual(s.hops[0].prompt, "normal")
+        self.assertFalse(should_use_devel_flag(s.hops[0], ASOF))
+        self.assertEqual(s.hops[1].target, "25.10")
+        self.assertEqual(s.hops[1].target_codename, "questing")
+        self.assertEqual(s.hops[1].prompt, "normal")
         self.assertEqual(s.hops[-1].target, "26.04")
+        self.assertEqual(s.hops[-1].target_codename, "resolute")
+        self.assertEqual(s.hops[-1].prompt, "normal")
         self.assertEqual(s.method, "do-release-upgrade")
         self.assertTrue(s.performable)
+        for hop in s.hops:
+            self.assertFalse(should_use_devel_flag(hop, ASOF))
 
     def test_2504_and_2510_also_to_2604(self) -> None:
         a = suggest_ubuntu_release(version_id="25.04", today=ASOF)
@@ -100,6 +116,7 @@ class UbuntuRecommendTests(unittest.TestCase):
         self.assertNotIn("am Ende", s.reason)
         self.assertEqual(len(s.hops), 1)
         self.assertEqual(s.hops[0].prompt, "lts")
+        self.assertFalse(should_use_devel_flag(s.hops[0], ASOF))
 
     def test_2604_no_nag(self) -> None:
         self.assertIsNone(suggest_ubuntu_release(version_id="26.04", today=ASOF))
@@ -132,6 +149,57 @@ class UbuntuRecommendTests(unittest.TestCase):
         self.assertEqual(s.target_version, "25.04")
         self.assertEqual(s.urgency, "recommended")
         self.assertTrue(s.current_eol)
+
+
+class HopPinTests(unittest.TestCase):
+    def test_2410_pin_is_plucky_not_resolute(self) -> None:
+        pin = build_meta_release_pin(source="24.10", target="25.04", today=ASOF)
+        self.assertIn("Dist: oracular", pin)
+        self.assertIn("Dist: plucky", pin)
+        self.assertIn("Supported: 1", pin)
+        self.assertIn("plucky.tar.gz", pin)
+        self.assertNotIn("resolute", pin)
+        self.assertNotIn("questing", pin)
+        self.assertIn("old-releases.ubuntu.com", pin)
+        plucky_block = pin.split("Dist: plucky", 1)[1]
+        self.assertIn("old-releases.ubuntu.com", plucky_block)
+        self.assertNotIn("archive.ubuntu.com", plucky_block)
+
+    def test_eol_tool_urls_prefer_old_releases(self) -> None:
+        self.assertEqual(
+            ubuntu_upgrade_tool_mirror("25.04", ASOF),
+            "http://old-releases.ubuntu.com/ubuntu",
+        )
+        self.assertEqual(
+            ubuntu_upgrade_tool_mirror("25.10", ASOF),
+            "http://old-releases.ubuntu.com/ubuntu",
+        )
+        self.assertEqual(
+            ubuntu_upgrade_tool_mirror("26.04", ASOF),
+            "http://archive.ubuntu.com/ubuntu",
+        )
+        urls = upgrade_tool_url_candidates("25.04", ASOF)
+        self.assertTrue(urls[0].startswith("http://old-releases.ubuntu.com/"))
+        self.assertIn("plucky.tar.gz", urls[0])
+        self.assertTrue(any("archive.ubuntu.com" in u for u in urls))
+
+    def test_failure_mentions_leaked_resolute_and_snap(self) -> None:
+        s = suggest_ubuntu_release(version_id="24.10", today=ASOF)
+        assert s is not None
+        hop = s.hops[0]
+        blob = (
+            "/usr/lib/python3/dist-packages/DistUpgrade/"
+            "DistUpgradeFetcherCore.py:237: Warning: W:Download is performed "
+            "unsandboxed as root as file 'resolute.tar.gz.gpg' couldn't be "
+            "accessed by user '_apt'."
+        )
+        msg = hop_failure_message(hop, 1, blob)
+        self.assertIn("24.10 → 25.04", msg)
+        self.assertIn("resolute.tar.gz", msg)
+        self.assertIn("26.04", msg)
+        self.assertIn("plucky", msg)
+        self.assertIn("hlops-", msg)
+        self.assertEqual(detect_fetched_upgrade_codename(blob), "resolute")
 
 
 class DebianSuggestTests(unittest.TestCase):
