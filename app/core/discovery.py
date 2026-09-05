@@ -484,32 +484,15 @@ class DiscoveryEngine:
 
         via = self._primary_via_label()
         owned = set(self._node_endpoints)
+        listed = set(seen_node)
+        guests = [
+            g
+            for g in guests
+            if not (g.node or "").strip() or (g.node or "").strip() in listed
+        ]
         for g in guests:
             name = (g.node or "").strip()
-            if name and name not in owned and name not in seen_node:
-                seen_node.add(name)
-                self._unbound_via[name] = via
-                stamp = format_de()
-                stamp_iso = iso_utc()
-                nodes.append(
-                    TopologyEntity(
-                        id=f"node:{name}",
-                        kind=EntityKind.NODE,
-                        name=name,
-                        status=EntityStatus.UNKNOWN,
-                        node=name,
-                        hostname=name,
-                        meta={
-                            "api_unbound": True,
-                            "api_via": via,
-                            "api_error": unbound_message(via),
-                            "pve_endpoint_id": "",
-                        },
-                        discovered_at=stamp,
-                        discovered_at_iso=stamp_iso,
-                    )
-                )
-            elif name and name not in owned:
+            if name and name not in owned:
                 self._unbound_via[name] = str(
                     self._unbound_via.get(name) or via
                 )
@@ -820,10 +803,9 @@ class DiscoveryEngine:
                     client, f"/nodes/{quote(node)}/lxc/{vmid}/config", headers
                 )
                 self._apply_lxc_config_meta(entity.meta, cfg or {})
-                if entity.status == EntityStatus.RUNNING:
-                    entity.ip_addresses = sorted(
-                        set(self._ips_from_lxc_config(cfg or {}))
-                    )
+                cfg_ips = sorted(set(self._ips_from_lxc_config(cfg or {})))
+                if cfg_ips:
+                    entity.ip_addresses = cfg_ips
             elif kind == EntityKind.QEMU:
                 if not entity.meta.get("tags_list"):
                     cfg = await self._proxmox_get(

@@ -16,7 +16,7 @@ from app.api import router as api_router
 from app.api.ssh_ws import router as ssh_ws_router
 from app.config import get_settings
 from app.core.app_store import AppStore
-from app.core.inventory import InventoryStore
+from app.core.inventory import InventoryStore, rehome_id_changes
 from app.core.auth import TotpAuthMiddleware, ensure_totp_secret
 from app.core.discovery import DiscoveryEngine
 from app.core.proxmox import hydrate_proxmox_settings
@@ -55,16 +55,23 @@ async def _discovery_loop(app: FastAPI) -> None:
     store: TopologyStore = app.state.topology_store
     while True:
         try:
-            snapshot = await engine.refresh()
-            await store.save(snapshot)
+            live = await engine.refresh()
+            snapshot, stats = await store.apply_live(live)
+            inv = getattr(app.state, "inventory_store", None)
+            await rehome_id_changes(inv, stats.id_changes)
             await store.log(
                 "info",
-                f"Automatische Discovery: {snapshot.summary['nodes']} Nodes, "
+                f"Automatische Discovery: {stats.message_de()} — "
+                f"{snapshot.summary['nodes']} Nodes, "
                 f"{snapshot.summary['guests']} Guests, "
                 f"{snapshot.summary['containers']} Container — {snapshot.refreshed_at}",
             )
             await registry.notify_topology_refresh(snapshot.model_dump())
-            logger.info("Discovery refresh OK @ %s", snapshot.refreshed_at)
+            logger.info(
+                "Discovery refresh OK @ %s (%s)",
+                snapshot.refreshed_at,
+                stats.message_de(),
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

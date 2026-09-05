@@ -165,3 +165,40 @@ class InventoryStore:
         )
         await db.commit()
         return await self.get(entity_id)
+
+    async def rehome(self, old_id: str, new_id: str) -> bool:
+        """Copy Inventar/Doku to a new entity id if the destination is empty.
+
+        The old row stays (not shown on the Hosts rail). Used when a guest is
+        recreated under the same name with a new VMID.
+        """
+        old_id = (old_id or "").strip()
+        new_id = (new_id or "").strip()
+        if not old_id or not new_id or old_id == new_id:
+            return False
+        src = await self.get(old_id)
+        if not (src.get("notes") or src.get("extra_tags") or src.get("links")):
+            return False
+        dest = await self.get(new_id)
+        if dest.get("notes") or dest.get("extra_tags") or dest.get("links"):
+            return False
+        await self.upsert(
+            new_id,
+            notes=src.get("notes") or "",
+            extra_tags=src.get("extra_tags") or [],
+            links=src.get("links") or [],
+        )
+        return True
+
+
+async def rehome_id_changes(
+    store: InventoryStore | None,
+    id_changes: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+) -> None:
+    if store is None:
+        return
+    for old_id, new_id in id_changes:
+        try:
+            await store.rehome(old_id, new_id)
+        except Exception:
+            logger.exception("Inventar %s → %s nicht übernommen", old_id, new_id)

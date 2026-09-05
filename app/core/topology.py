@@ -11,6 +11,7 @@ import aiosqlite
 
 from app.core.locale import format_de, iso_utc, now_berlin
 from app.core.models import TopologySnapshot
+from app.core.reconcile import ReconcileStats, reconcile_topology
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,14 @@ class TopologyStore:
             )
         except Exception:
             logger.exception("Failed to parse cached topology")
+
+    async def apply_live(
+        self, live: TopologySnapshot
+    ) -> tuple[TopologySnapshot, ReconcileStats]:
+        """Reconcile live PVE discovery against the cached snapshot, then persist."""
+        snapshot, stats = reconcile_topology(self._snapshot, live)
+        await self.save(snapshot)
+        return snapshot, stats
 
     async def save(self, snapshot: TopologySnapshot) -> None:
         self._snapshot = snapshot

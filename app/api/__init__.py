@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.config import Settings, get_settings
 from app.core import docker_control as docker_ctl
-from app.core.inventory import InventoryStore
+from app.core.inventory import InventoryStore, rehome_id_changes
 from app.core.locale import format_de, now_berlin
 from app.core.registry import registry
 from app.core.ssh_endpoint import resolve_ssh_endpoint
@@ -132,12 +132,16 @@ async def get_topology(request: Request) -> dict[str, Any]:
 async def trigger_refresh(request: Request) -> dict[str, Any]:
     engine = request.app.state.discovery_engine
     store = request.app.state.topology_store
-    snapshot = await engine.refresh()
-    await store.save(snapshot)
-    await store.log("info", f"Manuelle Discovery abgeschlossen ({format_de()}).")
+    live = await engine.refresh()
+    snapshot, stats = await store.apply_live(live)
+    inv = getattr(request.app.state, "inventory_store", None)
+    await rehome_id_changes(inv, stats.id_changes)
+    await store.log("info", f"Manuelle Discovery: {stats.message_de()} ({format_de()}).")
     await registry.notify_topology_refresh(snapshot.model_dump())
     data = snapshot.model_dump()
     data["summary"] = snapshot.summary
+    data["reconcile"] = stats.as_dict()
+    data["message"] = stats.message_de()
     return data
 
 

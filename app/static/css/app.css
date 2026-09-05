@@ -1626,12 +1626,15 @@ html[data-theme="light"][data-chrome="android"] .topo-rail-item.is-selected {
 .topo-rail-status-stopped,
 .topo-rail-status-exited,
 .topo-rail-status-dead {
+  background: color-mix(in srgb, var(--muted) 72%, var(--outline));
+}
+
+.topo-rail-status-error {
   background: var(--danger);
 }
 
 .topo-rail-status-paused,
 .topo-rail-status-unknown,
-.topo-rail-status-error,
 .topo-rail-status-created,
 .topo-rail-status-restarting {
   background: var(--warn);

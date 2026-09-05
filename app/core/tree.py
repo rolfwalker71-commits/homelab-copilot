@@ -185,14 +185,11 @@ def build_topology_tree(snapshot: TopologySnapshot | None) -> dict[str, Any]:
         key = g.node or "unbekannt"
         guests_by_node.setdefault(key, []).append(g)
 
-    # Stable order: known nodes first (as discovered), then leftover guest nodes
+    # Only nodes Proxmox listed — do not invent groups from leftover guest.node
     ordered_names: list[str] = []
     for n in snapshot.nodes:
         if n.name and n.name not in ordered_names:
             ordered_names.append(n.name)
-    for name in sorted(guests_by_node.keys()):
-        if name not in ordered_names:
-            ordered_names.append(name)
 
     nodes_out: list[dict[str, Any]] = []
     for name in ordered_names:
