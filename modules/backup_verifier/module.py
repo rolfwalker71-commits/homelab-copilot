@@ -42,6 +42,10 @@ from backup_verifier.restic import (
     list_restic_snapshots,
     safe_name,
 )
+from backup_verifier.stack_backups import (
+    StackBackupError,
+    collect_stack_backups,
+)
 from backup_verifier.restore import RestoreError, list_tar_members, run_restore
 from backup_verifier.restore_paths import (
     DEST_STAGING,
@@ -1184,6 +1188,26 @@ class ResticRestorePayload(BaseModel):
     scope: str = Field(default="stack", max_length=32)
     paths: list[str] = Field(default_factory=list)
     typed_confirm: str | None = Field(default=None, max_length=64)
+
+
+@router.get("/stacks/{parent_id}/{project}/backups")
+async def stack_existing_backups(
+    parent_id: str,
+    project: str,
+    refresh: bool = Query(False),
+) -> dict[str, Any]:
+    """Existing restic snapshots + tar archives for one compose stack (cached)."""
+    store = _get_store()
+    try:
+        return await collect_stack_backups(
+            store,
+            parent_id=parent_id,
+            project=project,
+            bsettings=get_backup_settings(),
+            refresh=refresh,
+        )
+    except StackBackupError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
 
 @router.get("/restic/snapshots")

@@ -1851,6 +1851,43 @@ async def list_restic_snapshots(
     return _snapshot_rows(out)
 
 
+async def list_local_restic_snapshots(
+    repo: Path,
+    password: str,
+    *,
+    project: str,
+    timeout: float = 60.0,
+) -> list[dict[str, Any]]:
+    """``restic snapshots --json`` against a Copilot-local repo. No guest SSH."""
+    if not password or not (repo / "config").is_file():
+        return []
+    if not await _local_restic_available():
+        raise ResticError(
+            "restic fehlt lokal — Snapshots auf Copilot können nicht gelesen werden."
+        )
+    work = repo.parent / "_snap"
+    work.mkdir(parents=True, exist_ok=True)
+    pw_file = work / f".pass-{safe_name(project)}"
+    pw_file.write_text(password, encoding="utf-8")
+    pw_file.chmod(0o600)
+    repo_s = str(repo)
+    pw_s = str(pw_file)
+    try:
+        out, err, code = await sshutil.local_run(
+            f"RESTIC_REPOSITORY={shlex.quote(repo_s)} "
+            f"RESTIC_PASSWORD_FILE={shlex.quote(pw_s)} "
+            f"restic snapshots --json --tag {shlex.quote('stack:' + project)} "
+            f"2>/dev/null || RESTIC_REPOSITORY={shlex.quote(repo_s)} "
+            f"RESTIC_PASSWORD_FILE={shlex.quote(pw_s)} restic snapshots --json",
+            timeout=min(120.0, max(15.0, float(timeout))),
+        )
+    finally:
+        pw_file.unlink(missing_ok=True)
+    if code != 0:
+        raise ResticError(translate_restic_error(err or out))
+    return _snapshot_rows(out)
+
+
 async def _noop_log(_msg: str) -> None:
     return None
 

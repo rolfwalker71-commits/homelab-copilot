@@ -3179,8 +3179,128 @@ html[data-chrome="desktop"] .topo-stack-card {
   transform: rotate(-90deg);
 }
 
-.topo-stack-card.is-collapsed > .topo-docker-chips {
+.topo-stack-card.is-collapsed > .topo-docker-chips,
+.topo-stack-card.is-collapsed > .topo-stack-backups {
   display: none;
+}
+
+.topo-stack-backups {
+  margin-top: 0.55rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid color-mix(in srgb, var(--outline) 38%, transparent);
+}
+
+.topo-stack-bak-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+  margin-bottom: 0.4rem;
+}
+
+.topo-stack-bak-title {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.topo-stack-bak-meta,
+.topo-stack-bak-empty {
+  margin: 0 0 0.4rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.topo-stack-bak-meta strong {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.topo-stack-bak-empty a,
+.topo-stack-bak-meta a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
+.topo-stack-bak-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.topo-stack-bak-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.topo-stack-bak-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0.2rem 0.55rem 0.3rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--outline) 40%, transparent);
+}
+
+.topo-stack-bak-table td {
+  padding: 0.32rem 0.55rem 0.32rem 0;
+  vertical-align: baseline;
+  font-variant-numeric: tabular-nums;
+}
+
+.topo-stack-bak-table td:last-child,
+.topo-stack-bak-table th:last-child {
+  padding-right: 0;
+}
+
+.topo-stack-bak-kind {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.25rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  background: color-mix(in srgb, var(--primary) 14%, var(--card));
+  color: var(--primary);
+}
+
+.topo-stack-bak-kind.is-full {
+  background: color-mix(in srgb, var(--success) 18%, var(--card));
+  color: var(--success);
+}
+
+.topo-stack-bak-kind.is-tar {
+  background: color-mix(in srgb, var(--muted) 18%, var(--card));
+  color: var(--text);
+}
+
+.topo-stack-bak-id {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 0.6875rem;
+}
+
+html[data-chrome="android"] .topo-stack-backups {
+  border-top-color: transparent;
+  margin-top: 0.65rem;
+  padding: 0.65rem 0.7rem 0.55rem;
+  border-radius: 1.5rem;
+  background: var(--surface-container-high, color-mix(in srgb, var(--card) 70%, var(--background)));
+}
+
+html[data-chrome="android"] .topo-stack-bak-kind {
+  background: var(--secondary, color-mix(in srgb, var(--primary) 18%, var(--card)));
+  color: var(--primary);
+}
+
+html[data-chrome="desktop"] .topo-stack-backups {
+  border-radius: 0.375rem;
 }
 
 .topo-stack-card-title {

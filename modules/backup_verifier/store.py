@@ -474,6 +474,24 @@ class BackupStore:
             rows = await cur.fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    async def list_runs_for_stack(
+        self, parent_id: str, stack: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Job history for one topology parent + compose project."""
+        db = self._require()
+        limit = max(1, min(int(limit or 20), 200))
+        parent_id = str(parent_id or "").strip()
+        stack = str(stack or "").strip()
+        if not parent_id or not stack:
+            return []
+        async with db.execute(
+            "SELECT * FROM backup_runs WHERE parent_id = ? AND stack = ? "
+            "ORDER BY created_at_iso DESC LIMIT ?",
+            (parent_id, stack, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     async def create_restore(
         self,
         *,

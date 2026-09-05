@@ -199,6 +199,28 @@
     {{ docker_chip(c) }}
     {% endfor %}
   </div>
+  {% if item.source == 'compose' and item.compose_project and item.containers and item.containers[0].parent_id %}
+  <section class="topo-stack-backups"
+    data-stack-backups
+    data-parent-id="{{ item.containers[0].parent_id }}"
+    data-project="{{ item.compose_project }}"
+    aria-labelledby="stack-bak-{{ stack_key | replace(':', '-') | replace(' ', '-') }}">
+    <div class="topo-stack-bak-head">
+      <h5 class="topo-stack-bak-title" id="stack-bak-{{ stack_key | replace(':', '-') | replace(' ', '-') }}">Backups</h5>
+      <button type="button"
+        class="btn btn-ghost btn-xs"
+        data-stack-backups-refresh
+        data-parent-id="{{ item.containers[0].parent_id }}"
+        data-project="{{ item.compose_project }}"
+        title="Vorhandene Snapshots und Archive neu laden">
+        Aktualisieren
+      </button>
+    </div>
+    <div class="topo-stack-bak-body" data-stack-backups-body>
+      <p class="topo-node-loading text-sm text-[var(--muted)]">Backups werden geladen…</p>
+    </div>
+  </section>
+  {% endif %}
 </article>
 {%- endmacro %}
 
@@ -1859,6 +1881,179 @@
       .replace(/"/g, '&quot;');
   }
 
+  const stackBackupCache = new Map();
+  const stackBackupInflight = new Map();
+
+  function stackBackupCacheKey(parentId, project) {
+    return String(parentId || '') + '::' + String(project || '');
+  }
+
+  function stackBackupMount(parentId, project) {
+    return document.querySelector(
+      '[data-stack-backups][data-parent-id="' + parentId + '"][data-project="' + project + '"] [data-stack-backups-body]'
+    );
+  }
+
+  function hopLabel(status) {
+    if (status === 'ok' || status === 'success') return 'OK';
+    if (status === 'failed') return 'fehlgeschlagen';
+    if (status === 'partial') return 'teilweise';
+    if (status === 'cleared') return 'geräumt';
+    return status || '';
+  }
+
+  function renderWhereLine(where) {
+    if (!where) return '';
+    const bits = [];
+    const cop = where.copilot || {};
+    bits.push('Copilot <strong>' + (cop.present ? 'ja' : 'nein') + '</strong>');
+    const dest = where.dest || {};
+    const label = dest.hetzner ? 'Hetzner' : (dest.label || 'Ziel');
+    let destVal = 'nein';
+    if (dest.present === true) destVal = 'ja';
+    else if (dest.present === false) destVal = 'nein';
+    else if (dest.configured) destVal = 'Ziel aktiv';
+    let destBit = label + ' <strong>' + destVal + '</strong>';
+    if (dest.last_hop) destBit += ' (letzter Hop ' + escapeHtml(hopLabel(dest.last_hop)) + ')';
+    bits.push(destBit);
+    return bits.join(' · ');
+  }
+
+  function renderScheduleLine(data) {
+    const sched = data.schedule;
+    const check = data.check_url || '/modules/backup_verifier/check';
+    if (!sched) {
+      return 'Kein Zeitplan · <a href="' + check + '">Backup → Prüfen</a>';
+    }
+    const bits = [];
+    bits.push((sched.enabled ? 'Zeitplan' : 'Zeitplan (pausiert)') + ' <strong>' + escapeHtml(sched.engine_label || sched.engine || '') + '</strong>');
+    if (sched.next_run) bits.push('nächster ' + escapeHtml(sched.next_run));
+    const keep = [];
+    if (sched.keep_last) keep.push('letzte ' + sched.keep_last);
+    if (sched.keep_weekly != null && sched.engine === 'restic') keep.push('wöchentlich ' + sched.keep_weekly);
+    if (sched.full_every_days && sched.engine === 'restic') keep.push('Voll alle ' + sched.full_every_days + ' Tage');
+    if (keep.length) bits.push(keep.join(', '));
+    return bits.join(' · ');
+  }
+
+  function renderLastJobLine(job) {
+    if (!job) return '';
+    const bits = ['Letzter Lauf <strong>' + escapeHtml(job.status_label || job.status || '') + '</strong>'];
+    if (job.created_at) bits.push(escapeHtml(job.created_at));
+    if (job.engine) bits.push(job.engine === 'restic' ? 'restic' : 'tar');
+    if (job.status === 'failed' && job.error_message) {
+      bits.push(escapeHtml(String(job.error_message).slice(0, 120)));
+    }
+    return bits.join(' · ');
+  }
+
+  function renderStackBackups(body, data) {
+    if (!body) return;
+    const items = (data && data.items) || [];
+    const parts = [];
+    const last = renderLastJobLine(data && data.last_job);
+    const sched = renderScheduleLine(data || {});
+    const where = renderWhereLine(data && data.where);
+    const extra = [];
+    if (last) extra.push(last);
+    if (sched) extra.push(sched);
+    if (where) extra.push(where);
+    if (data && data.repo_size) extra.push('Repo ' + escapeHtml(data.repo_size));
+    if (data && data.restic_error) extra.push(escapeHtml(data.restic_error));
+    if (extra.length) {
+      parts.push('<p class="topo-stack-bak-meta">' + extra.join('<br>') + '</p>');
+    }
+    if (!items.length) {
+      const check = (data && data.check_url) || '/modules/backup_verifier/check';
+      parts.push(
+        '<p class="topo-stack-bak-empty">' +
+          escapeHtml((data && data.empty_label) || 'Noch keine Backups') +
+          (data && data.schedule ? '' : ' · <a href="' + check + '">Backup → Prüfen</a>') +
+        '</p>'
+      );
+      body.innerHTML = parts.join('');
+      return;
+    }
+    const rows = items.map((it) => {
+      const kind = it.engine === 'tar'
+        ? 'tar'
+        : (it.kind || 'snap');
+      const kindClass = kind === 'full' ? ' is-full' : (kind === 'tar' ? ' is-tar' : '');
+      const kindLabel = it.engine === 'tar'
+        ? 'tar'
+        : (it.kind_label || 'Snapshot');
+      const id = it.engine === 'tar'
+        ? (it.name || '')
+        : (it.short_id || '');
+      return (
+        '<tr>' +
+          '<td>' + escapeHtml(it.time || '—') + '</td>' +
+          '<td><span class="topo-stack-bak-kind' + kindClass + '">' + escapeHtml(kindLabel) + '</span></td>' +
+          '<td class="topo-stack-bak-id">' + escapeHtml(id || '—') + '</td>' +
+          '<td>' + escapeHtml(it.size || '—') + '</td>' +
+        '</tr>'
+      );
+    }).join('');
+    parts.push(
+      '<div class="topo-stack-bak-table-wrap">' +
+        '<table class="topo-stack-bak-table">' +
+          '<thead><tr><th>Wann</th><th>Art</th><th>ID</th><th>Größe</th></tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+      '</div>'
+    );
+    body.innerHTML = parts.join('');
+  }
+
+  async function loadStackBackups(parentId, project, force) {
+    if (!parentId || !project) return;
+    const key = stackBackupCacheKey(parentId, project);
+    const body = stackBackupMount(parentId, project);
+    if (!force && stackBackupCache.has(key)) {
+      renderStackBackups(body, stackBackupCache.get(key));
+      return;
+    }
+    if (!force && stackBackupInflight.has(key)) {
+      try { await stackBackupInflight.get(key); } catch (_) {}
+      return;
+    }
+    if (body && !stackBackupCache.has(key)) {
+      body.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Backups werden geladen…</p>';
+    }
+    const url = '/api/modules/backup_verifier/stacks/' +
+      encodeURIComponent(parentId) + '/' + encodeURIComponent(project) +
+      '/backups' + (force ? '?refresh=1' : '');
+    const job = (async () => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = await res.json();
+      stackBackupCache.set(key, data);
+      renderStackBackups(stackBackupMount(parentId, project), data);
+    })();
+    stackBackupInflight.set(key, job);
+    try {
+      await job;
+    } catch (err) {
+      if (body) {
+        body.innerHTML = '<p class="topo-stack-bak-empty">' +
+          escapeHtml(String(err.message || err || 'Backups nicht verfügbar')) + '</p>';
+      }
+    } finally {
+      stackBackupInflight.delete(key);
+    }
+  }
+
+  function loadGuestStackBackups(guestId) {
+    if (!guestId || guestId.startsWith('__')) return;
+    const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
+    if (!panel || panel.hidden) return;
+    panel.querySelectorAll('[data-stack-backups]').forEach((el) => {
+      const parentId = el.getAttribute('data-parent-id');
+      const project = el.getAttribute('data-project');
+      if (parentId && project) loadStackBackups(parentId, project, false);
+    });
+  }
+
   function snapSectionOf(el) {
     return el && el.closest ? el.closest('.topo-snapshots') : null;
   }
@@ -2346,6 +2541,7 @@
       }
     } catch (_) {}
     scheduleGuestSparks(guestId);
+    loadGuestStackBackups(guestId);
   }
 
   function selectTopoNode(nodeName) {
@@ -2682,6 +2878,18 @@
         stackBtn.getAttribute('data-project'),
         stackBtn
       );
+      return;
+    }
+    const bakRefresh = e.target.closest('[data-stack-backups-refresh]');
+    if (bakRefresh) {
+      e.preventDefault();
+      const parentId = bakRefresh.getAttribute('data-parent-id');
+      const project = bakRefresh.getAttribute('data-project');
+      if (!parentId || !project) return;
+      bakRefresh.disabled = true;
+      loadStackBackups(parentId, project, true).finally(() => {
+        bakRefresh.disabled = false;
+      });
       return;
     }
     const backupBtn = e.target.closest('[data-stack-backup]');
