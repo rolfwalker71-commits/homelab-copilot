@@ -19,6 +19,8 @@ from app.core.app_store import AppStore
 from app.core.inventory import InventoryStore
 from app.core.auth import TotpAuthMiddleware, ensure_totp_secret
 from app.core.discovery import DiscoveryEngine
+from app.core.backup_storage import bagel_dasharray, copilot_fs_usage
+from app.core.host_presence import host_presence_for_app
 from app.core.locale import (
     format_bytes,
     format_de,
@@ -206,6 +208,30 @@ def create_app() -> FastAPI:
         store: TopologyStore = request.app.state.topology_store
         snap = store.snapshot
         modules = registry.list_modules()
+        try:
+            backup_copilot = copilot_fs_usage()
+        except Exception:
+            logger.exception("Copilot-Speicher KPI")
+            backup_copilot = {}
+        try:
+            host_kpi = await host_presence_for_app(
+                snap,
+                patcher_store=getattr(request.app.state, "patcher_store", None),
+                health_store=getattr(request.app.state, "health_store", None),
+            )
+        except Exception:
+            logger.exception("Hosts-KPI")
+            host_kpi = {
+                "online": 0,
+                "offline": 0,
+                "unmonitored": 0,
+                "total": 0,
+                "center": "0 / 0",
+                "warn": False,
+                "online_dash": "0.00 95.19",
+                "offline_dash": "0.00 95.19",
+                "offline_offset": "0.00",
+            }
         return TEMPLATES.TemplateResponse(
             request,
             "dashboard.html",
@@ -217,6 +243,9 @@ def create_app() -> FastAPI:
                 "modules": modules,
                 "proxmox_configured": settings.proxmox_configured,
                 "now": format_de(now_berlin()),
+                "backup_copilot": backup_copilot,
+                "bagel_dasharray": bagel_dasharray,
+                "host_kpi": host_kpi,
             },
         )
 

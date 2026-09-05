@@ -534,7 +534,10 @@
 </section>
 
 {% set summary = snapshot.summary if snapshot else {'nodes': 0, 'guests': 0, 'containers': 0, 'errors': 0} %}
-<div class="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
+{% set bc = backup_copilot if backup_copilot is mapping else {} %}
+{% set bc_pct = bc.get('used_pct') %}
+{% set bc_used = (bc.get('used_label') or '—').split(' ') %}
+<div class="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6 kpi-row">
   <div class="surface surface-tinted animate-in animate-in-delay-1 p-4 sm:p-5">
     <div class="stat-tile" data-kpi="nodes">
       <span class="stat-tile-ico" aria-hidden="true">{{ ico('nodes') }}</span>
@@ -562,12 +565,80 @@
       </div>
     </div>
   </div>
+  {% set hk = host_kpi if host_kpi is mapping else {} %}
   <div class="surface surface-tinted animate-in animate-in-delay-2 p-4 sm:p-5">
-    <div class="stat-tile" data-kpi="modules">
-      <span class="stat-tile-ico" aria-hidden="true">{{ ico('modules') }}</span>
+    <div class="stat-tile stat-tile-bagel{% if hk.get('warn') %} is-hosts-offline{% endif %}" data-kpi="hosts"
+         title="Guests und Linux-Hosts — Online = läuft, Offline = gestoppt/down. Nicht überwachte ausgenommen.">
+      <div class="kpi-bagel kpi-bagel-split" role="meter" aria-valuemin="0"
+           aria-valuemax="{{ hk.get('total') or 0 }}"
+           aria-valuenow="{{ hk.get('online') or 0 }}"
+           aria-label="Hosts {{ hk.get('online') or 0 }} Online, {{ hk.get('offline') or 0 }} Offline">
+        <svg viewBox="0 0 36 36" aria-hidden="true" focusable="false">
+          <circle class="kpi-bagel-track" cx="18" cy="18" r="15.15" fill="none"></circle>
+          <circle class="kpi-bagel-fill kpi-bagel-online" cx="18" cy="18" r="15.15" fill="none"
+                  stroke-dasharray="{{ hk.get('online_dash') or '0 95.19' }}"
+                  transform="rotate(-90 18 18)"></circle>
+          <circle class="kpi-bagel-fill kpi-bagel-offline" cx="18" cy="18" r="15.15" fill="none"
+                  stroke-dasharray="{{ hk.get('offline_dash') or '0 95.19' }}"
+                  stroke-dashoffset="{{ hk.get('offline_offset') or '0' }}"
+                  transform="rotate(-90 18 18)"></circle>
+        </svg>
+        <span class="kpi-bagel-center">
+          <span class="kpi-bagel-num kpi-bagel-split-num">{{ hk.get('center') or '0 / 0' }}</span>
+        </span>
+      </div>
       <div class="stat-tile-body">
-        <p class="text-sm text-[var(--muted)]">Module</p>
-        <p class="stat-value">{{ modules|length }}</p>
+        <p class="text-sm text-[var(--muted)]">Hosts</p>
+        <p class="kpi-bagel-meta kpi-meta-online">Online {{ hk.get('online') or 0 }}</p>
+        <p class="kpi-bagel-meta kpi-meta-offline">Offline {{ hk.get('offline') or 0 }}</p>
+        {% if hk.get('unmonitored') %}
+        <p class="kpi-bagel-meta kpi-meta-quiet">{{ hk.unmonitored }} nicht überwacht</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <div class="surface surface-tinted animate-in animate-in-delay-3 p-4 sm:p-5" data-storage-card="copilot">
+    <div class="stat-tile stat-tile-bagel{% if bc.get('warn') %} is-warn{% endif %}" data-kpi="copilot"
+         title="{{ bc.get('path') or 'Copilot-Backupverzeichnis' }}">
+      <div class="kpi-bagel" role="meter" aria-valuemin="0" aria-valuemax="100"
+           aria-valuenow="{{ bc_pct if bc_pct is not none else 0 }}"
+           aria-label="Copilot Speicher{% if bc.get('quota_known') %}: {{ bc.get('used_label') }} von {{ bc.get('total_label') }} belegt{% endif %}">
+        <svg viewBox="0 0 36 36" aria-hidden="true" focusable="false">
+          <circle class="kpi-bagel-track" cx="18" cy="18" r="15.15" fill="none"></circle>
+          <circle class="kpi-bagel-fill" cx="18" cy="18" r="15.15" fill="none"
+                  stroke-dasharray="{{ bagel_dasharray(bc_pct) if bagel_dasharray is defined else '0 95.19' }}"
+                  transform="rotate(-90 18 18)"></circle>
+        </svg>
+        <span class="kpi-bagel-center">
+          <span class="kpi-bagel-num" data-bagel-used>{{ bc_used[0] if bc_used else '—' }}</span>
+          <span class="kpi-bagel-unit" data-bagel-unit>{{ bc_used[1] if bc_used|length > 1 else '' }}</span>
+        </span>
+      </div>
+      <div class="stat-tile-body">
+        <p class="text-sm text-[var(--muted)]">Copilot</p>
+        <p class="kpi-bagel-meta" data-bagel-cap>{% if bc.get('quota_known') %}Kapazität {{ bc.get('total_label') }}{% else %}Kapazität —{% endif %}</p>
+        <p class="kpi-bagel-meta" data-bagel-free>{% if bc.get('quota_known') %}Frei {{ bc.get('free_label') }}{% else %}Frei —{% endif %}</p>
+      </div>
+    </div>
+  </div>
+  <div class="surface surface-tinted animate-in animate-in-delay-3 p-4 sm:p-5" data-storage-card="hetzner">
+    <div class="stat-tile stat-tile-bagel is-loading" data-kpi="hetzner" title="Hetzner Storage Box">
+      <div class="kpi-bagel" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+           aria-label="Hetzner Speicher wird geladen">
+        <svg viewBox="0 0 36 36" aria-hidden="true" focusable="false">
+          <circle class="kpi-bagel-track" cx="18" cy="18" r="15.15" fill="none"></circle>
+          <circle class="kpi-bagel-fill" cx="18" cy="18" r="15.15" fill="none"
+                  stroke-dasharray="0 95.19" transform="rotate(-90 18 18)"></circle>
+        </svg>
+        <span class="kpi-bagel-center">
+          <span class="kpi-bagel-num" data-bagel-used>…</span>
+          <span class="kpi-bagel-unit" data-bagel-unit></span>
+        </span>
+      </div>
+      <div class="stat-tile-body">
+        <p class="text-sm text-[var(--muted)]">Hetzner</p>
+        <p class="kpi-bagel-meta" data-bagel-cap>Kapazität …</p>
+        <p class="kpi-bagel-meta" data-bagel-free>Frei …</p>
       </div>
     </div>
   </div>
@@ -2793,5 +2864,89 @@
       clearSnapBusy(section, String(err.message || err));
     }
   });
+
+  const BAGEL_C = 2 * Math.PI * 15.15;
+
+  function bagelDash(pct) {
+    let p = Number(pct);
+    if (!Number.isFinite(p)) p = 0;
+    if (p < 0) p = 0;
+    if (p > 100) p = 100;
+    const used = BAGEL_C * (p / 100);
+    return used.toFixed(2) + ' ' + Math.max(0, BAGEL_C - used).toFixed(2);
+  }
+
+  function splitSiLabel(label) {
+    const raw = String(label || '—').trim();
+    const m = raw.match(/^(.+?)\s+([A-Za-z]+)$/);
+    if (!m) return { n: raw || '—', u: '' };
+    return { n: m[1], u: m[2] };
+  }
+
+  function fillStorageCard(card, data) {
+    if (!card || !data) return;
+    const tile = card.querySelector('.stat-tile-bagel');
+    const bagel = card.querySelector('.kpi-bagel');
+    const fill = card.querySelector('.kpi-bagel-fill');
+    const usedEl = card.querySelector('[data-bagel-used]');
+    const unitEl = card.querySelector('[data-bagel-unit]');
+    const capEl = card.querySelector('[data-bagel-cap]');
+    const freeEl = card.querySelector('[data-bagel-free]');
+    if (tile) tile.classList.remove('is-loading');
+    const known = !!data.quota_known;
+    const configured = data.configured !== false;
+    const pct = known ? data.used_pct : 0;
+    const split = splitSiLabel(known ? data.used_label : '—');
+    if (usedEl) usedEl.textContent = configured ? split.n : '—';
+    if (unitEl) unitEl.textContent = configured && known ? split.u : '';
+    if (fill) fill.setAttribute('stroke-dasharray', bagelDash(pct));
+    if (tile) tile.classList.toggle('is-warn', !!(known && data.warn));
+    if (bagel) {
+      bagel.setAttribute('aria-valuenow', String(known && pct != null ? pct : 0));
+      const title = card.getAttribute('data-storage-card') === 'hetzner' ? 'Hetzner' : 'Copilot';
+      let label = title + ' Speicher';
+      if (!configured) label += ': Kein Ziel';
+      else if (!known) label += ': Quota unbekannt';
+      else label += ': ' + (data.used_label || '') + ' von ' + (data.total_label || '') + ' belegt';
+      bagel.setAttribute('aria-label', label);
+    }
+    if (tile && (data.path || data.host)) {
+      tile.title = [data.host, data.path].filter(Boolean).join(' · ');
+    }
+    if (!configured) {
+      if (capEl) capEl.textContent = 'Kein Ziel';
+      if (freeEl) { freeEl.textContent = ''; freeEl.hidden = true; }
+      return;
+    }
+    if (!known) {
+      if (capEl) capEl.textContent = data.message || 'Quota unbekannt';
+      if (freeEl) { freeEl.textContent = ''; freeEl.hidden = true; }
+      return;
+    }
+    if (capEl) capEl.textContent = 'Kapazität ' + (data.total_label || '—');
+    if (freeEl) {
+      freeEl.hidden = false;
+      freeEl.textContent = 'Frei ' + (data.free_label || '—');
+    }
+  }
+
+  (function loadBackupStorage() {
+    if (!document.querySelector('[data-storage-card]')) return;
+    fetch('/api/backup-storage')
+      .then((res) => {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then((data) => {
+        fillStorageCard(document.querySelector('[data-storage-card="copilot"]'), data.copilot);
+        fillStorageCard(document.querySelector('[data-storage-card="hetzner"]'), data.hetzner);
+      })
+      .catch(() => {
+        fillStorageCard(
+          document.querySelector('[data-storage-card="hetzner"]'),
+          { configured: true, quota_known: false, message: 'Quota unbekannt' }
+        );
+      });
+  })();
 </script>
 {% endblock %}

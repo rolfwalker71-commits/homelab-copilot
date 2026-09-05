@@ -742,6 +742,74 @@ async def sftp_listdir(
         ) from exc
 
 
+async def sftp_statvfs(
+    settings: Settings,
+    ip: str,
+    remote_path: str,
+    *,
+    timeout: float = 20.0,
+    username: str | None = None,
+    key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
+    port: int | None = None,
+) -> dict[str, int]:
+    """SFTP STATVFS (OpenSSH extension). Raises if the server has no quota."""
+    remote = remote_path.rstrip("/") or "/"
+
+    async def _read() -> dict[str, int]:
+        async with _sftp_connect_ctx(
+            settings,
+            ip,
+            username=username,
+            key=key,
+            key_pem=key_pem,
+            password=password,
+            port=port,
+        ) as conn:
+            async with conn.start_sftp_client() as sftp:
+                if not hasattr(sftp, "statvfs"):
+                    raise DockerControlError(
+                        f"SFTP STATVFS nicht verfügbar ({ip})",
+                        status_code=502,
+                    )
+                try:
+                    vfs = await sftp.statvfs(remote)
+                except (OSError, asyncssh.SFTPError, AttributeError) as exc:
+                    raise DockerControlError(
+                        f"SFTP STATVFS fehlgeschlagen ({ip}:{remote}): {exc}",
+                        status_code=502,
+                    ) from exc
+        fr = int(getattr(vfs, "f_frsize", 0) or getattr(vfs, "f_bsize", 0) or 0)
+        blocks = int(getattr(vfs, "f_blocks", 0) or 0)
+        if fr <= 0 or blocks <= 0:
+            raise DockerControlError(
+                f"SFTP STATVFS ohne Kapazität ({ip}:{remote})",
+                status_code=502,
+            )
+        return {
+            "frsize": fr,
+            "blocks": blocks,
+            "bfree": int(getattr(vfs, "f_bfree", 0) or 0),
+            "bavail": int(getattr(vfs, "f_bavail", 0) or 0),
+        }
+
+    try:
+        return await asyncio.wait_for(_read(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise DockerControlError(
+            f"SFTP-Timeout bei STATVFS {ip}:{remote}",
+            status_code=504,
+        ) from exc
+    except DockerControlError:
+        raise
+    except (OSError, asyncssh.Error) as exc:
+        raise DockerControlError(
+            format_ssh_failure(ip, exc, username=username),
+            status_code=502,
+        ) from exc
+
+
 # Linux system roots — never emptied or removed via SFTP except Storage-Box
 # account root ``/home`` as contents-only (never rmdir ``/home`` itself).
 _SFTP_RM_FORBIDDEN_ROOTS = frozenset(

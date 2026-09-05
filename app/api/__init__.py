@@ -86,6 +86,15 @@ class SnapshotRollbackPayload(BaseModel):
     confirm: bool = False
 
 
+@router.get("/backup-storage")
+async def backup_storage(request: Request) -> dict[str, Any]:
+    """Copilot backup-dir FS fill + cached Hetzner Storage Box quota."""
+    from app.core.backup_storage import build_backup_storage
+
+    store = getattr(request.app.state, "backup_store", None)
+    return await build_backup_storage(store)
+
+
 @router.get("/health")
 async def health() -> dict[str, Any]:
     settings = get_settings()
