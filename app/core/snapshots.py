@@ -91,3 +91,156 @@ def guest_can_snapshot(guest_id: str | None) -> bool:
     """True for Proxmox LXC/QEMU guests — never the node itself."""
     parts = str(guest_id or "").split(":")
     return len(parts) == 3 and parts[0] in {"lxc", "qemu"}
+
+
+def guest_kind(guest_id: str | None) -> str:
+    """``lxc`` or ``qemu`` from a guest id; empty if not a Proxmox guest."""
+    parts = str(guest_id or "").split(":")
+    if len(parts) == 3 and parts[0] in {"lxc", "qemu"}:
+        return parts[0]
+    return ""
+
+
+def is_current_marker(row: dict[str, Any] | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    name = str(row.get("name") or "").strip()
+    if name.lower() == "current":
+        return True
+    return bool(row.get("current"))
+
+
+def can_rollback_snap(row: dict[str, Any] | None) -> bool:
+    """Rollback targets a named snap — never the running-disk ``current`` marker."""
+    if not isinstance(row, dict):
+        return False
+    name = str(row.get("name") or "").strip()
+    if not name or is_current_marker(row):
+        return False
+    return True
+
+
+def _snap_ts(row: dict[str, Any]) -> int:
+    try:
+        return int(row.get("snaptime") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_parent(raw: Any) -> str:
+    return str(raw or "").strip()
+
+
+def _effective_parent(
+    name: str,
+    parent_of: dict[str, str],
+    names: set[str],
+) -> str:
+    """Follow ``parent``; missing / self / cycle → empty (treat as Wurzel)."""
+    parent = parent_of.get(name, "")
+    if not parent or parent == name or parent not in names:
+        return ""
+    seen = {name}
+    walk = parent
+    while walk:
+        if walk in seen:
+            return ""
+        seen.add(walk)
+        nxt = parent_of.get(walk, "")
+        if not nxt or nxt not in names or nxt == walk:
+            break
+        walk = nxt
+    return parent
+
+
+def build_snapshot_tree(
+    snaps: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Flatten Proxmox snaps into a parent/child tree (DFS, depth, German roles).
+
+    ``current`` is the running-disk marker (not a rollback target). Its
+    ``parent`` is the active named snap. Cycles and missing parents become
+    roots. Siblings sort by snaptime then name so the chain is obvious.
+    """
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in snaps or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name or name in by_name:
+            continue
+        by_name[name] = dict(row)
+        by_name[name]["name"] = name
+
+    if not by_name:
+        return []
+
+    names = set(by_name)
+    raw_parent = {
+        name: _normalize_parent(row.get("parent")) for name, row in by_name.items()
+    }
+    parent_of = {
+        name: _effective_parent(name, raw_parent, names) for name in names
+    }
+
+    children: dict[str, list[str]] = {name: [] for name in names}
+    roots: list[str] = []
+    for name in names:
+        parent = parent_of[name]
+        if parent:
+            children[parent].append(name)
+        else:
+            roots.append(name)
+
+    def sibling_key(name: str) -> tuple[int, int, str]:
+        # Named snaps first (oldest → newest); ``current`` last under its parent.
+        marker = 1 if is_current_marker(by_name[name]) else 0
+        return (marker, _snap_ts(by_name[name]), name)
+
+    for kids in children.values():
+        kids.sort(key=sibling_key)
+    roots.sort(key=sibling_key)
+
+    active = ""
+    current_row = by_name.get("current")
+    if current_row is not None:
+        active = parent_of.get("current") or _normalize_parent(current_row.get("parent"))
+        if active not in names:
+            active = ""
+
+    out: list[dict[str, Any]] = []
+    visiting: set[str] = set()
+
+    def walk(name: str, depth: int) -> None:
+        if name in visiting:
+            return
+        visiting.add(name)
+        row = dict(by_name[name])
+        marker = is_current_marker(row)
+        parent = parent_of.get(name, "")
+        is_root = depth == 0 or not parent
+        if marker:
+            relation = "aktuell"
+            relation_label = "Aktuell"
+        elif is_root:
+            relation = "wurzel"
+            relation_label = "Wurzel"
+        else:
+            relation = "kind"
+            relation_label = "Kind"
+        row["parent"] = parent or None
+        row["depth"] = depth
+        row["is_root"] = is_root
+        row["current"] = marker
+        row["active"] = bool(active and name == active)
+        row["can_rollback"] = can_rollback_snap(row)
+        row["relation"] = relation
+        row["relation_label"] = relation_label
+        out.append(row)
+        for child in children.get(name, []):
+            walk(child, depth + 1)
+        visiting.remove(name)
+
+    for root in roots:
+        walk(root, 0)
+    return out

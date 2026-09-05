@@ -37,12 +37,14 @@
 </details>
 {%- endmacro %}
 
-{% macro snapshots_section(guest_id) -%}
-<section class="topo-snapshots" aria-labelledby="snap-{{ guest_id }}">
+{% macro snapshots_section(guest_id, guest_name='', guest_kind='') -%}
+<section class="topo-snapshots" aria-labelledby="snap-{{ guest_id }}"
+  data-guest-name="{{ guest_name }}" data-guest-kind="{{ guest_kind }}">
   <div class="topo-node-section-head">
     <h4 id="snap-{{ guest_id }}" class="topo-node-section-title">Snapshots</h4>
-    <p class="topo-node-section-hint">Proxmox — anlegen, behalten, löschen</p>
+    <p class="topo-node-section-hint">Proxmox — Hierarchie, zurücksetzen, anlegen</p>
   </div>
+  <p class="topo-snap-job text-sm text-[var(--muted)]" data-snap-status role="status"></p>
   <div class="topo-snapshot-list" data-guest-snapshots="{{ guest_id }}">
     <p class="topo-node-loading text-sm text-[var(--muted)]">Snapshots werden geladen…</p>
   </div>
@@ -51,7 +53,6 @@
     <input id="snap-name-{{ guest_id }}" class="field" maxlength="40" placeholder="z. B. vor-upgrade" data-snap-name />
     <input class="field" maxlength="200" placeholder="Beschreibung (optional)" data-snap-desc />
     <button type="submit" class="btn btn-primary btn-sm">Snapshot anlegen</button>
-    <p class="text-sm text-[var(--muted)]" data-snap-status role="status"></p>
   </form>
 </section>
 {%- endmacro %}
@@ -855,7 +856,7 @@
             </div>
           </section>
 
-          {{ snapshots_section(g.id) }}
+          {{ snapshots_section(g.id, g.name, g.kind.value) }}
           {{ inventory_section(g.id) }}
 
           {% if row.docker_count %}
@@ -1780,9 +1781,71 @@
       .replace(/"/g, '&quot;');
   }
 
+  function snapSectionOf(el) {
+    return el && el.closest ? el.closest('.topo-snapshots') : null;
+  }
+
+  function setSnapBusy(section, msg) {
+    if (!section) return;
+    section.classList.add('is-busy');
+    section.querySelectorAll('button, input').forEach((n) => { n.disabled = true; });
+    const status = section.querySelector('[data-snap-status]');
+    if (status) status.textContent = msg || '';
+  }
+
+  function clearSnapBusy(section, msg) {
+    if (!section) return;
+    section.classList.remove('is-busy');
+    section.querySelectorAll('button, input').forEach((n) => { n.disabled = false; });
+    const status = section.querySelector('[data-snap-status]');
+    if (status && msg !== undefined) status.textContent = msg || '';
+  }
+
+  function applyGuestStatus(guestId, status) {
+    if (!guestId || !status) return;
+    const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
+    if (panel) {
+      panel.setAttribute('data-status', status);
+      panel.className = panel.className.replace(/\bstatus-\S+/g, '').trim() + ' status-' + status;
+      const head = panel.querySelector('.topo-detail-head');
+      if (head) {
+        head.className = head.className.replace(/\brow-status-\S+/g, '').trim() + ' row-status-' + status;
+        head.title = ((head.querySelector('.topo-detail-name') || {}).textContent || '').trim() + ' · ' + status;
+      }
+      const running = status === 'running';
+      panel.querySelectorAll('[data-guest-power="start"]').forEach((b) => { b.disabled = running; });
+      panel.querySelectorAll('[data-guest-power="shutdown"], [data-guest-power="reboot"]').forEach((b) => {
+        b.disabled = !running;
+      });
+    }
+    const rail = document.querySelector('[data-select-guest="' + guestId + '"]');
+    if (rail) {
+      const dot = rail.querySelector('.topo-rail-status');
+      if (dot) dot.className = 'topo-rail-status topo-rail-status-' + status;
+      const name = ((rail.querySelector('.topo-rail-item-name') || {}).textContent || '').trim();
+      rail.setAttribute('title', name ? name + ' · ' + status : status);
+    }
+  }
+
+  function rollbackConfirmText(guestName, snapName, kind, running) {
+    const isLxc = kind === 'lxc';
+    const kindLabel = isLxc ? 'LXC' : 'VM';
+    const stopHint = isLxc
+      ? (running
+        ? 'Dieser LXC läuft. Rollback braucht in der Regel einen gestoppten Container — bitte zuerst herunterfahren, dann zurücksetzen. Es wird nicht automatisch gestoppt.'
+        : 'LXC müssen für ein Rollback oft gestoppt sein. Der Container wird nicht automatisch gestoppt oder gestartet.')
+      : 'RAM- und Plattenzustand der VM werden ersetzt. Die VM kann dabei stoppen oder neu starten — das passiert nicht automatisch von uns.';
+    return (
+      kindLabel + ' „' + guestName + '“ auf Snapshot „' + snapName + '“ zurücksetzen?\n\n' +
+      'RAM- und Festplattenzustand werden durch diesen Snapshot ersetzt. Das ist nicht automatisch rückgängig.\n\n' +
+      stopHint
+    );
+  }
+
   function renderSnapshots(listEl, data) {
     if (!listEl) return;
-    const form = listEl.parentElement && listEl.parentElement.querySelector('[data-snap-create]');
+    const section = snapSectionOf(listEl);
+    const form = section && section.querySelector('[data-snap-create]');
     if (form) form.hidden = !!(data && data.acl_denied);
     if (data && data.acl_denied) {
       listEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">' +
@@ -1790,28 +1853,60 @@
       return;
     }
     const snaps = (data && data.snapshots) || [];
-    const useful = snaps.filter((s) => s && s.name && s.name !== 'current');
     const guestId = listEl.getAttribute('data-guest-snapshots') || '';
-    if (!useful.length) {
+    if (section && data && data.kind) section.setAttribute('data-guest-kind', data.kind);
+    if (!snaps.length) {
       listEl.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Keine Snapshots.</p>';
       return;
     }
-    listEl.innerHTML = useful.map((s) => (
-      '<div class="topo-storage-row">' +
-        '<div class="topo-storage-top">' +
-          '<span class="topo-storage-name break-words">' + escapeHtml(s.name) + '</span>' +
-          '<span class="topo-storage-pct">' + escapeHtml(s.date || '—') + '</span>' +
-        '</div>' +
-        (s.description
-          ? '<div class="topo-storage-meta">' + escapeHtml(s.description) + '</div>'
-          : '') +
-        '<div class="mt-2">' +
-          '<button type="button" class="btn btn-ghost btn-sm" data-snap-delete="' +
-            escapeHtml(s.name) + '" data-guest-id="' + escapeHtml(guestId) +
-            '">Löschen</button>' +
-        '</div>' +
-      '</div>'
-    )).join('');
+    listEl.innerHTML = '<ol class="topo-snap-tree">' + snaps.map((s) => {
+      const depth = Math.max(0, Number(s.depth) || 0);
+      const current = !!(s.current || s.name === 'current');
+      const canRb = !!(s.can_rollback) && !current;
+      const rel = s.relation_label || (current ? 'Aktuell' : (depth ? 'Kind' : 'Wurzel'));
+      const when = s.date ? ('Zeitpunkt ' + s.date) : '';
+      const cls = ['topo-snap-node'];
+      if (current) cls.push('is-current');
+      if (s.active) cls.push('is-active');
+      if (s.is_root) cls.push('is-root');
+      let actions = '';
+      if (canRb) {
+        actions += '<button type="button" class="btn btn-primary btn-sm" data-snap-rollback="' +
+          escapeHtml(s.name) + '" data-guest-id="' + escapeHtml(guestId) +
+          '">Zurücksetzen</button>';
+      } else if (current) {
+        actions += '<span class="topo-snap-no-rb">Kein Rollback</span>';
+      }
+      if (!current) {
+        actions += '<button type="button" class="btn btn-ghost btn-sm" data-snap-delete="' +
+          escapeHtml(s.name) + '" data-guest-id="' + escapeHtml(guestId) +
+          '">Löschen</button>';
+      }
+      return (
+        '<li class="' + cls.join(' ') + '" style="--snap-depth:' + depth +
+          '" data-depth="' + depth + '"' +
+          (current ? ' aria-current="true"' : '') + '>' +
+          '<div class="topo-snap-guide" aria-hidden="true"></div>' +
+          '<div class="topo-snap-body">' +
+            '<div class="topo-snap-top">' +
+              '<span class="topo-snap-name break-words leading-snug">' + escapeHtml(s.name) + '</span>' +
+              (current || s.active
+                ? '<span class="topo-snap-badge">' + (current ? 'Aktuell' : 'Aktiv') + '</span>'
+                : '') +
+            '</div>' +
+            '<div class="topo-snap-meta">' +
+              '<span>' + escapeHtml(rel) + '</span>' +
+              (when ? '<span>' + escapeHtml(when) + '</span>' : '') +
+              (s.parent && !s.is_root ? '<span>von ' + escapeHtml(s.parent) + '</span>' : '') +
+            '</div>' +
+            (s.description
+              ? '<div class="topo-snap-desc break-words">' + escapeHtml(s.description) + '</div>'
+              : '') +
+            '<div class="topo-snap-actions">' + actions + '</div>' +
+          '</div>' +
+        '</li>'
+      );
+    }).join('') + '</ol>';
   }
 
   function renderInventory(form, data) {
@@ -2523,6 +2618,44 @@
       );
       return;
     }
+    const snapRb = e.target.closest('[data-snap-rollback]');
+    if (snapRb) {
+      e.preventDefault();
+      const name = snapRb.getAttribute('data-snap-rollback') || '';
+      const gid = snapRb.getAttribute('data-guest-id') || '';
+      if (!name || !gid || name === 'current') return;
+      const section = snapSectionOf(snapRb);
+      const panel = document.querySelector('[data-guest-panel="' + gid + '"]');
+      const guestName = (section && section.getAttribute('data-guest-name'))
+        || gid;
+      const kind = (section && section.getAttribute('data-guest-kind'))
+        || (gid.startsWith('lxc:') ? 'lxc' : 'qemu');
+      const running = !!(panel && panel.getAttribute('data-status') === 'running');
+      if (!confirm(rollbackConfirmText(guestName, name, kind, running))) return;
+      setSnapBusy(section, 'Setze auf „' + name + '“ zurück…');
+      try {
+        const res = await fetch(
+          '/api/guests/' + encodeURIComponent(gid) + '/snapshots/' +
+            encodeURIComponent(name) + '/rollback',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: true }),
+          }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Rollback fehlgeschlagen');
+        if (data.status) applyGuestStatus(gid, data.status);
+        showToast(data.message || 'Zurückgesetzt');
+        clearSnapBusy(section, data.message || 'Zurückgesetzt.');
+        await loadGuestSparks(gid);
+      } catch (err) {
+        const msg = String(err.message || err);
+        clearSnapBusy(section, msg);
+        showToast(msg, true);
+      }
+      return;
+    }
     const snapDel = e.target.closest('[data-snap-delete]');
     if (snapDel) {
       e.preventDefault();
@@ -2530,7 +2663,8 @@
       const gid = snapDel.getAttribute('data-guest-id') || '';
       if (!name || !gid) return;
       if (!confirm('Snapshot „' + name + '“ wirklich löschen? Das ist nicht umkehrbar.')) return;
-      snapDel.disabled = true;
+      const section = snapSectionOf(snapDel);
+      setSnapBusy(section, 'Lösche Snapshot „' + name + '“…');
       try {
         const res = await fetch(
           '/api/guests/' + encodeURIComponent(gid) + '/snapshots/' + encodeURIComponent(name) + '?confirm=true',
@@ -2539,11 +2673,12 @@
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || 'Löschen fehlgeschlagen');
         showToast(data.message || 'Snapshot wird gelöscht');
+        clearSnapBusy(section, data.message || 'Wird gelöscht…');
         loadGuestSparks(gid);
       } catch (err) {
-        showToast(String(err.message || err), true);
-      } finally {
-        snapDel.disabled = false;
+        const msg = String(err.message || err);
+        clearSnapBusy(section, msg);
+        showToast(msg, true);
       }
       return;
     }
@@ -2627,13 +2762,14 @@
     const guestId = form.getAttribute('data-snap-create');
     const nameEl = form.querySelector('[data-snap-name]');
     const descEl = form.querySelector('[data-snap-desc]');
-    const status = form.querySelector('[data-snap-status]');
+    const section = snapSectionOf(form);
+    const status = section && section.querySelector('[data-snap-status]');
     const name = nameEl ? nameEl.value.trim() : '';
     if (!guestId || !name) {
       if (status) status.textContent = 'Name fehlt.';
       return;
     }
-    if (status) status.textContent = 'Lege Snapshot an…';
+    setSnapBusy(section, 'Lege Snapshot an…');
     try {
       const res = await fetch('/api/guests/' + encodeURIComponent(guestId) + '/snapshots', {
         method: 'POST',
@@ -2646,11 +2782,11 @@
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || 'Anlegen fehlgeschlagen');
-      if (status) status.textContent = data.message || 'Angelegt';
       if (nameEl) nameEl.value = '';
+      clearSnapBusy(section, data.message || 'Angelegt');
       loadGuestSparks(guestId);
     } catch (err) {
-      if (status) status.textContent = String(err.message || err);
+      clearSnapBusy(section, String(err.message || err));
     }
   });
 </script>

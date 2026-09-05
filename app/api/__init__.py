@@ -82,6 +82,10 @@ class SnapshotDeletePayload(BaseModel):
     confirm: bool = False
 
 
+class SnapshotRollbackPayload(BaseModel):
+    confirm: bool = False
+
+
 @router.get("/health")
 async def health() -> dict[str, Any]:
     settings = get_settings()
@@ -216,7 +220,7 @@ async def guest_rrd(
 
 @router.get("/guests/{guest_id}/snapshots")
 async def guest_snapshots(guest_id: str, request: Request) -> dict[str, Any]:
-    """Read-only Proxmox snapshots (name, description, date)."""
+    """Proxmox snapshots as a parent/child tree (name, parent, snaptime)."""
     engine = request.app.state.discovery_engine
     try:
         return await engine.fetch_guest_snapshots(guest_id)
@@ -405,6 +409,34 @@ async def delete_guest_snapshot(
         raise HTTPException(
             status_code=502,
             detail=f"Proxmox-Snapshot löschen fehlgeschlagen: {exc}",
+        ) from exc
+
+
+@router.post("/guests/{guest_id}/snapshots/{snapname}/rollback")
+async def rollback_guest_snapshot(
+    guest_id: str,
+    snapname: str,
+    payload: SnapshotRollbackPayload,
+    request: Request,
+) -> dict[str, Any]:
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Snapshot-Rollback erfordert confirm=true.",
+        )
+    engine = request.app.state.discovery_engine
+    try:
+        return await engine.rollback_guest_snapshot(guest_id, snapname)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Proxmox-Snapshot-Rollback fehlgeschlagen: {exc}",
         ) from exc
 
 

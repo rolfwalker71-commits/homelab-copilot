@@ -9,9 +9,13 @@ from app.core.snapshots import (
     AUTO_PREFIX,
     SnapshotNameError,
     auto_snap_name,
+    build_snapshot_tree,
+    can_rollback_snap,
     clamp_keep,
     guest_can_snapshot,
+    guest_kind,
     is_auto_snap,
+    is_current_marker,
     snaps_to_delete,
     validate_snap_name,
 )
@@ -72,6 +76,102 @@ class RetentionTests(unittest.TestCase):
         self.assertFalse(guest_can_snapshot("node:pve01"))
         self.assertFalse(guest_can_snapshot("pve01"))
         self.assertFalse(guest_can_snapshot("manual:3"))
+        self.assertEqual(guest_kind("lxc:pve01:105"), "lxc")
+        self.assertEqual(guest_kind("qemu:pve01:200"), "qemu")
+        self.assertEqual(guest_kind("node:pve01"), "")
+
+
+class TreeTests(unittest.TestCase):
+    def _names(self, tree: list) -> list[str]:
+        return [row["name"] for row in tree]
+
+    def test_parent_child_and_current_marker(self) -> None:
+        snaps = [
+            {"name": "current", "parent": "hlops-20260905-161823"},
+            {
+                "name": "hlops-20260905-161823",
+                "parent": "pre-upgrade",
+                "snaptime": 200,
+            },
+            {"name": "pre-upgrade", "snaptime": 100, "description": "Wurzel"},
+        ]
+        tree = build_snapshot_tree(snaps)
+        self.assertEqual(
+            self._names(tree),
+            ["pre-upgrade", "hlops-20260905-161823", "current"],
+        )
+        self.assertEqual(tree[0]["depth"], 0)
+        self.assertEqual(tree[0]["relation"], "wurzel")
+        self.assertTrue(tree[0]["is_root"])
+        self.assertTrue(tree[0]["can_rollback"])
+        self.assertEqual(tree[1]["depth"], 1)
+        self.assertEqual(tree[1]["relation"], "kind")
+        self.assertEqual(tree[1]["parent"], "pre-upgrade")
+        self.assertTrue(tree[1]["active"])
+        self.assertTrue(tree[1]["can_rollback"])
+        self.assertEqual(tree[2]["depth"], 2)
+        self.assertEqual(tree[2]["relation"], "aktuell")
+        self.assertTrue(tree[2]["current"])
+        self.assertFalse(tree[2]["can_rollback"])
+        self.assertFalse(can_rollback_snap(tree[2]))
+        self.assertTrue(is_current_marker(tree[2]))
+
+    def test_missing_parent_becomes_root(self) -> None:
+        snaps = [
+            {"name": "orphan", "parent": "deleted-snap", "snaptime": 5},
+            {"name": "other", "snaptime": 1},
+        ]
+        tree = build_snapshot_tree(snaps)
+        by_name = {row["name"]: row for row in tree}
+        self.assertEqual(by_name["orphan"]["depth"], 0)
+        self.assertTrue(by_name["orphan"]["is_root"])
+        self.assertEqual(by_name["orphan"]["relation"], "wurzel")
+        self.assertIsNone(by_name["orphan"]["parent"])
+        self.assertEqual(by_name["other"]["depth"], 0)
+        self.assertEqual(self._names(tree), ["other", "orphan"])
+
+    def test_cycle_breaks_into_roots(self) -> None:
+        snaps = [
+            {"name": "a", "parent": "b", "snaptime": 1},
+            {"name": "b", "parent": "a", "snaptime": 2},
+        ]
+        tree = build_snapshot_tree(snaps)
+        self.assertEqual(len(tree), 2)
+        self.assertTrue(all(row["depth"] == 0 for row in tree))
+        self.assertTrue(all(row["is_root"] for row in tree))
+        self.assertEqual(set(self._names(tree)), {"a", "b"})
+
+    def test_self_parent_is_root(self) -> None:
+        snaps = [{"name": "loop", "parent": "loop", "snaptime": 3}]
+        tree = build_snapshot_tree(snaps)
+        self.assertEqual(len(tree), 1)
+        self.assertEqual(tree[0]["depth"], 0)
+        self.assertTrue(tree[0]["is_root"])
+        self.assertIsNone(tree[0]["parent"])
+
+    def test_flat_list_no_parents(self) -> None:
+        snaps = [
+            {"name": "hlops-b", "snaptime": 20},
+            {"name": "hlops-a", "snaptime": 10},
+            {"name": "current", "current": True},
+        ]
+        tree = build_snapshot_tree(snaps)
+        self.assertEqual(self._names(tree), ["hlops-a", "hlops-b", "current"])
+        self.assertTrue(all(row["depth"] == 0 for row in tree))
+        self.assertFalse(tree[0]["current"])
+        self.assertTrue(tree[0]["can_rollback"])
+        self.assertTrue(tree[2]["current"])
+        self.assertFalse(tree[2]["can_rollback"])
+
+    def test_three_node_cycle(self) -> None:
+        snaps = [
+            {"name": "a", "parent": "c", "snaptime": 1},
+            {"name": "b", "parent": "a", "snaptime": 2},
+            {"name": "c", "parent": "b", "snaptime": 3},
+        ]
+        tree = build_snapshot_tree(snaps)
+        self.assertEqual(len(tree), 3)
+        self.assertTrue(all(row["depth"] == 0 for row in tree))
 
 
 if __name__ == "__main__":

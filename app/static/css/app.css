@@ -2314,6 +2314,166 @@ html[data-chrome="android"] .topo-storage-row {
   margin-bottom: 1.1rem;
 }
 
+.topo-snap-job {
+  min-height: 1.25rem;
+  margin: 0 0 0.45rem;
+}
+
+.topo-snap-job:empty {
+  display: none;
+}
+
+.topo-snapshots.is-busy {
+  cursor: wait;
+}
+
+.topo-snapshots.is-busy .topo-snap-tree,
+.topo-snapshots.is-busy .topo-snap-form {
+  opacity: 0.62;
+}
+
+.topo-snap-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.topo-snap-node {
+  --snap-depth: 0;
+  position: relative;
+  display: flex;
+  gap: 0.45rem;
+  padding: 0.7rem 0.8rem;
+  padding-left: calc(0.8rem + var(--snap-depth) * 1.15rem);
+  border-radius: calc(var(--radius) * 0.5);
+  background: color-mix(in srgb, var(--background) 40%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--outline) 50%, transparent);
+}
+
+html[data-chrome="android"] .topo-snap-node {
+  border-radius: 1.5rem;
+  border-color: transparent;
+  background: var(--surface-container-high);
+}
+
+html[data-chrome="desktop"] .topo-snap-node {
+  border-radius: 0.375rem;
+  background: color-mix(in srgb, var(--card) 82%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.topo-snap-node.is-current,
+.topo-snap-node.is-active {
+  background: color-mix(in srgb, var(--primary) 16%, var(--card));
+}
+
+html[data-chrome="android"] .topo-snap-node.is-current,
+html[data-chrome="android"] .topo-snap-node.is-active {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+
+html[data-chrome="desktop"] .topo-snap-node.is-current,
+html[data-chrome="desktop"] .topo-snap-node.is-active {
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
+.topo-snap-node[data-depth]:not([data-depth="0"]) .topo-snap-guide {
+  position: absolute;
+  left: calc(0.4rem + (var(--snap-depth) - 1) * 1.15rem);
+  top: 0;
+  width: 0.75rem;
+  height: 50%;
+  border-left: 2px solid color-mix(in srgb, var(--outline) 65%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--outline) 65%, transparent);
+  border-bottom-left-radius: 0.4rem;
+  pointer-events: none;
+}
+
+.topo-snap-body {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.topo-snap-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.65rem;
+}
+
+.topo-snap-name {
+  font-weight: 700;
+  font-size: 0.875rem;
+  min-width: 0;
+}
+
+.topo-snap-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.35rem;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  background: color-mix(in srgb, var(--primary) 22%, var(--card));
+  color: var(--on-primary-container, var(--primary));
+}
+
+html[data-chrome="android"] .topo-snap-badge {
+  background: color-mix(in srgb, var(--on-primary-container) 18%, transparent);
+}
+
+html[data-chrome="desktop"] .topo-snap-badge {
+  border-radius: 0.25rem;
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+}
+
+.topo-snap-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.55rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.topo-snap-desc {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.topo-snap-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.2rem;
+}
+
+.topo-snap-no-rb {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+html[data-chrome="android"] .topo-snap-actions .btn {
+  min-height: 3rem;
+  border-radius: 1.25rem;
+}
+
+html[data-chrome="desktop"] .topo-snap-actions .btn {
+  min-height: 2.5rem;
+}
+
 .topo-inventory-toggle {
   appearance: none;
   border: 0;

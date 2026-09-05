@@ -1165,24 +1165,26 @@ class DiscoveryEngine:
                     date_de = format_de(dt)
                 except (TypeError, ValueError, OSError):
                     date_de = ""
+            parent = str(row.get("parent") or "").strip()
             snaps.append(
                 {
                     "name": name,
                     "description": str(row.get("description") or "").strip(),
                     "snaptime": snaptime,
                     "date": date_de,
+                    "parent": parent or None,
                     "current": name == "current",
                 }
             )
-        snaps.sort(
-            key=lambda s: (0 if s["current"] else 1, -(s.get("snaptime") or 0), s["name"])
-        )
+        from app.core.snapshots import build_snapshot_tree
+
+        tree = build_snapshot_tree(snaps)
         return {
             "guest_id": guest_id,
             "kind": kind,
             "node": node,
             "vmid": vmid,
-            "snapshots": snaps,
+            "snapshots": tree,
             "acl_denied": False,
         }
 
@@ -1304,6 +1306,169 @@ class DiscoveryEngine:
             "name": name,
             "upid": upid,
             "message": f"Snapshot „{name}“ wird gelöscht…",
+        }
+
+    async def _wait_proxmox_task(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        node: str,
+        upid: Any,
+        *,
+        timeout_s: float = 90.0,
+    ) -> dict[str, Any] | None:
+        """Poll a Proxmox UPID until stopped or timeout. None if there is no task id."""
+        task_id = str(upid or "").strip()
+        if not task_id or not task_id.startswith("UPID:"):
+            return None
+        deadline = asyncio.get_event_loop().time() + max(5.0, timeout_s)
+        path = f"/nodes/{quote(node)}/tasks/{quote(task_id, safe='')}/status"
+        last: dict[str, Any] | None = None
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                raw = await self._proxmox_get(client, path, headers)
+            except Exception:
+                await asyncio.sleep(1.2)
+                continue
+            if isinstance(raw, dict):
+                last = raw
+                if str(raw.get("status") or "").lower() == "stopped":
+                    return last
+            await asyncio.sleep(1.2)
+        return last
+
+    async def rollback_guest_snapshot(
+        self, guest_id: str, snapname: str
+    ) -> dict[str, Any]:
+        """Rollback a guest to a named snapshot. Never automatic; never ``current``."""
+        from app.core.snapshots import (
+            SnapshotNameError,
+            guest_can_snapshot,
+            validate_snap_name,
+        )
+
+        if not guest_can_snapshot(guest_id):
+            raise ValueError(
+                "Rollback nur für Proxmox-VM/LXC — nicht für den Node selbst."
+            )
+        raw_name = (snapname or "").strip()
+        if raw_name.lower() == "current":
+            raise ValueError(
+                "Der Marker „current“ (laufende Platte) kann nicht zurückgesetzt werden."
+            )
+        try:
+            name = validate_snap_name(raw_name)
+        except SnapshotNameError as exc:
+            raise ValueError(exc.message) from exc
+
+        kind, node, vmid = self._guest_id_parts(guest_id)
+        kind_label = "LXC" if kind == "lxc" else "VM"
+        client, headers = await self._proxmox_authed_client()
+        task: dict[str, Any] | None = None
+        upid: Any = None
+        try:
+            guest_status = ""
+            try:
+                st = await self._proxmox_get(
+                    client,
+                    f"/nodes/{quote(node)}/{kind}/{vmid}/status/current",
+                    headers,
+                )
+                if isinstance(st, dict):
+                    guest_status = str(st.get("status") or "").strip().lower()
+            except Exception:
+                guest_status = ""
+
+            try:
+                upid = await self._proxmox_post(
+                    client,
+                    f"/nodes/{quote(node)}/{kind}/{vmid}/snapshot/{quote(name)}/rollback",
+                    headers,
+                )
+            except PermissionError:
+                raise PermissionError(self._snapshot_acl_message(403)) from None
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {401, 403}:
+                    raise PermissionError(
+                        self._snapshot_acl_message(exc.response.status_code)
+                    ) from exc
+                detail = ""
+                try:
+                    body = exc.response.json()
+                    detail = str(
+                        body.get("message")
+                        or body.get("errors")
+                        or body.get("data")
+                        or body
+                    )[:240]
+                except Exception:
+                    detail = (exc.response.text or "")[:240]
+                low = detail.lower()
+                if kind == "lxc" and (
+                    "running" in low or "not stopped" in low or "isn't stopped" in low
+                ):
+                    raise RuntimeError(
+                        f"LXC {vmid} läuft noch — Rollback braucht in der Regel "
+                        "einen gestoppten Container. Bitte zuerst herunterfahren, "
+                        "dann erneut zurücksetzen."
+                    ) from exc
+                raise RuntimeError(
+                    f"Snapshot-Rollback fehlgeschlagen (HTTP {exc.response.status_code})"
+                    + (f": {detail}" if detail else ".")
+                ) from exc
+
+            task = await self._wait_proxmox_task(client, headers, node, upid)
+            if isinstance(task, dict):
+                exitstatus = str(task.get("exitstatus") or "").strip()
+                task_status = str(task.get("status") or "").strip().lower()
+                if task_status == "stopped" and exitstatus and exitstatus.upper() != "OK":
+                    low = exitstatus.lower()
+                    if kind == "lxc" and (
+                        "running" in low or "not stopped" in low
+                    ):
+                        raise RuntimeError(
+                            f"LXC {vmid} läuft noch — Rollback braucht in der Regel "
+                            "einen gestoppten Container. Bitte zuerst herunterfahren, "
+                            "dann erneut zurücksetzen."
+                        )
+                    raise RuntimeError(
+                        f"Snapshot-Rollback fehlgeschlagen: {exitstatus}"
+                    )
+
+            try:
+                st = await self._proxmox_get(
+                    client,
+                    f"/nodes/{quote(node)}/{kind}/{vmid}/status/current",
+                    headers,
+                )
+                if isinstance(st, dict):
+                    guest_status = str(st.get("status") or "").strip().lower()
+            except Exception:
+                pass
+        finally:
+            await client.aclose()
+
+        still_running = (
+            isinstance(task, dict)
+            and str(task.get("status") or "").strip().lower() != "stopped"
+        )
+        if still_running:
+            message = (
+                f"{kind_label} {vmid}: Rollback auf „{name}“ läuft noch "
+                "(Proxmox-Task). Status gleich neu laden."
+            )
+        else:
+            message = (
+                f"{kind_label} {vmid}: auf Snapshot „{name}“ zurückgesetzt."
+            )
+        return {
+            "ok": True,
+            "guest_id": guest_id,
+            "name": name,
+            "kind": kind,
+            "status": guest_status,
+            "upid": upid,
+            "message": message,
         }
 
     async def fetch_node_storage_health(self, node: str) -> dict[str, Any]:
