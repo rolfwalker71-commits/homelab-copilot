@@ -742,6 +742,101 @@ async def sftp_listdir(
         ) from exc
 
 
+async def sftp_rm_tree(
+    settings: Settings,
+    ip: str,
+    remote_path: str,
+    *,
+    contents_only: bool = False,
+    timeout: float = 3600.0,
+    username: str | None = None,
+    key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
+    port: int | None = None,
+) -> int:
+    """Recursively delete a remote path (or only its children). Returns count."""
+    remote = (remote_path or "").rstrip("/") or "/"
+    if remote == "/" and not contents_only:
+        raise DockerControlError(
+            "SFTP-Löschen von / ist nicht erlaubt.",
+            status_code=400,
+        )
+    session = _SftpSession(
+        settings,
+        ip,
+        username=username,
+        key=key,
+        key_pem=key_pem,
+        password=password,
+        port=port,
+    )
+    deleted = 0
+
+    async def _rm(path: str, *, remove_self: bool) -> None:
+        nonlocal deleted
+        try:
+            entries = await _sftp_call(
+                session,
+                lambda sftp, p=path: sftp.readdir(p),
+                timeout=min(120.0, timeout),
+            )
+        except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
+            if not remove_self:
+                return
+            try:
+                await _sftp_call(
+                    session,
+                    lambda sftp, p=path: sftp.remove(p),
+                    timeout=min(60.0, timeout),
+                )
+                deleted += 1
+            except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
+                pass
+            return
+        for ent in entries:
+            name = ent.filename
+            if name in (".", ".."):
+                continue
+            rpath = f"{path.rstrip('/')}/{name}"
+            if _sftp_is_dir(ent.attrs):
+                await _rm(rpath, remove_self=True)
+            else:
+                try:
+                    await _sftp_call(
+                        session,
+                        lambda sftp, p=rpath: sftp.remove(p),
+                        timeout=min(60.0, timeout),
+                    )
+                    deleted += 1
+                except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
+                    pass
+        if remove_self:
+            try:
+                await _sftp_call(
+                    session,
+                    lambda sftp, p=path: sftp.rmdir(p),
+                    timeout=min(60.0, timeout),
+                )
+                deleted += 1
+            except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
+                pass
+
+    try:
+        await session.open()
+        await _rm(remote, remove_self=not contents_only)
+    except DockerControlError:
+        raise
+    except (OSError, asyncssh.Error) as exc:
+        raise DockerControlError(
+            format_ssh_failure(ip, exc, username=username),
+            status_code=502,
+        ) from exc
+    finally:
+        await session.close()
+    return deleted
+
+
 async def sftp_stat_file(
     settings: Settings,
     ip: str,

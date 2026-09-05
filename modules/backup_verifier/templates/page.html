@@ -157,6 +157,15 @@
     <p id="restore-start-msg" class="text-sm text-[var(--muted)]" role="status"></p>
   </form>
 </article>
+
+<article class="surface p-4 sm:p-5 mt-6 animate-in">
+  <h2 class="font-display text-lg font-bold">Datastore zurücksetzen</h2>
+  <p class="mt-1 text-sm text-[var(--muted)]">
+    Löscht Copilot-Archive, das konfigurierte Dest (z. B. Hetzner Storage Box) und den gesamten Verlauf.
+    Zeitpläne und Zugangsdaten bleiben. Erfordert ein Bestätigungswort — nicht mit einem Klick.
+  </p>
+  <a href="/modules/backup_verifier/history?wipe=1" class="btn btn-danger mt-3">Alles zurücksetzen</a>
+</article>
 {% endblock %}
 
 {% block scripts %}

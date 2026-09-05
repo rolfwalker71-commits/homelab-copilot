@@ -14,7 +14,7 @@ class BackupJob:
     id: str
     parent_id: str
     project: str
-    kind: str = "backup"  # backup | restore
+    kind: str = "backup"  # backup | restore | wipe
     status: str = "queued"  # queued | running | success | partial | failed
     phase: str = "Warteschlange"
     percent: int = 0
@@ -92,7 +92,15 @@ class JobRegistry:
         self._max_jobs = max_jobs
 
     def create(self, *, parent_id: str, project: str, kind: str = "backup") -> BackupJob:
-        kind_n = "restore" if kind == "restore" else "backup"
+        if kind == "restore":
+            kind_n = "restore"
+            msg = "Restore läuft…"
+        elif kind == "wipe":
+            kind_n = "wipe"
+            msg = "Zurücksetzen läuft…"
+        else:
+            kind_n = "backup"
+            msg = "Backup läuft…"
         job = BackupJob(
             id=str(uuid.uuid4()),
             parent_id=parent_id,
@@ -101,7 +109,7 @@ class JobRegistry:
             status="queued",
             phase="Warteschlange",
             percent=0,
-            message="Restore läuft…" if kind_n == "restore" else "Backup läuft…",
+            message=msg,
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -198,7 +206,9 @@ class JobRegistry:
                 if status in ("success", "partial")
                 else "Fehler"
             )
-            noun = "Restore" if job.kind == "restore" else "Backup"
+            noun = {"restore": "Restore", "wipe": "Zurücksetzen"}.get(
+                job.kind, "Backup"
+            )
             if message:
                 job.message = message
             elif status == "success":

@@ -573,6 +573,41 @@ html[data-chrome="android"] .btn-ghost {
   background: color-mix(in srgb, var(--primary) 10%, transparent);
 }
 
+.btn-danger {
+  background: color-mix(in srgb, var(--danger) 16%, var(--card));
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--outline));
+}
+
+html[data-chrome="android"] .btn-danger {
+  border-radius: 999px;
+}
+
+html[data-chrome="android"] .btn-danger:hover {
+  background: color-mix(in srgb, var(--danger) 22%, var(--card));
+}
+
+html[data-chrome="desktop"] .btn-danger {
+  border-radius: var(--radius-ctrl);
+}
+
+html[data-chrome="desktop"] .btn-danger:hover {
+  background: color-mix(in srgb, var(--danger) 24%, var(--card));
+}
+
+.logs-dialog-title.dialog-title-wrap {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+}
+
+.btn-danger:disabled,
+.btn-danger[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: none;
+}
+
 /* FAB — Material only (mobile primary action) */
 .fab {
   display: none;

@@ -850,6 +850,67 @@ class BackupStore:
         )
         await db.commit()
 
+    async def count_job_history(self) -> dict[str, int]:
+        """Row counts for backup/restore/drill history (not schedules/dests)."""
+        db = self._require()
+        out: dict[str, int] = {}
+        for table in ("backup_runs", "restore_runs", "drill_runs"):
+            async with db.execute(f"SELECT COUNT(*) AS n FROM {table}") as cur:
+                row = await cur.fetchone()
+            out[table] = int(row["n"] if row else 0)
+        out["total"] = sum(out.values())
+        return out
+
+    async def wipe_job_history(self) -> dict[str, int]:
+        """Delete job-log tables. Keep schedules, destinations, restic secrets."""
+        before = await self.count_job_history()
+        db = self._require()
+        await db.execute("DELETE FROM restore_runs")
+        await db.execute("DELETE FROM backup_runs")
+        await db.execute("DELETE FROM drill_runs")
+        await db.execute(
+            """
+            UPDATE drill_state SET
+                last_fired_date = '', last_status = '',
+                last_finished_at = '', last_finished_at_iso = '',
+                last_summary_json = NULL, last_push_kind = ''
+            WHERE id = 1
+            """
+        )
+        await db.commit()
+        return before
+
+    async def reset_restic_full_markers(self) -> None:
+        """Clear last-full timestamps so the next restic run initializes cleanly."""
+        db = self._require()
+        await db.execute(
+            "UPDATE restic_secrets SET last_full_at = '', last_full_at_iso = ''"
+        )
+        await db.commit()
+
+    async def list_restic_stacks(self) -> list[dict[str, str]]:
+        db = self._require()
+        async with db.execute(
+            "SELECT parent_id, project FROM restic_secrets ORDER BY parent_id, project"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {"parent_id": str(r["parent_id"]), "project": str(r["project"])}
+            for r in rows
+        ]
+
+    async def list_history_parents(self) -> list[dict[str, str]]:
+        db = self._require()
+        async with db.execute(
+            "SELECT DISTINCT parent_id, stack FROM backup_runs "
+            "ORDER BY parent_id, stack"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {"parent_id": str(r["parent_id"]), "stack": str(r["stack"])}
+            for r in rows
+        ]
+
     async def delete_schedule(self, schedule_id: int) -> None:
         db = self._require()
         await db.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))

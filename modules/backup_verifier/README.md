@@ -56,6 +56,8 @@ Default **quiesce**: `docker compose stop` before volume tar, then `up -d` / `st
   - `GET /restic/snapshots?parent_id=&project=` — restic-Snapshots eines Stacks
   - `POST /restic/restore` — same dest/confirm fields as history restore
   - `GET /drill` — last restore-drill result; `POST /drill/run` — run now (never from backup cron)
+  - `GET /wipe` — preview (Copilot-Pfad, Dest-Label/Pfad, Verlaufszeilen) + one-time Bestätigungswort
+  - `POST /wipe` — `{confirm_keyword, wipe_guest?}` (Wort muss exakt passen, sonst 400). Löscht Copilot-`/data/backups`, Dest-Repo-Pfad, optional Guest-Repos, dann Verlauf. Nie aus dem Zeitplan. Läuft kein in-memory Backup/Restore. Stale SQLite-`running`-Zeilen sind löschbar.
   - `GET|POST /schedules`, `PUT|PATCH /schedules/{id}`, `DELETE /schedules/{id}`, `POST /schedules/sync`
 
 ## Schedule (in-process)
@@ -119,3 +121,5 @@ Do **not** run restic by hand or add crontab. Passwords are not shown in the UI 
 ## Honesty
 
 Stack-level backup for typical Compose stacks. Bind mounts included when readable. **Not** a substitute for Proxmox `vzdump` for full LXC disaster recovery.
+
+**Confirmed wipe** (Verlauf → *Alles zurücksetzen*): typed keyword, never one-click, never from the scheduler. Deletes Copilot `$BACKUP_COPILOT_DIR` children (default `/data/backups`), contents of each SFTP dest `remote_path` (not Storage-Box `/home`), optional Guest `$BACKUP_LXC_DIR` repos, then SQLite `backup_runs` / `restore_runs` / `drill_runs`. Keeps schedules, dest credentials, prefs, VAPID, inventory, restic passwords. If Guest-Wipe is off or a guest is unreachable, the next hop can re-mirror leftover LXC restic history.

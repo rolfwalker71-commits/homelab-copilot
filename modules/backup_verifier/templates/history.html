@@ -15,7 +15,27 @@
 <article class="surface p-4 sm:p-5 animate-in">
   <div class="flex flex-wrap items-center justify-between gap-2">
     <h2 class="font-display text-lg font-bold">Verlauf</h2>
-    <span id="history-meta" class="text-sm text-[var(--muted)]"></span>
+    <div class="flex flex-wrap items-center gap-2">
+      <span id="history-meta" class="text-sm text-[var(--muted)]"></span>
+      <button type="button" id="btn-wipe" class="btn btn-danger btn-sm">Alles zurücksetzen</button>
+    </div>
+  </div>
+  <div id="wipe-progress" class="mt-4 hidden" aria-live="polite">
+    <div class="rounded-3xl border border-[color-mix(in_srgb,var(--danger)_35%,var(--border))] bg-[color-mix(in_srgb,var(--danger)_8%,var(--card))] p-3 sm:p-4 space-y-3">
+      <div class="flex items-start gap-3">
+        <span id="wp-spinner" class="mt-0.5 inline-block h-5 w-5 shrink-0 rounded-full border-2 border-[var(--border)] border-t-[var(--danger)] animate-spin" aria-hidden="true"></span>
+        <div class="min-w-0 flex-1">
+          <p id="wp-title" class="font-medium break-words leading-snug">Zurücksetzen läuft…</p>
+          <p id="wp-phase" class="mt-0.5 text-sm text-[var(--muted)] break-words leading-snug"></p>
+        </div>
+        <span id="wp-percent" class="shrink-0 text-sm font-medium tabular-nums">0&nbsp;%</span>
+      </div>
+      <div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" id="wp-bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="wp-bar" class="h-full w-0 rounded-full bg-[var(--danger)] transition-[width] duration-300"></div>
+      </div>
+      <p id="wp-message" class="job-status-line text-sm text-[var(--muted)]"></p>
+      <pre id="wp-log" class="job-log max-h-40" role="log"></pre>
+    </div>
   </div>
   <div class="mt-3 overflow-x-auto">
     <table class="w-full text-left text-sm" id="history-table">
@@ -53,6 +73,45 @@
     <pre id="run-detail-body" class="job-log mt-2 max-h-64 p-3"></pre>
   </details>
 </article>
+
+<dialog id="wipe-dialog" class="logs-dialog" aria-labelledby="wipe-dialog-title">
+  <form method="dialog" class="logs-dialog-form" id="wipe-form">
+    <header class="logs-dialog-head">
+      <h2 id="wipe-dialog-title" class="logs-dialog-title dialog-title-wrap">Alles zurücksetzen</h2>
+      <button type="submit" class="btn btn-ghost btn-sm" value="cancel">Abbrechen</button>
+    </header>
+    <div class="p-4 space-y-3 text-sm">
+      <p class="text-[var(--danger)] font-medium leading-snug">
+        Unumkehrbar. Archive und restic-Repos werden gelöscht — Wiederherstellen aus diesen Kopien ist danach unmöglich.
+      </p>
+      <ul class="list-disc pl-5 space-y-1 text-[var(--muted)]">
+        <li><strong class="text-[var(--text)]">Copilot:</strong> <span id="wipe-copilot-path">—</span></li>
+        <li><strong class="text-[var(--text)]">Hetzner / Dest:</strong> <span id="wipe-dest-list">—</span></li>
+        <li><strong class="text-[var(--text)]">Verlauf:</strong> <span id="wipe-hist-count">—</span></li>
+      </ul>
+      <p class="text-xs text-[var(--muted)]">
+        Bleibt erhalten: Zeitpläne, Ziel-Zugangsdaten, Einstellungen, VAPID, Inventar.
+      </p>
+      <label class="flex items-start gap-2 text-sm">
+        <input type="checkbox" id="wipe-guest" class="mt-1 h-4 w-4" checked />
+        <span>
+          Auch Guest-Repo auf dem LXC löschen
+          <span class="block text-xs text-[var(--muted)]">Empfohlen — sonst spiegelt der nächste Hop die alte restic-Historie erneut vom LXC.</span>
+        </span>
+      </label>
+      <div>
+        <p class="label" id="wipe-keyword-label">Bestätigungswort eintippen</p>
+        <p class="mt-1 mb-2">
+          <code id="wipe-keyword" class="inline-block break-all rounded-xl bg-[var(--surface)] px-3 py-2 text-base font-bold tracking-wide select-all">—</code>
+        </p>
+        <label class="sr-only" for="wipe-typed">Bestätigungswort</label>
+        <input id="wipe-typed" class="field" maxlength="64" autocomplete="off" spellcheck="false" aria-labelledby="wipe-keyword-label" />
+      </div>
+      <button type="button" id="wipe-go" class="btn btn-danger w-full" disabled>Unwiderruflich löschen</button>
+      <p id="wipe-msg" class="text-[var(--muted)]" role="status"></p>
+    </div>
+  </form>
+</dialog>
 
 <dialog id="restore-dialog" class="logs-dialog">
   <form method="dialog" class="logs-dialog-form" id="restore-form">
@@ -458,6 +517,132 @@
     document.getElementById('restore-dialog').showModal();
   });
 
+  let wipeKeyword = '';
+  let wipePoll = null;
+
+  function syncWipeGo() {
+    const btn = document.getElementById('wipe-go');
+    const typed = document.getElementById('wipe-typed')?.value || '';
+    if (btn) btn.disabled = !wipeKeyword || typed !== wipeKeyword;
+  }
+
+  async function openWipeDialog() {
+    const msg = document.getElementById('wipe-msg');
+    const dlg = document.getElementById('wipe-dialog');
+    wipeKeyword = '';
+    const typed = document.getElementById('wipe-typed');
+    if (typed) typed.value = '';
+    const guest = document.getElementById('wipe-guest');
+    if (guest) guest.checked = true;
+    syncWipeGo();
+    toast(msg, 'Lade Vorschau…');
+    try {
+      const res = await fetch(API + '/wipe');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast(msg, data.detail || 'Vorschau fehlgeschlagen', false);
+        if (dlg) dlg.showModal();
+        return;
+      }
+      const w = data.wipe || {};
+      wipeKeyword = w.confirm_keyword || '';
+      const kw = document.getElementById('wipe-keyword');
+      if (kw) kw.textContent = wipeKeyword || '—';
+      const cop = document.getElementById('wipe-copilot-path');
+      if (cop) cop.textContent = (w.copilot && w.copilot.path) || '—';
+      const dests = w.destinations || [];
+      const destEl = document.getElementById('wipe-dest-list');
+      if (destEl) {
+        destEl.textContent = dests.length
+          ? dests.map((d) => {
+              const tag = d.hetzner ? 'Hetzner' : 'SFTP';
+              return (d.label || tag) + ' → ' + (d.remote_path || '—');
+            }).join('; ')
+          : 'kein SFTP-/Storage-Box-Ziel konfiguriert';
+      }
+      const hist = w.history || {};
+      const hEl = document.getElementById('wipe-hist-count');
+      if (hEl) {
+        hEl.textContent = (hist.total || 0) + ' Zeilen (Backups, Restores, Drills)';
+      }
+      toast(msg, '');
+      syncWipeGo();
+      if (dlg) dlg.showModal();
+    } catch (err) {
+      toast(msg, String(err.message || err), false);
+      if (dlg) dlg.showModal();
+    }
+  }
+
+  function pollWipeJob(jobId) {
+    if (wipePoll) clearTimeout(wipePoll);
+    const box = document.getElementById('wipe-progress');
+    const log = document.getElementById('wp-log');
+    const title = document.getElementById('wp-title');
+    const phase = document.getElementById('wp-phase');
+    const pctEl = document.getElementById('wp-percent');
+    const bar = document.getElementById('wp-bar');
+    const wrap = document.getElementById('wp-bar-wrap');
+    const message = document.getElementById('wp-message');
+    const spin = document.getElementById('wp-spinner');
+    if (box) box.classList.remove('hidden');
+    (async function tick() {
+      try {
+        const res = await fetch(API + '/jobs/' + encodeURIComponent(jobId));
+        const data = await res.json().catch(() => ({}));
+        const job = data.job || {};
+        const pct = job.percent || 0;
+        if (title) title.textContent = job.message || 'Zurücksetzen…';
+        if (phase) phase.textContent = job.phase || '';
+        if (pctEl) pctEl.innerHTML = pct + '&nbsp;%';
+        if (bar) bar.style.width = pct + '%';
+        if (wrap) wrap.setAttribute('aria-valuenow', String(pct));
+        if (message) message.textContent = job.message || '';
+        if (log) log.textContent = (job.log_lines || []).join('\n');
+        if (job.done) {
+          if (spin) spin.classList.add('hidden');
+          if (title) {
+            title.textContent = job.ok ? 'Zurücksetzen fertig — Verlauf ist leer.' : (job.error || 'Zurücksetzen fehlgeschlagen');
+            title.style.color = job.ok ? '' : 'var(--danger, #c44)';
+          }
+          loadHistory();
+          return;
+        }
+      } catch (err) {
+        if (message) {
+          message.textContent = String(err.message || err);
+          message.style.color = 'var(--danger, #c44)';
+        }
+        return;
+      }
+      wipePoll = setTimeout(tick, 900);
+    })();
+  }
+
+  document.getElementById('btn-wipe')?.addEventListener('click', openWipeDialog);
+  document.getElementById('wipe-typed')?.addEventListener('input', syncWipeGo);
+  document.getElementById('wipe-go')?.addEventListener('click', async () => {
+    const msg = document.getElementById('wipe-msg');
+    const typed = document.getElementById('wipe-typed')?.value || '';
+    if (!wipeKeyword || typed !== wipeKeyword) {
+      toast(msg, 'Bestätigungswort stimmt nicht.', false);
+      return;
+    }
+    toast(msg, 'Starte Zurücksetzen…');
+    const res = await fetch(API + '/wipe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirm_keyword: typed,
+        wipe_guest: !!document.getElementById('wipe-guest')?.checked,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return toast(msg, data.detail || 'Fehler', false);
+    document.getElementById('wipe-dialog')?.close();
+    if (data.job_id) pollWipeJob(data.job_id);
+  });
+
   document.getElementById('btn-refresh-all')?.addEventListener('click', () => {
     loadHistory();
     loadSnapStacks();
@@ -466,6 +651,17 @@
   loadSnapStacks();
   loadHistory();
   setInterval(loadHistory, 12000);
+  (async function resumeWipe() {
+    try {
+      const res = await fetch(API + '/jobs?active=1');
+      const data = await res.json().catch(() => ({}));
+      const job = (data.jobs || []).find((j) => j.kind === 'wipe' && !j.done);
+      if (job && (job.job_id || job.id)) pollWipeJob(job.job_id || job.id);
+    } catch (_) { /* ignore */ }
+  })();
+  if (new URLSearchParams(location.search).get('wipe') === '1') {
+    openWipeDialog();
+  }
 })();
 </script>
 {% endblock %}

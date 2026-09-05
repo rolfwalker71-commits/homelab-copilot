@@ -59,6 +59,12 @@ from backup_verifier.scheduler import (
     schedule_start_sort_key,
 )
 from backup_verifier.store import BackupStore
+from backup_verifier.wipe import (
+    WIPE_STACK,
+    WipeError,
+    build_wipe_preview,
+    run_wipe,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -579,6 +585,11 @@ class DestinationCheckPayload(BaseModel):
     destination: dict[str, Any] = Field(default_factory=dict)
 
 
+class WipePayload(BaseModel):
+    confirm_keyword: str = Field(..., min_length=1, max_length=64)
+    wipe_guest: bool = True
+
+
 class SchedulePayload(BaseModel):
     id: int | None = None
     parent_id: str = Field(..., min_length=1)
@@ -901,6 +912,163 @@ async def get_backup_job(job_id: str) -> dict[str, Any]:
     if not job:
         raise HTTPException(status_code=404, detail="Job nicht gefunden.")
     return {"ok": True, "job": job.to_dict()}
+
+
+def _refuse_if_job_running() -> None:
+    """Block wipe while a backup/restore (or wipe) is in-memory active."""
+    active = [
+        j
+        for j in JOBS.list_active()
+        if j.kind in ("backup", "restore", "wipe")
+    ]
+    if not active:
+        return
+    kinds = {j.kind for j in active}
+    if "wipe" in kinds and kinds <= {"wipe"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Ein Zurücksetzen läuft bereits.",
+        )
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Ein Backup oder Restore läuft gerade — "
+            "Zurücksetzen ist erst danach möglich."
+        ),
+    )
+
+
+async def _run_enqueued_wipe(
+    job_id: str,
+    *,
+    store: BackupStore,
+    confirm_keyword: str,
+    wipe_guest: bool,
+    snapshot: Any,
+) -> None:
+    JOBS.set_running(job_id)
+    JOBS.set_progress(
+        job_id, phase="Vorbereitung", percent=2, message="Zurücksetzen startet…"
+    )
+    run_id: int | None = None
+
+    async def on_progress(
+        *,
+        phase: str,
+        percent: int,
+        message: str,
+        run_id: int | None = None,
+    ) -> None:
+        JOBS.set_progress(
+            job_id, phase=phase, percent=percent, message=message, run_id=run_id
+        )
+
+    async def on_log(line: str) -> None:
+        JOBS.append_log(job_id, line)
+        if run_id is not None:
+            try:
+                await store.append_log(run_id, line)
+            except Exception:
+                pass
+
+    try:
+        run_id = await store.create_run(
+            stack=WIPE_STACK,
+            parent_id="wipe",
+            guest_name="",
+            preflight={"kind": "wipe"},
+            engine="tar",
+        )
+        JOBS.set_progress(job_id, run_id=run_id)
+        result = await run_wipe(
+            store,
+            confirm_keyword=confirm_keyword,
+            wipe_guest=wipe_guest,
+            snapshot=snapshot,
+            on_progress=on_progress,
+            on_log=on_log,
+            run_id=run_id,
+            prevalidated=True,
+        )
+        JOBS.finish(
+            job_id,
+            status=str(result.get("status") or "success"),
+            result=result,
+            message=result.get("message"),
+        )
+    except WipeError as exc:
+        JOBS.finish(job_id, status="failed", error=exc.message, phase="Fehler")
+        if run_id is not None:
+            try:
+                await store.update_run(
+                    run_id, status="failed", error_message=exc.message
+                )
+            except Exception:
+                pass
+    except DockerControlError as exc:
+        JOBS.finish(job_id, status="failed", error=exc.message, phase="Fehler")
+    except Exception as exc:
+        logger.exception("Backup-Wipe fehlgeschlagen")
+        JOBS.finish(
+            job_id,
+            status="failed",
+            error=str(exc) or "Zurücksetzen fehlgeschlagen.",
+            phase="Fehler",
+        )
+
+
+@router.get("/wipe")
+async def wipe_preview(request: Request) -> dict[str, Any]:
+    """What a confirmed wipe would delete + a one-time keyword. Never from cron."""
+    store = _get_store()
+    preview = await build_wipe_preview(store, snapshot=_snapshot(request))
+    return {"ok": True, "wipe": preview, "time": format_de(now_berlin())}
+
+
+@router.post("/wipe")
+async def wipe_datastores(
+    payload: WipePayload,
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, Any]:
+    """Operator-only wipe. Keyword required. Refuses in-memory running jobs."""
+    from backup_verifier.wipe import (
+        consume_wipe_keyword,
+        start_wipe_lock,
+        validate_issued_keyword,
+    )
+
+    store = _get_store()
+    with start_wipe_lock:
+        _refuse_if_job_running()
+        try:
+            validate_issued_keyword(payload.confirm_keyword)
+            consume_wipe_keyword()
+        except WipeError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        job = JOBS.create(parent_id="wipe", project=WIPE_STACK, kind="wipe")
+
+    async def _bg() -> None:
+        await _run_enqueued_wipe(
+            job.id,
+            store=store,
+            confirm_keyword=payload.confirm_keyword,
+            wipe_guest=payload.wipe_guest,
+            snapshot=_snapshot(request),
+        )
+
+    background.add_task(_bg)
+    return {
+        "ok": True,
+        "started": True,
+        "job_id": job.id,
+        "message": (
+            "Zurücksetzen gestartet. Fortschritt in der Verlaufsbox — "
+            "kann auf Hetzner länger dauern."
+        ),
+        "job_url": f"/api/modules/backup_verifier/jobs/{job.id}",
+        "history_url": "/modules/backup_verifier/history",
+    }
 
 
 @router.get("/history")
