@@ -44,8 +44,11 @@ class BackupSettings(BaseSettings):
     # SCP / large file hops (LXC ↔ Copilot ↔ Synology)
     backup_transfer_timeout: float = Field(default=3600.0, ge=300.0, le=14400.0)
     backup_api_base: str = "http://127.0.0.1:6655"  # legacy; schedules are in-process
-    # Install restic via apt/apk on the guest if missing (first restic run).
+    # Install restic on the guest if missing (first restic run).
+    # Prefer SCP of the Copilot image binary; apt/apk is a fallback (nohup+poll).
     restic_install: bool = True
+    # Wall-clock for apt/apk restic bootstrap on the LXC (not the short SSH probe).
+    restic_install_timeout: float = Field(default=600.0, ge=60.0, le=3600.0)
 
     @property
     def copilot_dir(self) -> Path:

@@ -44,6 +44,7 @@ Default **quiesce**: `docker compose stop` before volume tar, then `up -d` / `st
   - `POST /destinations/check` — connection test for one destination payload
   - `GET /preflight?parent_id=&project=`
   - `POST /run` — body `{parent_id, project, quiesce?, engine?: tar|restic, restic_*?}` → background job (`job_id`); poll `GET /jobs/{id}` for percent/phase; `?wait=true` sync. **TOTP-gated** (not for host cron).
+  - `GET /jobs?active=1` — laufende Jobs (Reconnect nach Navigation)
   - `GET /jobs/{id}` — Fortschritt (percent, phase, log_lines, destination hops, snapshot_id)
   - `GET /history`, `GET /history/{id}`
   - `POST /history/{id}/restore` — `{confirm: true, source: "<destination id|copilot|synology>", snapshot_id?}`
@@ -76,8 +77,11 @@ Optional env seed / paths (see `.env.example`):
 - `BACKUP_SYNOLOGY_*` — optional first-start seed for one SFTP destination
 - `BACKUP_QUIESCE`
 - `BACKUP_API_BASE` — unused for firing (legacy host-cron URL; schedules are in-process)
-- `BACKUP_SSH_TIMEOUT` / `BACKUP_ARCHIVE_TIMEOUT` / `BACKUP_TRANSFER_TIMEOUT`
-- `RESTIC_INSTALL` — default `true`: first restic run installs `restic` on the LXC via apt/apk
+- `BACKUP_SSH_TIMEOUT` — short SSH (compose stop/start, `command -v restic`); default 120s. Not used for apt-get.
+- `BACKUP_ARCHIVE_TIMEOUT` — wall-clock for tar / restic backup / extract (nohup+poll); default 3600s
+- `BACKUP_TRANSFER_TIMEOUT` — SCP/SFTP hops and restic binary copy; default 3600s
+- `RESTIC_INSTALL` — default `true`: if `restic` is missing, copy the Copilot image binary via SCP, else apt/apk via nohup+poll
+- `RESTIC_INSTALL_TIMEOUT` — wall-clock for apt/apk bootstrap only; default 600s (never `BACKUP_SSH_TIMEOUT`)
 
 DB: `$DATA_DIR/backup_verifier.db` (restic repo password lives here, never in git)
 
@@ -85,7 +89,7 @@ DB: `$DATA_DIR/backup_verifier.db` (restic repo password lives here, never in gi
 
 Opt-in on **Backup** / **Zeitplan**: Engine *Incremental (restic)*.
 
-1. First run per host: install `restic` on the LXC if missing (`RESTIC_INSTALL`).
+1. First run per host: `command -v restic`. If missing and `RESTIC_INSTALL=true`, copy `/usr/bin/restic` from the Copilot container (same Debian/amd64 binary as the image). If that fails, apt/apk runs detached (nohup+poll, `RESTIC_INSTALL_TIMEOUT`).
 2. Repo password is generated once per stack and stored in SQLite (`restic_secrets`).
 3. Working repo on the LXC: `$BACKUP_LXC_DIR/restic/{project}`. Durable copy: `$BACKUP_COPILOT_DIR/restic/{parent}/{project}`. SFTP dests get the same repo tree (`…/restic/{parent}/{project}`).
 4. Same inventory as tar (compose, named volume mountpoints, readable binds). Quiesce still stops the stack.

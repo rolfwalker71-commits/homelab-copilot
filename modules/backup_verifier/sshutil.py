@@ -289,11 +289,12 @@ async def run_detached_and_poll(
     short_timeout: float = 30.0,
     log: LogFn | None = None,
     progress_label: str = "Archiv",
+    job_label: str = "Archiv-Job",
 ) -> None:
     """Write script on target, start with nohup, poll status via short SSH calls.
 
     Status file values: ``running``, ``ok``, or ``failed:<exitcode>``.
-    Avoids holding one SSH session open for multi-minute tar jobs.
+    Avoids holding one SSH session open for multi-minute tar / apt jobs.
     """
     paths = _job_paths(work_dir, job_name)
     b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
@@ -309,6 +310,7 @@ printf 'starting\\n' > {shlex.quote(paths["progress"])}
 export HC_JOB_STATUS={shlex.quote(paths["status"])}
 export HC_JOB_LOG={shlex.quote(paths["log"])}
 export HC_JOB_SCRIPT={shlex.quote(paths["script"])}
+export HC_JOB_PROGRESS={shlex.quote(paths["progress"])}
 nohup bash -c '
   set +e
   bash "$HC_JOB_SCRIPT" >>"$HC_JOB_LOG" 2>&1
@@ -355,8 +357,8 @@ echo $! > {shlex.quote(paths["pid"])}
             except DockerControlError:
                 pass
             raise DockerControlError(
-                f"Archiv-Job Timeout nach {int(overall_timeout)}s "
-                f"(Volumes/Binds zu groß oder Host langsam)",
+                f"{job_label} Timeout nach {int(overall_timeout)}s "
+                f"(Job zu lang oder Host langsam)",
                 status_code=504,
             )
 
@@ -392,7 +394,7 @@ echo $! > {shlex.quote(paths["pid"])}
                 log_tail, _, _ = await ssh_run(settings, ip, tail_cmd, timeout=short_timeout)
             detail = (log_tail or "").strip() or status
             raise DockerControlError(
-                f"Remote-Archiv-Job fehlgeschlagen ({status}): {detail[-500:]}",
+                f"{job_label} fehlgeschlagen ({status}): {detail[-500:]}",
                 status_code=502,
             )
 
@@ -417,11 +419,11 @@ echo $! > {shlex.quote(paths["pid"])}
                 return
             if status2.startswith("failed:"):
                 raise DockerControlError(
-                    f"Remote-Archiv-Job fehlgeschlagen ({status2})",
+                    f"{job_label} fehlgeschlagen ({status2})",
                     status_code=502,
                 )
             raise DockerControlError(
-                "Remote-Archiv-Job beendet ohne Status (Prozess tot)",
+                f"{job_label} beendet ohne Status (Prozess tot)",
                 status_code=502,
             )
 

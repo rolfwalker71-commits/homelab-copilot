@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shlex
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -58,6 +59,13 @@ def sftp_repo_rel(parent_id: str, project: str) -> str:
     return f"restic/{safe_name(parent_id)}/{safe_name(project)}"
 
 
+_APT_LOCK_HINT = re.compile(
+    r"could not get lock|unable to lock directory|unable to acquire the dpkg|"
+    r"dpkg frontend lock|apt_lock=1",
+    re.I,
+)
+
+
 def translate_restic_error(text: str) -> str:
     """Map restic/SSH failures to clear German messages (never include secrets)."""
     raw = (text or "").strip()
@@ -67,20 +75,48 @@ def translate_restic_error(text: str) -> str:
             "Falsches restic-Passwort. Das in Copilot gespeicherte Repo-Passwort "
             "passt nicht zum Repository."
         )
+    if _APT_LOCK_HINT.search(raw):
+        return (
+            "APT-Sperre auf dem Host (unattended-upgrades oder apt). "
+            "Später erneut versuchen — restic wird nicht parallel zu apt installiert."
+        )
     if (
         "unable to create lock" in low
         or "repository is already locked" in low
-        or "lock" in low
-        and "timeout" in low
+        or ("lock" in low and "timeout" in low and "apt" not in low)
     ):
         return (
             "restic-Repository ist gesperrt (laufendes Backup oder abgestürzter "
             "Prozess). Copilot versucht unlock — bitte später erneut versuchen."
         )
-    if "restic: not found" in low or "command not found" in low and "restic" in low:
+    if "ssh-timeout" in low or (
+        "timeout" in low and "host nicht erreichbar" in low
+    ):
         return (
-            "restic fehlt auf dem Host. Copilot installiert es per apt/apk, "
-            "wenn RESTIC_INSTALL=true (Default). Sonst restic auf dem LXC installieren."
+            "SSH-Timeout — der Befehl dauerte zu lange (Host oft erreichbar). "
+            "restic-Installation läuft getrennt mit RESTIC_INSTALL_TIMEOUT "
+            "(Default 600s), nicht mit BACKUP_SSH_TIMEOUT."
+        )
+    if "restic-installation timeout" in low or (
+        "timeout" in low and "restic" in low and "install" in low
+    ):
+        return (
+            "restic-Installation Timeout (apt/apk zu langsam). "
+            "RESTIC_INSTALL_TIMEOUT erhöhen oder restic manuell auf dem LXC installieren."
+        )
+    if "restic: not found" in low or (
+        "command not found" in low and "restic" in low
+    ):
+        return (
+            "restic fehlt auf dem Host. Copilot kopiert das Binary aus dem "
+            "Copilot-Image oder installiert per apt/apk, wenn RESTIC_INSTALL=true "
+            "(Default). Sonst restic auf dem LXC installieren."
+        )
+    if "kein apt/apk" in low:
+        return (
+            "Kein apt/apk auf dem Host — restic kann nicht per Paketmanager "
+            "installiert werden. Binary-Kopie aus dem Copilot-Image fehlgeschlagen "
+            "oder RESTIC_INSTALL=false."
         )
     if "config file" in low and ("not found" in low or "does not exist" in low):
         return "restic-Repository ist nicht initialisiert oder der Pfad ist falsch."
@@ -228,6 +264,130 @@ async def _remove_password_file(
         logger.debug("restic password file cleanup failed", exc_info=True)
 
 
+def _local_restic_binary() -> Path | None:
+    which = shutil.which("restic")
+    candidates = [Path(which)] if which else []
+    candidates.extend((Path("/usr/bin/restic"), Path("/usr/local/bin/restic")))
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _restic_pkg_install_script() -> str:
+    """apt/apk install — runs detached; never under the short SSH probe timeout."""
+    return r"""
+set -euo pipefail
+PROG="${HC_JOB_PROGRESS:-}"
+note() { if [ -n "$PROG" ]; then printf '%s\n' "$1" > "$PROG"; fi; }
+
+if command -v restic >/dev/null 2>&1; then
+  note "restic bereits vorhanden"
+  exit 0
+fi
+
+LOCK=0
+for f in /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock \
+  /var/lib/dpkg/lock /var/cache/apt/archives/lock; do
+  [ -e "$f" ] || continue
+  if command -v fuser >/dev/null 2>&1 && fuser "$f" >/dev/null 2>&1; then
+    LOCK=1; break
+  fi
+  if command -v lsof >/dev/null 2>&1 && lsof -t "$f" >/dev/null 2>&1; then
+    LOCK=1; break
+  fi
+done
+if [ "$LOCK" = "1" ]; then
+  echo "APT_LOCK=1" >&2
+  echo "Could not get lock — another apt/unattended-upgrades process is running." >&2
+  exit 2
+fi
+
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive LC_ALL=C
+  note "apt-get update …"
+  apt-get update -qq \
+    -o Acquire::Retries=1 \
+    -o Acquire::http::Timeout=20 \
+    -o Acquire::https::Timeout=20 \
+    -o DPkg::Lock::Timeout=0
+  note "apt-get install restic …"
+  apt-get install -y -qq restic -o DPkg::Lock::Timeout=0
+elif command -v apk >/dev/null 2>&1; then
+  note "apk add restic …"
+  apk add --no-cache restic
+else
+  echo "Kein apt/apk — restic kann nicht automatisch installiert werden." >&2
+  exit 1
+fi
+
+if ! command -v restic >/dev/null 2>&1; then
+  echo "restic: not found after install" >&2
+  exit 1
+fi
+note "restic installiert"
+"""
+
+
+async def _probe_restic(
+    settings: Settings,
+    *,
+    ip: str | None,
+    local: bool,
+    timeout: float,
+) -> bool:
+    check = (
+        "command -v restic 2>/dev/null || "
+        "{ [ -x /usr/local/bin/restic ] && echo /usr/local/bin/restic; }"
+    )
+    if local:
+        out, _, code = await sshutil.local_run(check, timeout=min(15.0, timeout))
+    else:
+        assert ip is not None
+        out, _, code = await sshutil.ssh_run(
+            settings, ip, check, timeout=min(30.0, timeout)
+        )
+    return code == 0 and bool((out or "").strip())
+
+
+async def _push_restic_binary(
+    settings: Settings,
+    ip: str,
+    src: Path,
+    *,
+    transfer_timeout: float,
+    short_timeout: float,
+    log: LogFn,
+) -> bool:
+    dest = "/usr/local/bin/restic"
+    await log(f"restic fehlt — kopiere Binary vom Copilot ({src}) nach {dest} …")
+    await sshutil.ssh_run_ok(
+        settings, ip, "mkdir -p -- /usr/local/bin", timeout=short_timeout
+    )
+    await sshutil.scp_put(
+        settings, ip, src, dest, timeout=max(120.0, transfer_timeout)
+    )
+    # Non-login SSH PATH often omits /usr/local/bin — symlink into /usr/bin.
+    out, err, code = await sshutil.ssh_run(
+        settings,
+        ip,
+        f"chmod 755 -- {shlex.quote(dest)} && "
+        f"{shlex.quote(dest)} version >/dev/null && "
+        f"if ! command -v restic >/dev/null 2>&1; then "
+        f"ln -sfn {shlex.quote(dest)} /usr/bin/restic; fi; "
+        f"command -v restic",
+        timeout=short_timeout,
+    )
+    if code != 0 or not (out or "").strip():
+        logger.warning(
+            "restic binary push verify failed on %s: %s",
+            ip,
+            (err or out or "").strip(),
+        )
+        return False
+    return True
+
+
 async def ensure_restic_installed(
     settings: Settings,
     *,
@@ -236,49 +396,101 @@ async def ensure_restic_installed(
     allow_install: bool,
     timeout: float,
     log: LogFn,
+    work_dir: str | None = None,
+    install_timeout: float | None = None,
+    transfer_timeout: float | None = None,
 ) -> None:
-    check = "command -v restic"
-    if local:
-        out, _, code = await sshutil.local_run(check, timeout=15)
-    else:
-        assert ip is not None
-        out, _, code = await sshutil.ssh_run(settings, ip, check, timeout=30)
-    if code == 0 and (out or "").strip():
+    """Ensure restic exists. Probe is short; install never shares that timeout.
+
+    Remote: copy the Copilot image binary via SCP, then apt/apk via nohup+poll.
+    """
+    short = min(30.0, max(10.0, timeout))
+    long_install = float(install_timeout or 600.0)
+    xfer = float(transfer_timeout or 600.0)
+    if await _probe_restic(settings, ip=ip, local=local, timeout=short):
         return
     if not allow_install:
         raise ResticError(
             "restic fehlt auf dem Host und RESTIC_INSTALL=false. "
-            "restic bitte auf dem LXC installieren (apt/apk)."
+            "restic bitte auf dem LXC installieren (apt/apk) oder "
+            "RESTIC_INSTALL=true setzen (kopiert das Copilot-Binary)."
         )
-    await log("restic fehlt — Installation per apt/apk …")
-    script = """
-set -e
-if command -v restic >/dev/null 2>&1; then exit 0; fi
-if command -v apt-get >/dev/null 2>&1; then
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq restic
-elif command -v apk >/dev/null 2>&1; then
-  apk add --no-cache restic
-else
-  echo "Kein apt/apk — restic kann nicht automatisch installiert werden." >&2
-  exit 1
-fi
-command -v restic >/dev/null
-"""
-    try:
-        if local:
-            await sshutil.local_run_ok(script, timeout=max(120.0, timeout))
-        else:
-            assert ip is not None
-            await sshutil.ssh_run_ok(
-                settings, ip, script, timeout=max(180.0, timeout)
+
+    if local:
+        await log("restic fehlt lokal — Installation per apt/apk …")
+        try:
+            await sshutil.local_run_ok(
+                _restic_pkg_install_script(), timeout=long_install
             )
+        except DockerControlError as exc:
+            raise ResticError(
+                "restic konnte nicht installiert werden: "
+                + translate_restic_error(exc.message)
+            ) from exc
+        if not await _probe_restic(
+            settings, ip=ip, local=True, timeout=short
+        ):
+            raise ResticError(
+                "restic fehlt nach der Installation (nicht im PATH)."
+            )
+        await log("restic ist installiert.")
+        return
+
+    assert ip is not None
+    src = _local_restic_binary()
+    if src is not None:
+        try:
+            if await _push_restic_binary(
+                settings,
+                ip,
+                src,
+                transfer_timeout=xfer,
+                short_timeout=short,
+                log=log,
+            ):
+                await log("restic ist installiert (Binary vom Copilot).")
+                return
+            await log(
+                "Binary-Kopie unvollständig — versuche apt/apk im Hintergrund …"
+            )
+        except DockerControlError as exc:
+            logger.warning("restic binary push to %s failed: %s", ip, exc.message)
+            await log(
+                "Binary-Kopie fehlgeschlagen — versuche apt/apk im Hintergrund …"
+            )
+    else:
+        await log(
+            "restic fehlt im Copilot-Image — Installation per apt/apk "
+            "(Hintergrund, langer Timeout) …"
+        )
+
+    job_dir = (work_dir or "/tmp/homelab-copilot-restic").rstrip("/")
+    try:
+        await sshutil.run_detached_and_poll(
+            settings,
+            ip,
+            _restic_pkg_install_script(),
+            work_dir=job_dir,
+            job_name="restic_install",
+            local=False,
+            overall_timeout=long_install,
+            poll_interval=5.0,
+            short_timeout=short,
+            log=log,
+            progress_label="restic-Install",
+            job_label="restic-Installation",
+        )
     except DockerControlError as exc:
         raise ResticError(
             "restic konnte nicht installiert werden: "
             + translate_restic_error(exc.message)
         ) from exc
+
+    if not await _probe_restic(settings, ip=ip, local=False, timeout=short):
+        raise ResticError(
+            "restic fehlt nach der Installation (nicht im PATH). "
+            "Paketquelle prüfen oder restic manuell installieren."
+        )
     await log("restic ist installiert.")
 
 
@@ -666,6 +878,9 @@ async def run_restic_backup(
             allow_install=bsettings.restic_install,
             timeout=timeout,
             log=log,
+            work_dir=work_dir,
+            install_timeout=bsettings.restic_install_timeout,
+            transfer_timeout=transfer_timeout,
         )
 
         await _emit_progress(
@@ -1202,6 +1417,9 @@ async def list_restic_snapshots(
         allow_install=bsettings.restic_install,
         timeout=timeout,
         log=_noop_log,
+        work_dir=f"{bsettings.backup_lxc_dir.rstrip('/')}/restic-work/{safe_name(project)}",
+        install_timeout=bsettings.restic_install_timeout,
+        transfer_timeout=bsettings.backup_transfer_timeout,
     )
     remote_pw = f"{bsettings.backup_lxc_dir.rstrip('/')}/restic-work/{safe_name(project)}/.list-pass"
     await _write_password_file(
@@ -1333,6 +1551,9 @@ async def run_restic_restore(
         allow_install=bsettings.restic_install,
         timeout=timeout,
         log=log,
+        work_dir=f"{bsettings.backup_lxc_dir.rstrip('/')}/restic-work/{safe_name(project)}",
+        install_timeout=bsettings.restic_install_timeout,
+        transfer_timeout=transfer_timeout,
     )
 
     staging = f"{bsettings.backup_lxc_dir.rstrip('/')}/restore/{safe_name(project)}/{snap[:12]}"
