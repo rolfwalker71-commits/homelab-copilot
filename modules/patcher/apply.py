@@ -91,7 +91,14 @@ async def apply_updates(
 
 
 def _apt_cmd(filt: str, selected: list[str]) -> str:
-    base = "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; "
+    base = (
+        "export DEBIAN_FRONTEND=noninteractive; "
+        "apt-get update -qq "
+        "-o Acquire::ForceIPv4=true "
+        "-o Acquire::http::Timeout=20 "
+        "-o Acquire::https::Timeout=20 "
+        "-o DPkg::Lock::Timeout=60; "
+    )
     if filt == "selected":
         pkgs = " ".join(shlex.quote(p) for p in selected)
         return base + f"apt-get install -y --only-upgrade {pkgs}"

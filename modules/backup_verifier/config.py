@@ -43,7 +43,7 @@ class BackupSettings(BaseSettings):
     backup_archive_timeout: float = Field(default=3600.0, ge=300.0, le=14400.0)
     # SCP / large file hops (LXC ↔ Copilot ↔ Synology)
     backup_transfer_timeout: float = Field(default=3600.0, ge=300.0, le=14400.0)
-    backup_api_base: str = "http://127.0.0.1:6655"  # for crontab curl
+    backup_api_base: str = "http://127.0.0.1:6655"  # legacy; schedules are in-process
 
     @property
     def copilot_dir(self) -> Path:

@@ -20,9 +20,12 @@ class PatcherSettings(BaseSettings):
         extra="ignore",
     )
 
-    patcher_scan_timeout: float = Field(default=120.0, ge=30.0, le=600.0)
+    # Per-host SSH command budget (detect / list / reboot). Not shared across scan-all.
+    patcher_scan_timeout: float = Field(default=180.0, ge=30.0, le=600.0)
     patcher_apply_timeout: float = Field(default=3600.0, ge=300.0, le=14400.0)
     patcher_connect_timeout: float = Field(default=15.0, ge=3.0, le=60.0)
+    # Time-boxed apt-get update / dnf / apk index refresh. Scan falls back to cache.
+    patcher_index_timeout: float = Field(default=45.0, ge=10.0, le=180.0)
     patcher_api_base: str = "http://127.0.0.1:6655"
 
     # In-process daily scan of all hosts (works inside Docker; no host crontab needed)

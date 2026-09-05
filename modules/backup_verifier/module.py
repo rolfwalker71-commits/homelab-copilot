@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import time
@@ -21,7 +22,7 @@ if str(_MODULES_ROOT) not in sys.path:
 
 from app.config import get_settings
 from app.core.docker_control import DockerControlError
-from app.core.locale import format_bytes, format_de, now_berlin
+from app.core.locale import format_bytes, format_de, iso_utc, now_berlin
 from app.core.topology import TopologyStore
 
 from backup_verifier.backup import BackupError, list_backup_stacks, run_backup
@@ -31,12 +32,14 @@ from backup_verifier import destinations as dest_mod
 from backup_verifier.inventory import build_inventory
 from backup_verifier.jobs import JOBS
 from backup_verifier.restore import RestoreError, run_restore
+from backup_verifier.scheduler import next_run_after, run_schedule_loop
 from backup_verifier.store import BackupStore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _store: BackupStore | None = None
+_sched_task: asyncio.Task[None] | None = None
 
 _PUSH_BODY_MAX = 200
 
@@ -204,6 +207,153 @@ def _snapshot(request: Request):
     return store.snapshot
 
 
+async def _run_enqueued_backup(
+    job_id: str,
+    *,
+    store: BackupStore,
+    parent_id: str,
+    project: str,
+    snapshot: Any,
+    quiesce: bool | None,
+) -> None:
+    JOBS.set_running(job_id)
+    job = JOBS.get(job_id)
+    t0 = job.created_at if job else time.time()
+
+    async def on_progress(
+        *,
+        phase: str,
+        percent: int,
+        message: str,
+        run_id: int | None = None,
+    ) -> None:
+        JOBS.set_progress(
+            job_id,
+            phase=phase,
+            percent=percent,
+            message=message,
+            run_id=run_id,
+        )
+
+    async def on_log(line: str) -> None:
+        JOBS.append_log(job_id, line)
+
+    try:
+        result = await run_backup(
+            store,
+            parent_id=parent_id,
+            project=project,
+            snapshot=snapshot,
+            quiesce=quiesce,
+            on_progress=on_progress,
+            on_log=on_log,
+        )
+        status = str((result or {}).get("status") or "success")
+        norm = status if status in ("success", "partial", "failed") else "success"
+        JOBS.finish(job_id, status=norm, result=result)
+        await _notify_backup_finished(
+            status=norm,
+            project=project,
+            result=result,
+            error=(result or {}).get("error_message"),
+            duration_s=time.time() - t0,
+        )
+    except BackupError as exc:
+        current = JOBS.get(job_id)
+        run = await _maybe_load_run(current.run_id if current else None)
+        JOBS.finish(
+            job_id,
+            status="failed",
+            error=exc.message,
+            phase="Fehler",
+            message=exc.message,
+            result=run,
+        )
+        await _notify_backup_finished(
+            status="failed",
+            project=project,
+            result=run,
+            error=exc.message,
+            duration_s=time.time() - t0,
+        )
+    except DockerControlError as exc:
+        current = JOBS.get(job_id)
+        run = await _maybe_load_run(current.run_id if current else None)
+        JOBS.finish(
+            job_id,
+            status="failed",
+            error=exc.message,
+            phase="Fehler",
+            message=exc.message,
+            result=run,
+        )
+        await _notify_backup_finished(
+            status="failed",
+            project=project,
+            result=run,
+            error=exc.message,
+            duration_s=time.time() - t0,
+        )
+    except Exception as exc:
+        logger.exception("Background backup failed")
+        msg = str(exc) or "Unbekannter Fehler beim Backup."
+        current = JOBS.get(job_id)
+        run = await _maybe_load_run(current.run_id if current else None)
+        JOBS.finish(
+            job_id,
+            status="failed",
+            error=msg,
+            phase="Fehler",
+            message=msg,
+            result=run,
+        )
+        await _notify_backup_finished(
+            status="failed",
+            project=project,
+            result=run,
+            error=msg,
+            duration_s=time.time() - t0,
+        )
+
+
+def _enqueue_backup(
+    *,
+    store: BackupStore,
+    parent_id: str,
+    project: str,
+    snapshot: Any,
+    quiesce: bool | None = None,
+):
+    job = JOBS.create(parent_id=parent_id, project=project)
+
+    async def _bg() -> None:
+        await _run_enqueued_backup(
+            job.id,
+            store=store,
+            parent_id=parent_id,
+            project=project,
+            snapshot=snapshot,
+            quiesce=quiesce,
+        )
+
+    return job, _bg
+
+
+async def _fire_scheduled_backup(app: FastAPI, schedule: dict[str, Any]) -> None:
+    store = _get_store()
+    topo: TopologyStore = app.state.topology_store
+    snap = topo.snapshot
+    if snap is None:
+        raise RuntimeError("Keine Topologie — geplantes Backup übersprungen.")
+    job, coro = _enqueue_backup(
+        store=store,
+        parent_id=str(schedule["parent_id"]),
+        project=str(schedule["stack"]),
+        snapshot=snap,
+    )
+    asyncio.create_task(coro(), name=f"backup-sched-{job.id}")
+
+
 class RunPayload(BaseModel):
     parent_id: str = Field(..., min_length=1)
     project: str = Field(..., min_length=1)
@@ -272,6 +422,9 @@ async def module_status() -> dict[str, Any]:
         },
         "ssh_key_present": Path(s.docker_ssh_key_path).is_file()
         or (Path(s.data_dir) / "ssh" / "id_ed25519").is_file(),
+        "scheduler": "in_process",
+        "scheduler_running": bool(_sched_task and not _sched_task.done()),
+        "timezone": "Europe/Berlin",
         "crontab_available": cron_mod.crontab_available(),
         "api_base": bs.backup_api_base,
         "disclaimer": (
@@ -398,104 +551,13 @@ async def run_backup_endpoint(
             )
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
-    job = JOBS.create(parent_id=payload.parent_id, project=payload.project)
-
-    async def _bg() -> None:
-        JOBS.set_running(job.id)
-        t0 = job.created_at
-
-        async def on_progress(
-            *,
-            phase: str,
-            percent: int,
-            message: str,
-            run_id: int | None = None,
-        ) -> None:
-            JOBS.set_progress(
-                job.id,
-                phase=phase,
-                percent=percent,
-                message=message,
-                run_id=run_id,
-            )
-
-        async def on_log(line: str) -> None:
-            JOBS.append_log(job.id, line)
-
-        try:
-            result = await run_backup(
-                store,
-                parent_id=payload.parent_id,
-                project=payload.project,
-                snapshot=snap,
-                quiesce=payload.quiesce,
-                on_progress=on_progress,
-                on_log=on_log,
-            )
-            status = str((result or {}).get("status") or "success")
-            norm = status if status in ("success", "partial", "failed") else "success"
-            JOBS.finish(job.id, status=norm, result=result)
-            await _notify_backup_finished(
-                status=norm,
-                project=payload.project,
-                result=result,
-                error=(result or {}).get("error_message"),
-                duration_s=time.time() - t0,
-            )
-        except BackupError as exc:
-            run = await _maybe_load_run(job.run_id)
-            JOBS.finish(
-                job.id,
-                status="failed",
-                error=exc.message,
-                phase="Fehler",
-                message=exc.message,
-                result=run,
-            )
-            await _notify_backup_finished(
-                status="failed",
-                project=payload.project,
-                result=run,
-                error=exc.message,
-                duration_s=time.time() - t0,
-            )
-        except DockerControlError as exc:
-            run = await _maybe_load_run(job.run_id)
-            JOBS.finish(
-                job.id,
-                status="failed",
-                error=exc.message,
-                phase="Fehler",
-                message=exc.message,
-                result=run,
-            )
-            await _notify_backup_finished(
-                status="failed",
-                project=payload.project,
-                result=run,
-                error=exc.message,
-                duration_s=time.time() - t0,
-            )
-        except Exception as exc:
-            logger.exception("Background backup failed")
-            msg = str(exc) or "Unbekannter Fehler beim Backup."
-            run = await _maybe_load_run(job.run_id)
-            JOBS.finish(
-                job.id,
-                status="failed",
-                error=msg,
-                phase="Fehler",
-                message=msg,
-                result=run,
-            )
-            await _notify_backup_finished(
-                status="failed",
-                project=payload.project,
-                result=run,
-                error=msg,
-                duration_s=time.time() - t0,
-            )
-
+    job, _bg = _enqueue_backup(
+        store=store,
+        parent_id=payload.parent_id,
+        project=payload.project,
+        snapshot=snap,
+        quiesce=payload.quiesce,
+    )
     background.add_task(_bg)
     return {
         "ok": True,
@@ -569,10 +631,28 @@ async def restores(limit: int = Query(30, ge=1, le=100)) -> dict[str, Any]:
 async def list_schedules() -> dict[str, Any]:
     store = _get_store()
     schedules = await store.list_schedules()
+    now = now_berlin()
+    enriched: list[dict[str, Any]] = []
+    for row in schedules:
+        nxt = next_run_after(str(row.get("cron_expr") or ""), now) if row.get("enabled") else None
+        enriched.append(
+            {
+                **row,
+                "next_run": format_de(nxt) if nxt else None,
+                "next_run_iso": iso_utc(nxt) if nxt else None,
+            }
+        )
     return {
-        "schedules": schedules,
+        "schedules": enriched,
+        "scheduler": "in_process",
+        "scheduler_running": bool(_sched_task and not _sched_task.done()),
+        "timezone": "Europe/Berlin",
         "crontab_available": cron_mod.crontab_available(),
         "preview": cron_mod.preview_crontab(schedules),
+        "hint": (
+            "Zeitpläne laufen in der App (Europe/Berlin). "
+            "Kein Host-Crontab nötig — alte curl-Einträge kannst du löschen."
+        ),
     }
 
 
@@ -692,14 +772,44 @@ class BackupVerifierModule:
                 _page_ctx("destinations"),
             )
 
+        async def _sched_runner() -> None:
+            async def fire(schedule: dict[str, Any]) -> None:
+                await _fire_scheduled_backup(app, schedule)
+
+            def snapshot_ready() -> bool:
+                topo = getattr(app.state, "topology_store", None)
+                return topo is not None and topo.snapshot is not None
+
+            await run_schedule_loop(
+                _store,
+                fire,
+                snapshot_ready=snapshot_ready,
+            )
+
+        global _sched_task
+        _sched_task = asyncio.create_task(
+            _sched_runner(), name="backup-verifier-scheduler"
+        )
+        app.state.backup_scheduler_task = _sched_task
+
         logger.info(
-            "backup_verifier ready — DB %s, backups %s",
+            "backup_verifier ready — DB %s, backups %s, scheduler=in_process",
             bs.db_path,
             bs.copilot_dir,
         )
 
     async def on_shutdown(self, app: FastAPI) -> None:
-        global _store
+        global _store, _sched_task
+        task = getattr(app.state, "backup_scheduler_task", None) or _sched_task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            _sched_task = None
         if _store:
             await _store.close()
             _store = None

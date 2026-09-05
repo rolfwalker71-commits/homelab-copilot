@@ -471,7 +471,9 @@
     }
     const sftpOn = pipe.some((p) => p.kind === 'sftp');
     if (!sftpOn) parts.push('Kein SFTP-Ziel aktiv (Synology/Storage Box optional).');
-    if (!data.crontab_available) parts.push('Kein crontab hier (Container?) — Zeitplan-Block manuell auf dem Host setzen.');
+    if (data.scheduler === 'in_process' && data.scheduler_running === false) {
+      parts.push('Backup-Scheduler nicht aktiv — Container-Logs prüfen.');
+    }
     if (parts.length) {
       banner.classList.remove('hidden');
       banner.innerHTML = '<span class="setup-banner-ico" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.25" stroke="currentColor" stroke-width="1.75"/><path d="M12 11v5.5M12 7.75h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></span>'

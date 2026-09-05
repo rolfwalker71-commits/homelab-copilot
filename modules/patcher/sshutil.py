@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import socket
 from pathlib import Path
 
 import asyncssh
@@ -17,6 +19,15 @@ _SSH_KEEPALIVE_INTERVAL = 30
 _SSH_KEEPALIVE_COUNT_MAX = 3
 
 
+def _ssh_family(host: str) -> int:
+    """Pin address family for literal IPs so we do not wait on the other stack."""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return 0
+    return socket.AF_INET if addr.version == 4 else socket.AF_INET6
+
+
 def _connect_kwargs(
     settings: Settings,
     *,
@@ -24,6 +35,7 @@ def _connect_kwargs(
     port: int | None = None,
     key: Path | None = None,
     connect_timeout: float = 15.0,
+    host: str | None = None,
 ) -> dict:
     kwargs: dict = {
         "port": port or settings.docker_ssh_port,
@@ -34,7 +46,13 @@ def _connect_kwargs(
         "keepalive_interval": _SSH_KEEPALIVE_INTERVAL,
         "keepalive_count_max": _SSH_KEEPALIVE_COUNT_MAX,
         "client_keys": [str(key or ssh_key_path(settings))],
+        # Same key as Docker discovery — do not wait on password/keyboard-interactive.
+        "preferred_auth": ("publickey",),
     }
+    if host:
+        family = _ssh_family(host)
+        if family:
+            kwargs["family"] = family
     return kwargs
 
 
@@ -42,7 +60,7 @@ async def ssh_run(
     ip: str,
     cmd: str,
     *,
-    timeout: float = 120.0,
+    timeout: float = 180.0,
     username: str | None = None,
     port: int | None = None,
     connect_timeout: float = 15.0,
@@ -57,12 +75,23 @@ async def ssh_run(
                 username=username,
                 port=port,
                 connect_timeout=connect_timeout,
+                host=ip,
             ),
         ) as conn:
-            result = await conn.run(cmd, check=False, timeout=timeout)
+            try:
+                result = await conn.run(cmd, check=False, timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                raise DockerControlError(
+                    f"SSH-Befehl-Timeout zu {ip} ({timeout:.0f}s) — "
+                    f"Remote-Befehl hängt (apt-Sperre oder Spiegel-Server?).",
+                    status_code=504,
+                ) from exc
+    except DockerControlError:
+        raise
     except asyncio.TimeoutError as exc:
         raise DockerControlError(
-            f"SSH-Timeout zu {ip} — Befehl zu lang oder Host nicht erreichbar?",
+            f"SSH-Verbindungs-Timeout zu {ip} ({connect_timeout:.0f}s) — "
+            f"Host nicht erreichbar?",
             status_code=504,
         ) from exc
     except (OSError, asyncssh.Error) as exc:
@@ -85,7 +114,7 @@ async def ssh_run_ok(
     ip: str,
     cmd: str,
     *,
-    timeout: float = 120.0,
+    timeout: float = 180.0,
     username: str | None = None,
     port: int | None = None,
     connect_timeout: float = 15.0,

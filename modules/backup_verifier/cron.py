@@ -1,4 +1,9 @@
-"""System crontab sync for backup schedules (marker-managed block)."""
+"""Legacy host-crontab helpers (presets + optional leftover-block cleanup).
+
+Schedules run in-process (see scheduler.py). Host crontab curls are unused and
+would fail TOTP. If ``crontab`` exists in this process, sync strips the old
+marker-managed curl block so leftover entries cannot double-fire later.
+"""
 
 from __future__ import annotations
 
@@ -16,9 +21,7 @@ logger = logging.getLogger(__name__)
 MARKER_BEGIN = "# --- HOMELAB-COPILOT-BACKUP-VERIFIER BEGIN ---"
 MARKER_END = "# --- HOMELAB-COPILOT-BACKUP-VERIFIER END ---"
 
-_CRON_RE = re.compile(
-    r"^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$"
-)
+_CRON_RE = re.compile(r"^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$")
 
 
 class CronError(Exception):
@@ -28,7 +31,7 @@ class CronError(Exception):
 
 
 def preset_to_cron(preset: str, time_hhmm: str = "03:00", weekday: int = 0) -> str:
-    """Map UI presets to cron expressions (Europe/Berlin wall clock via host TZ)."""
+    """Map UI presets to cron expressions (Europe/Berlin wall clock)."""
     preset = (preset or "custom").lower()
     try:
         hour_s, minute_s = time_hhmm.split(":")
@@ -70,7 +73,6 @@ def _read_crontab() -> str:
         )
     except OSError as exc:
         raise CronError(f"crontab nicht ausführbar: {exc}") from exc
-    # exit 1 with empty often means no crontab
     if result.returncode != 0:
         err = (result.stderr or "").lower()
         if "no crontab" in err or result.returncode == 1:
@@ -91,66 +93,58 @@ def _write_crontab(content: str) -> None:
         raise CronError(f"crontab schreiben fehlgeschlagen: {result.stderr.strip()}")
 
 
-def _curl_line(bsettings: BackupSettings, parent_id: str, stack: str) -> str:
-    base = bsettings.backup_api_base.rstrip("/")
-    # Escape for single-quoted shell JSON
-    payload = (
-        '{"parent_id":"%s","project":"%s"}'
-        % (parent_id.replace('"', ""), stack.replace('"', ""))
+def _strip_marker_block(current: str) -> str:
+    pattern = re.compile(
+        re.escape(MARKER_BEGIN) + r".*?" + re.escape(MARKER_END) + r"\n?",
+        re.DOTALL,
     )
-    url = f"{base}/api/modules/backup_verifier/run"
-    return (
-        f"curl -fsS -X POST {url} "
-        f"-H 'Content-Type: application/json' "
-        f"-d '{payload}' "
-        f">> /tmp/homelab-backup-verifier-cron.log 2>&1"
-    )
+    return pattern.sub("", current).rstrip() + "\n"
 
 
 def build_block(schedules: list[dict[str, Any]], bsettings: BackupSettings | None = None) -> str:
-    bsettings = bsettings or get_backup_settings()
-    lines = [MARKER_BEGIN, "# Managed by Homelab Copilot backup_verifier — do not edit by hand"]
-    for s in schedules:
-        if not s.get("enabled"):
-            continue
-        expr = s["cron_expr"]
-        parent_id = s["parent_id"]
-        stack = s["stack"]
+    """Comment-only leftover notice — no curl lines (TOTP would reject them)."""
+    del bsettings
+    enabled = [s for s in schedules if s.get("enabled")]
+    lines = [
+        MARKER_BEGIN,
+        "# Managed by Homelab Copilot backup_verifier — do not edit by hand",
+        "# Zeitpläne laufen in der App (Europe/Berlin). Kein Host-Cron / curl nötig.",
+        "# Diesen Block kannst du aus der Host-Crontab löschen.",
+    ]
+    for s in enabled:
         note = (s.get("note") or "").strip()
-        if note:
-            lines.append(f"# {note}")
-        lines.append(f"{expr} {_curl_line(bsettings, parent_id, stack)}")
+        extra = f"  # {note}" if note else ""
+        lines.append(
+            f"# {s.get('cron_expr')}  {s.get('stack')}  {s.get('parent_id')}{extra}"
+        )
     lines.append(MARKER_END)
     return "\n".join(lines) + "\n"
 
 
 def sync_crontab(schedules: list[dict[str, Any]], bsettings: BackupSettings | None = None) -> dict[str, Any]:
-    """Replace marker block in user crontab with current schedules."""
+    """Strip leftover curl marker blocks when this process can write crontab."""
     bsettings = bsettings or get_backup_settings()
+    block = build_block(schedules, bsettings)
     if not crontab_available():
-        block = build_block(schedules, bsettings)
         return {
-            "ok": False,
+            "ok": True,
             "synced": False,
+            "scheduler": "in_process",
             "reason": (
-                "Kein crontab auf diesem Host (typisch im Container). "
-                "Schedules sind in der DB gespeichert — Block manuell auf dem "
-                "Copilot-Host installieren."
+                "Kein crontab in diesem Prozess (typisch im Container). "
+                "Zeitpläne laufen in der App — Host-Crontab nicht nötig."
             ),
             "block": block,
-            "hint": "crontab -e → Block einfügen, oder Host-Cron mit curl auf BACKUP_API_BASE",
+            "hint": (
+                "Alten Marker-Block auf dem Docker-Host optional löschen "
+                "(crontab -e). curl ohne TOTP-Cookie schlägt mit 401 fehl."
+            ),
         }
 
     current = _read_crontab()
-    # Strip existing block
-    pattern = re.compile(
-        re.escape(MARKER_BEGIN) + r".*?" + re.escape(MARKER_END) + r"\n?",
-        re.DOTALL,
-    )
-    cleaned = pattern.sub("", current).rstrip() + "\n"
+    cleaned = _strip_marker_block(current)
     enabled = [s for s in schedules if s.get("enabled")]
     if enabled:
-        block = build_block(schedules, bsettings)
         new_content = cleaned + "\n" + block
     else:
         new_content = cleaned
@@ -160,6 +154,7 @@ def sync_crontab(schedules: list[dict[str, Any]], bsettings: BackupSettings | No
     return {
         "ok": True,
         "synced": True,
+        "scheduler": "in_process",
         "entries": len(enabled),
         "block": block,
         "user": os.environ.get("USER") or os.environ.get("USERNAME") or "unknown",
@@ -169,4 +164,15 @@ def sync_crontab(schedules: list[dict[str, Any]], bsettings: BackupSettings | No
 def preview_crontab(
     schedules: list[dict[str, Any]], bsettings: BackupSettings | None = None
 ) -> str:
-    return build_block(schedules, bsettings or get_backup_settings())
+    del bsettings
+    enabled = [s for s in schedules if s.get("enabled")]
+    lines = [
+        "In-App-Scheduler (Europe/Berlin) — kein Host-Crontab nötig.",
+        "",
+    ]
+    if not enabled:
+        lines.append("Keine aktiven Zeitpläne.")
+        return "\n".join(lines) + "\n"
+    for s in enabled:
+        lines.append(f"{s.get('cron_expr')}  {s.get('stack')}  ({s.get('parent_id')})")
+    return "\n".join(lines) + "\n"

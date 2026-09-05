@@ -143,6 +143,8 @@ async def run_scan_all_hosts(
 
     SCAN_ALL.total = len(targets)
     SCAN_ALL.message = "Starte Prüfung aller Hosts…"
+    # Each host gets the full per-host scan timeout — not a shared Docker-style budget.
+    logger.info("scan-all: %d Host(s) nacheinander, je volles Scan-Timeout", len(targets))
 
     hosts_with_updates = 0
     hosts_with_errors = 0

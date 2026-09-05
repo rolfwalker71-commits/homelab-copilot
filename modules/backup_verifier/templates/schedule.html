@@ -6,7 +6,7 @@
   <p class="eyebrow">Modul · v{{ module_version }}</p>
   <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Backup-Zeitplan</h1>
   <p class="mt-2 max-w-3xl text-[var(--muted)]">
-    Crontab auf dem Copilot-Host (Marker-Block). Im Container: Block manuell installieren.
+    Zeitpläne laufen in der App (Europe/Berlin). Kein Host-Crontab nötig — bitte nichts von Hand eintragen.
   </p>
 </section>
 
@@ -17,7 +17,7 @@
 <article class="surface p-4 sm:p-5 animate-in">
   <h2 class="font-display text-lg font-bold">Zeitplan</h2>
   <p class="mt-1 text-sm text-[var(--muted)]">
-    Automatische Stack-Backups über Cron-Presets oder eigenen Ausdruck.
+    Automatische Stack-Backups über Presets oder eigenen Cron-Ausdruck. Die App startet sie selbst.
   </p>
   <form id="sched-form" class="mt-4 space-y-3" novalidate>
     <div>
@@ -75,7 +75,9 @@
     const pipe = (data.pipeline || []).filter((p) => p.enabled);
     if (pipe.length) parts.push('Pipeline: ' + pipe.map((p) => p.label || p.kind).join(' → '));
     else parts.push('Keine Ziele — unter „Ziele“ konfigurieren.');
-    if (!data.crontab_available) parts.push('Kein crontab hier (Container?) — Zeitplan-Block manuell auf dem Host setzen.');
+    if (data.scheduler === 'in_process') {
+      parts.push('Scheduler: in der App (Europe/Berlin)' + (data.scheduler_running === false ? ' — nicht aktiv, Container prüfen.' : '.'));
+    }
     if (parts.length) {
       banner.classList.remove('hidden');
       banner.innerHTML = '<span class="setup-banner-ico" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.25" stroke="currentColor" stroke-width="1.75"/><path d="M12 11v5.5M12 7.75h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></span>'
@@ -114,10 +116,13 @@
     const items = data.schedules || [];
     list.innerHTML = items.length ? items.map((s) => `
       <li class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] p-2">
-        <span><strong>${s.stack}</strong> · <code>${s.cron_expr}</code> · ${s.enabled ? 'aktiv' : 'aus'}</span>
+        <span><strong>${s.stack}</strong> · <code>${s.cron_expr}</code> · ${s.enabled ? 'aktiv' : 'aus'}
+          ${s.next_run ? `<br><span class="text-[var(--muted)]">Nächster Lauf: ${s.next_run}</span>` : ''}
+          ${s.last_fired_at ? `<br><span class="text-[var(--muted)]">Zuletzt gestartet: ${s.last_fired_at}</span>` : ''}
+        </span>
         <button type="button" class="btn btn-ghost btn-xs" data-del-sched="${s.id}">Löschen</button>
       </li>`).join('') : '<li class="text-[var(--muted)]">Keine Zeitpläne.</li>';
-    document.getElementById('cron-preview').textContent = data.preview || '';
+    document.getElementById('cron-preview').textContent = [data.hint, data.preview].filter(Boolean).join('\n\n');
   }
 
   document.getElementById('sched-preset')?.addEventListener('change', (e) => {

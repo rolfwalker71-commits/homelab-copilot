@@ -72,7 +72,9 @@ CREATE TABLE IF NOT EXISTS schedules (
     created_at_iso TEXT NOT NULL,
     updated_at TEXT,
     updated_at_iso TEXT,
-    note TEXT DEFAULT ''
+    note TEXT DEFAULT '',
+    last_fired_minute TEXT NOT NULL DEFAULT '',
+    last_fired_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS backup_destinations (
@@ -119,6 +121,16 @@ class BackupStore:
         if "destinations_json" not in cols:
             await db.execute(
                 "ALTER TABLE backup_runs ADD COLUMN destinations_json TEXT"
+            )
+        async with db.execute("PRAGMA table_info(schedules)") as cur:
+            sched_cols = {row[1] for row in await cur.fetchall()}
+        if "last_fired_minute" not in sched_cols:
+            await db.execute(
+                "ALTER TABLE schedules ADD COLUMN last_fired_minute TEXT NOT NULL DEFAULT ''"
+            )
+        if "last_fired_at" not in sched_cols:
+            await db.execute(
+                "ALTER TABLE schedules ADD COLUMN last_fired_at TEXT NOT NULL DEFAULT ''"
             )
 
     async def close(self) -> None:
@@ -404,7 +416,12 @@ class BackupStore:
             "SELECT * FROM schedules ORDER BY id ASC"
         ) as cur:
             rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["enabled"] = bool(d.get("enabled"))
+            out.append(d)
+        return out
 
     async def get_schedule(self, schedule_id: int) -> dict[str, Any] | None:
         db = self._require()
@@ -473,4 +490,24 @@ class BackupStore:
     async def delete_schedule(self, schedule_id: int) -> None:
         db = self._require()
         await db.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+        await db.commit()
+
+    async def mark_schedule_fired(self, schedule_id: int, *, minute_key: str) -> None:
+        db = self._require()
+        now = now_berlin()
+        await db.execute(
+            """
+            UPDATE schedules SET
+                last_fired_minute = ?, last_fired_at = ?,
+                updated_at = ?, updated_at_iso = ?
+            WHERE id = ?
+            """,
+            (
+                minute_key,
+                format_de(now),
+                format_de(now),
+                iso_utc(now),
+                schedule_id,
+            ),
+        )
         await db.commit()

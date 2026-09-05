@@ -37,27 +37,29 @@ Default **quiesce**: `docker compose stop` before volume tar, then `up -d` / `st
 - Verlauf: [`/modules/backup_verifier/history`](/modules/backup_verifier/history)
 - Stack cards: **Backup** / **Verlauf**
 - API prefix: `/api/modules/backup_verifier/`
-  - `GET /status` — setup / `pipeline` / crontab
+  - `GET /status` — setup / `pipeline` / in-process scheduler
   - `GET|PUT /destinations` — sorted list (secrets masked); full replace on PUT
   - `POST /destinations/check` — connection test for one destination payload
   - `GET /preflight?parent_id=&project=`
-  - `POST /run` — body `{parent_id, project, quiesce?}` → background job (`job_id`); poll `GET /jobs/{id}` for percent/phase; `?wait=true` sync
+  - `POST /run` — body `{parent_id, project, quiesce?}` → background job (`job_id`); poll `GET /jobs/{id}` for percent/phase; `?wait=true` sync. **TOTP-gated** (not for host cron).
   - `GET /jobs/{id}` — Fortschritt (percent, phase, log_lines, destination hops)
   - `GET /history`, `GET /history/{id}`
   - `POST /history/{id}/restore` — `{confirm: true, source: "<destination id|copilot|synology>"}`
   - `GET|POST /schedules`, `DELETE /schedules/{id}`, `POST /schedules/sync`
 
-## Schedule (cron)
+## Schedule (in-process)
 
-Schedules live in SQLite. The app syncs a **marker-managed** block into the user crontab when `crontab` exists:
+Schedules live in SQLite and run **inside the Copilot process** (Europe/Berlin), same pattern as the patcher daily scan. No host crontab, no `crond` in the image, no curl.
+
+Do **not** add crontab lines by hand. Older marker blocks that `curl` `/api/modules/backup_verifier/run` fail with **401** after TOTP (the run endpoint is not public). You can delete this block from the Docker host:
 
 ```
 # --- HOMELAB-COPILOT-BACKUP-VERIFIER BEGIN ---
-0 3 * * * curl -fsS -X POST http://127.0.0.1:6655/api/modules/backup_verifier/run ...
+… curl … /api/modules/backup_verifier/run …
 # --- HOMELAB-COPILOT-BACKUP-VERIFIER END ---
 ```
 
-Inside Docker there is usually **no cron daemon** — copy the preview block onto the **host** crontab and set `BACKUP_API_BASE` to a reachable Copilot URL.
+Leftover host curls log to `/tmp/homelab-backup-verifier-cron.log` on the machine that owns crontab (typically 401). In-app runs appear under **Verlauf**.
 
 ## Config
 
@@ -68,7 +70,8 @@ Optional env seed / paths (see `.env.example`):
 - `BACKUP_COPILOT_DIR`, `BACKUP_LXC_DIR` — local paths (still used at runtime)
 - `BACKUP_LXC_KEEP` / `BACKUP_COPILOT_KEEP` / `BACKUP_SYNOLOGY_KEEP` — seed keep counts
 - `BACKUP_SYNOLOGY_*` — optional first-start seed for one SFTP destination
-- `BACKUP_QUIESCE`, `BACKUP_API_BASE`
+- `BACKUP_QUIESCE`
+- `BACKUP_API_BASE` — unused for firing (legacy host-cron URL; schedules are in-process)
 - `BACKUP_SSH_TIMEOUT` / `BACKUP_ARCHIVE_TIMEOUT` / `BACKUP_TRANSFER_TIMEOUT`
 
 DB: `$DATA_DIR/backup_verifier.db`

@@ -386,11 +386,14 @@
       const pending = t.pending;
       const sec = t.security;
       let statusHtml = '<span class="text-sm text-[var(--muted)]">Noch nicht gescannt</span>';
+      const sum = (t.last_scan && t.last_scan.summary) || {};
       if (pending != null) {
         statusHtml =
           chip(pending + ' Updates', pending ? 'chip-unknown' : 'chip-running') +
           (sec ? ' ' + chip(sec + ' Security', 'chip-stopped') : '') +
-          (t.last_scan && t.last_scan.reboot_required ? ' ' + chip('Reboot', 'chip-stopped') : '');
+          (t.last_scan && t.last_scan.reboot_required ? ' ' + chip('Reboot', 'chip-stopped') : '') +
+          (sum.apt_lock ? ' ' + chip('APT-Sperre', 'chip-unknown') : '') +
+          (!sum.apt_lock && sum.index_stale ? ' ' + chip('Cache', 'chip-unknown') : '');
       } else if (t.last_scan_error) {
         statusHtml = '<span class="text-sm" style="color:var(--danger,#c44)">' + esc(t.last_scan_error) + '</span>';
       }
@@ -402,6 +405,9 @@
       const lastAt = t.last_scan && t.last_scan.created_at
         ? '<p class="mt-1 text-xs text-[var(--muted)]">Letzter Scan: ' + esc(t.last_scan.created_at) + '</p>'
         : '';
+      const scanNote = sum.note
+        ? '<p class="mt-1 text-xs text-[var(--muted)]">' + esc(sum.note) + '</p>'
+        : '';
       return (
         '<article class="entity-card" data-id="' + esc(t.id) + '">' +
           '<div class="flex flex-wrap items-start justify-between gap-2">' +
@@ -409,6 +415,7 @@
               '<h3 class="font-semibold break-words leading-snug">' + esc(t.name) + '</h3>' +
               '<p class="mt-0.5 text-xs text-[var(--muted)]">' + meta + '</p>' +
               lastAt +
+              scanNote +
             '</div>' +
             '<div class="target-status flex flex-wrap gap-1 justify-end">' + statusHtml + '</div>' +
           '</div>' +
@@ -602,6 +609,9 @@
     html += '<p class="text-[var(--muted)]">' + esc(scan.distro || '') + ' · ' + esc(scan.pm || '') +
       ' · ' + esc(String((scan.summary || {}).total || pkgs.length)) + ' Pakete' +
       (scan.reboot_required ? ' · Reboot empfohlen' : '') + '</p>';
+    if (scan.summary && scan.summary.note) {
+      html += '<p class="text-[var(--muted)]">' + esc(scan.summary.note) + '</p>';
+    }
     html += '<ul class="space-y-1 max-h-64 overflow-y-auto">';
     pkgs.forEach(function (p) {
       html += '<li class="flex flex-wrap gap-2 justify-between border-b border-[var(--border)] py-1">' +
