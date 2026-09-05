@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import shlex
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -320,10 +321,15 @@ async def _ssh_run(
     *,
     port: int | None = None,
     username: str | None = None,
+    cmd_timeout: float | None = None,
 ) -> tuple[str, str, int]:
     key = ssh_key_path(settings)
     connect_timeout = min(3.0, settings.docker_ssh_timeout + 1.0)
-    cmd_timeout = max(5.0, settings.docker_ssh_timeout + 10.0)
+    timeout = (
+        float(cmd_timeout)
+        if cmd_timeout is not None
+        else max(5.0, settings.docker_ssh_timeout + 10.0)
+    )
     try:
         async with asyncssh.connect(
             ip,
@@ -334,7 +340,7 @@ async def _ssh_run(
             connect_timeout=connect_timeout,
             login_timeout=connect_timeout,
         ) as conn:
-            result = await conn.run(cmd, check=False, timeout=cmd_timeout)
+            result = await conn.run(cmd, check=False, timeout=timeout)
     except asyncio.TimeoutError as exc:
         raise DockerControlError(
             f"SSH-Timeout zu {ip} — Host nicht erreichbar?",
@@ -354,6 +360,94 @@ async def _ssh_run(
         "utf-8", errors="replace"
     )
     return stdout, stderr, int(result.exit_status or 0)
+
+
+async def _ssh_run_stream(
+    settings: Settings,
+    ip: str,
+    cmd: str,
+    *,
+    port: int | None = None,
+    username: str | None = None,
+    cmd_timeout: float = 1800.0,
+    on_line: Callable[[str], Awaitable[None] | None] | None = None,
+) -> tuple[str, str, int]:
+    """Stream stdout/stderr lines (docker pull). Longer timeout than discovery SSH."""
+    key = ssh_key_path(settings)
+    connect_timeout = min(8.0, max(3.0, settings.docker_ssh_timeout + 4.0))
+
+    async def _emit(text: str) -> None:
+        if not on_line:
+            return
+        result = on_line(text)
+        if asyncio.iscoroutine(result):
+            await result
+
+    try:
+        async with asyncssh.connect(
+            ip,
+            port=int(port or settings.docker_ssh_port),
+            username=(username or settings.docker_ssh_user),
+            client_keys=[str(key)],
+            known_hosts=None,
+            connect_timeout=connect_timeout,
+            login_timeout=connect_timeout,
+        ) as conn:
+            try:
+                process = await conn.create_process(
+                    cmd,
+                    stderr=asyncssh.STDOUT,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except TypeError:
+                process = await conn.create_process(cmd, stderr=asyncssh.STDOUT)
+            chunks: list[str] = []
+
+            async def _read() -> None:
+                reader = process.stdout
+                while True:
+                    raw = await reader.readline()
+                    if not raw:
+                        break
+                    line = (
+                        raw.decode("utf-8", errors="replace")
+                        if isinstance(raw, bytes)
+                        else raw
+                    )
+                    chunks.append(line)
+                    text = line.rstrip("\r\n")
+                    if text:
+                        await _emit(text)
+                await process.wait()
+
+            try:
+                await asyncio.wait_for(_read(), timeout=cmd_timeout)
+            except asyncio.TimeoutError as exc:
+                try:
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except Exception:
+                    pass
+                raise DockerControlError(
+                    f"SSH-Befehl-Timeout zu {ip} ({cmd_timeout:.0f}s) — "
+                    "docker pull/restart hängt?",
+                    status_code=504,
+                ) from exc
+            return "".join(chunks), "", int(process.exit_status or 0)
+    except DockerControlError:
+        raise
+    except asyncio.TimeoutError as exc:
+        raise DockerControlError(
+            f"SSH-Timeout zu {ip} — Host nicht erreichbar?",
+            status_code=504,
+        ) from exc
+    except (OSError, asyncssh.Error) as exc:
+        logger.warning("SSH Docker stream %s: %s", ip, exc)
+        raise DockerControlError(
+            f"SSH zu {ip} fehlgeschlagen: {exc}",
+            status_code=502,
+        ) from exc
 
 
 async def _local_container_action(
@@ -987,6 +1081,7 @@ async def _inspect_image_repo_digests(
     *,
     port: int | None,
     username: str | None,
+    cmd_timeout: float | None = None,
 ) -> dict[str, list[str]]:
     """Map image id/tag → RepoDigests. Missing key/empty list stays empty."""
     dest: dict[str, list[str]] = {}
@@ -1001,6 +1096,7 @@ async def _inspect_image_repo_digests(
             "docker inspect --type image -- " + quoted,
             port=port,
             username=username,
+            cmd_timeout=cmd_timeout,
         )
         if code != 0:
             return None
@@ -1027,6 +1123,7 @@ async def scan_image_updates(
     parent_id: str,
     snapshot: TopologySnapshot | None,
     project: str | None = None,
+    inspect_timeout: float = 90.0,
 ) -> dict[str, Any]:
     """Compare local RepoDigests vs remote manifests (no pull, no restart)."""
     ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
@@ -1069,7 +1166,12 @@ async def scan_image_updates(
 
     quoted = " ".join(shlex.quote(n) for n in names)
     stdout, stderr, code = await _ssh_run(
-        settings, ip, "docker inspect -- " + quoted, port=port, username=user
+        settings,
+        ip,
+        "docker inspect -- " + quoted,
+        port=port,
+        username=user,
+        cmd_timeout=inspect_timeout,
     )
     if code != 0:
         raw = (stderr or stdout or "").strip() or f"exit {code}"
@@ -1101,7 +1203,12 @@ async def scan_image_updates(
             image_refs.append(image)
 
     digest_by_ref = await _inspect_image_repo_digests(
-        settings, ip, image_refs, port=port, username=user
+        settings,
+        ip,
+        image_refs,
+        port=port,
+        username=user,
+        cmd_timeout=inspect_timeout,
     )
 
     rows: list[dict[str, Any]] = []
@@ -1124,7 +1231,12 @@ async def scan_image_updates(
                 + " 2>/dev/null | head -c 400"
             )
             r_out, r_err, r_code = await _ssh_run(
-                settings, ip, remote_cmd, port=port, username=user
+                settings,
+                ip,
+                remote_cmd,
+                port=port,
+                username=user,
+                cmd_timeout=inspect_timeout,
             )
             text = (r_out or "").strip()
             if r_code == 0 and "sha256:" in text:
@@ -1185,6 +1297,8 @@ async def apply_image_updates(
     project: str | None = None,
     names: list[str] | None = None,
     restart: bool = True,
+    pull_timeout: float = 1800.0,
+    on_line: Callable[[str], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
     """Pull newer images after explicit confirmation. Restart only if requested."""
     ip, port, user = resolve_parent_ssh(settings, snapshot, parent_id)
@@ -1199,6 +1313,26 @@ async def apply_image_updates(
             status_code=503,
         )
 
+    async def _run(cmd: str, *, stream: bool = False) -> tuple[str, str, int]:
+        if stream or on_line:
+            return await _ssh_run_stream(
+                settings,
+                ip,
+                cmd,
+                port=port,
+                username=user,
+                cmd_timeout=pull_timeout,
+                on_line=on_line,
+            )
+        return await _ssh_run(
+            settings,
+            ip,
+            cmd,
+            port=port,
+            username=user,
+            cmd_timeout=pull_timeout,
+        )
+
     safe_names = [validate_docker_name(n) for n in (names or []) if n]
     project = (project or "").strip() or None
     if project:
@@ -1207,9 +1341,7 @@ async def apply_image_updates(
     logs: list[str] = []
     if project:
         cmd = f"docker compose -p {shlex.quote(project)} pull"
-        stdout, stderr, code = await _ssh_run(
-            settings, ip, cmd, port=port, username=user
-        )
+        stdout, stderr, code = await _run(cmd, stream=True)
         logs.append((stdout or stderr or "").strip()[:4000])
         if code != 0:
             raise DockerControlError(
@@ -1218,9 +1350,7 @@ async def apply_image_updates(
             )
         if restart:
             rcmd = f"docker compose -p {shlex.quote(project)} up -d"
-            stdout, stderr, code = await _ssh_run(
-                settings, ip, rcmd, port=port, username=user
-            )
+            stdout, stderr, code = await _run(rcmd, stream=True)
             logs.append((stdout or stderr or "").strip()[:2000])
             if code != 0:
                 raise DockerControlError(
@@ -1250,7 +1380,12 @@ async def apply_image_updates(
             "docker inspect --format '{{.Config.Image}}' -- " + shlex.quote(name)
         )
         stdout, stderr, code = await _ssh_run(
-            settings, ip, img_cmd, port=port, username=user
+            settings,
+            ip,
+            img_cmd,
+            port=port,
+            username=user,
+            cmd_timeout=min(60.0, pull_timeout),
         )
         image = (stdout or "").strip()
         if code != 0 or not image:
@@ -1258,8 +1393,8 @@ async def apply_image_updates(
                 f"Image für „{name}“ nicht lesbar: {(stderr or stdout or '').strip()[:180]}",
                 status_code=502,
             )
-        stdout, stderr, code = await _ssh_run(
-            settings, ip, f"docker pull -- {shlex.quote(image)}", port=port, username=user
+        stdout, stderr, code = await _run(
+            f"docker pull -- {shlex.quote(image)}", stream=True
         )
         logs.append((stdout or stderr or "").strip()[:2000])
         if code != 0:
@@ -1269,12 +1404,8 @@ async def apply_image_updates(
             )
         pulled.append(image)
         if restart:
-            stdout, stderr, code = await _ssh_run(
-                settings,
-                ip,
-                f"docker restart -- {shlex.quote(name)}",
-                port=port,
-                username=user,
+            stdout, stderr, code = await _run(
+                f"docker restart -- {shlex.quote(name)}", stream=True
             )
             logs.append((stdout or stderr or "").strip()[:800])
             if code != 0:

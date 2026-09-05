@@ -150,6 +150,8 @@ async def run_scan_all_hosts(
     hosts_with_errors = 0
     total_updates = 0
     total_security = 0
+    hosts_with_image_updates = 0
+    total_image_updates = 0
     update_host_details: list[dict[str, Any]] = []
     error_host_names: list[str] = []
 
@@ -182,6 +184,10 @@ async def run_scan_all_hosts(
                     "scan_id": result.get("scan_id"),
                 }
                 SCAN_ALL.results.append(entry)
+                image_count = int(result.get("image_count") or 0)
+                if image_count > 0:
+                    total_image_updates += image_count
+                    hosts_with_image_updates += 1
                 if status == "failed":
                     hosts_with_errors += 1
                     error_host_names.append(str(tname))
@@ -195,6 +201,7 @@ async def run_scan_all_hosts(
                                 "name": str(tname),
                                 "updates": pending,
                                 "security": security,
+                                "images": image_count,
                             }
                         )
             except Exception as exc:
@@ -217,6 +224,8 @@ async def run_scan_all_hosts(
             "hosts_with_errors": hosts_with_errors,
             "total_updates": total_updates,
             "total_security": total_security,
+            "hosts_with_image_updates": hosts_with_image_updates,
+            "total_image_updates": total_image_updates,
             "update_hosts": update_host_details,
             "error_hosts": error_host_names,
             "trigger": trigger,
@@ -227,7 +236,8 @@ async def run_scan_all_hosts(
         SCAN_ALL.message = (
             f"Fertig: {hosts_with_updates} Host(s) mit Updates, "
             f"{hosts_with_errors} Fehler, {total_updates} Pakete "
-            f"({total_security} Security)."
+            f"({total_security} Security), "
+            f"{total_image_updates} Image-Update(s)."
         )
         if on_complete:
             try:

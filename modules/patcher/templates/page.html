@@ -9,7 +9,7 @@
       <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Patch-Management</h1>
       <p class="mt-2 max-w-3xl text-[var(--muted)]">
         Ausstehende Updates auf Proxmox-Guests und manuellen Linux-Hosts scannen, bewerten und mit Bestätigung einspielen.
-        Docker-Images prüfen und nur nach Bestätigung pullen.
+        Docker-Images werden im täglichen Scan und bei „Alle Hosts prüfen“ mitgezählt; Einspielen nur nach Bestätigung.
       </p>
     </div>
     <div class="flex flex-wrap items-center gap-2 shrink-0 pt-1">
@@ -143,6 +143,8 @@
     let head = 'Scan läuft';
     if (kind === 'apply-batch') head = 'Ausgewählte Hosts einspielen';
     else if (kind === 'apply') head = 'Updates werden eingespielt';
+    else if (kind === 'image-scan') head = 'Images werden geprüft';
+    else if (kind === 'image-apply') head = 'Images werden aktualisiert';
     return head + (targetName ? ': ' + targetName : '…');
   }
 
@@ -398,7 +400,7 @@
 
   function setBusy(on) {
     busy = on;
-    document.querySelectorAll('.btn-scan, .btn-apply, .btn-reboot, .host-select, .host-monitor-input').forEach(function (b) {
+    document.querySelectorAll('.btn-scan, .btn-apply, .btn-images, .btn-reboot, .host-select, .host-monitor-input').forEach(function (b) {
       if (on) b.disabled = true;
     });
     const scanAllBtn = document.getElementById('btn-scan-all');
@@ -460,6 +462,7 @@
       foot.textContent =
         (s.hosts_with_updates || 0) + ' Host(s) mit Updates · ' +
         (s.total_updates || 0) + ' Pakete · ' +
+        (s.total_image_updates || 0) + ' Images · ' +
         (s.hosts_with_errors || 0) + ' Fehler';
       foot.style.color = (s.hosts_with_errors ? 'var(--danger, #c44)' : '');
     }
@@ -563,12 +566,15 @@
             'Letzte Gesamtprüfung: ' + (st.finished_at || '') +
             (st.last_summary
               ? ' — ' + (st.last_summary.hosts_with_updates || 0) + ' Host(s) mit Updates'
+                + ((st.last_summary.total_image_updates)
+                  ? ', ' + st.last_summary.total_image_updates + ' Image-Update(s)'
+                  : '')
               : '');
         }
       }
       const jr = await (await fetch(API + '/jobs?active=1')).json();
       const jobs = (jr.jobs || []).filter(function (j) {
-        return !j.done && (j.kind === 'scan' || j.kind === 'apply' || j.kind === 'apply-batch');
+        return !j.done && (j.kind === 'scan' || j.kind === 'apply' || j.kind === 'apply-batch' || j.kind === 'image-scan' || j.kind === 'image-apply');
       });
       if (!jobs.length || busy) return;
       const job = jobs[0];
@@ -604,25 +610,33 @@
     const sec = t.security;
     let statusHtml = '<span class="text-sm text-[var(--muted)]">Noch nicht gescannt</span>';
     const sum = (t.last_scan && t.last_scan.summary) || {};
+    const imgN = Number(t.image_updates) || 0;
+    const imgChip = imgN > 0 ? ' ' + chip(imgN + (imgN === 1 ? ' Image' : ' Images'), 'chip-images') : '';
     if (!monitored) {
-      statusHtml = chip('Nicht überwacht', 'chip-unknown');
+      statusHtml = chip('Nicht überwacht', 'chip-unknown') + imgChip;
     } else if (pending != null) {
       statusHtml =
         chip(pending + ' Updates', pending ? 'chip-unknown' : 'chip-running') +
         (sec ? ' ' + chip(sec + ' Security', 'chip-stopped') : '') +
+        imgChip +
         (t.last_scan && t.last_scan.reboot_required ? ' ' + chip('Reboot', 'chip-stopped') : '') +
         (sum.apt_lock ? ' ' + chip('APT-Sperre', 'chip-unknown') : '') +
         (!sum.apt_lock && sum.index_stale ? ' ' + chip('Cache', 'chip-unknown') : '');
     } else if (t.last_scan_error) {
-      statusHtml = '<span class="text-sm" style="color:var(--danger,#c44)">' + esc(t.last_scan_error) + '</span>';
+      statusHtml = '<span class="text-sm" style="color:var(--danger,#c44)">' + esc(t.last_scan_error) + '</span>' + imgChip;
+    } else {
+      statusHtml = (imgChip ? imgChip : statusHtml);
     }
     const meta = [t.kind, t.ip, t.last_scan && t.last_scan.pm, t.last_scan && t.last_scan.distro]
       .filter(Boolean).map(esc).join(' · ');
     const llm = monitored && t.last_scan && t.last_scan.llm_summary
       ? '<p class="mt-2 text-sm text-[var(--muted)] line-clamp-3">' + esc(t.last_scan.llm_summary) + '</p>'
       : '';
-    const lastAt = t.last_scan && t.last_scan.created_at
-      ? '<p class="mt-1 text-xs text-[var(--muted)]">Letzter Scan: ' + esc(t.last_scan.created_at) + '</p>'
+    const lastBits = [];
+    if (t.last_scan && t.last_scan.created_at) lastBits.push('OS: ' + t.last_scan.created_at);
+    if (t.last_image_scan && t.last_image_scan.created_at) lastBits.push('Images: ' + t.last_image_scan.created_at);
+    const lastAt = lastBits.length
+      ? '<p class="mt-1 text-xs text-[var(--muted)]">Letzter Scan: ' + esc(lastBits.join(' · ')) + '</p>'
       : '';
     const scanNote = sum.note
       ? '<p class="mt-1 text-xs text-[var(--muted)]">' + esc(sum.note) + '</p>'
@@ -700,7 +714,7 @@
             'Nicht überwacht (' + excluded.length + ')' +
           '</summary>' +
           '<p class="mt-1 mb-3 text-sm text-[var(--muted)]">' +
-            'Kein täglicher Scan und nicht in „Alle Hosts prüfen“. „Scannen“ auf der Karte bleibt möglich.' +
+            'Kein täglicher Scan (OS + Images) und nicht in „Alle Hosts prüfen“. „Scannen“ / „Images“ auf der Karte bleiben möglich.' +
           '</p>' +
           '<div class="space-y-3">' +
             excluded.map(renderHostCard).join('') +
@@ -811,14 +825,15 @@
   }
 
   async function runJob(kind, targetId, targetName, startFn) {
-    if (busy) return;
+    if (busy) return null;
     setBusy(true);
     activeTargetId = targetId;
     lastCardJob = null;
     showProgress(kind, targetName, targetId);
+    let done = null;
     try {
       const j = await startFn();
-      if (j) await pollJob(j.job_id);
+      if (j) done = await pollJob(j.job_id);
     } catch (e) {
       finishProgress({ ok: false, error: String(e), phase: 'Fehler', percent: 100, message: String(e) });
     } finally {
@@ -829,6 +844,7 @@
       activeTargetId = null;
       progressScope = 'global';
     }
+    return done;
   }
 
   async function startScan(targetId, targetName) {
@@ -1017,74 +1033,61 @@
     });
   }
 
-  async function scanHostImages(parentId, hostName, btn) {
-    if (!parentId) return;
-    if (btn) btn.disabled = true;
-    try {
-      const r = await fetch('/api/docker/image-updates?parent_id=' + encodeURIComponent(parentId));
-      const data = await r.json().catch(function () { return {}; });
-      if (!r.ok) throw new Error(data.detail || 'Image-Scan fehlgeschlagen');
-      const updates = data.updates || [];
-      const logLines = (data.containers || []).filter(function (c) { return c.error; }).map(function (c) {
-        return (c.stack ? c.stack + '/' : '') + c.name + ' · ' + (c.image || '') + ': ' + c.error;
+  async function scanHostImages(parentId, hostName) {
+    if (!parentId || busy) return;
+    const scanned = await runJob('image-scan', parentId, hostName, async function () {
+      const r = await fetch(API + '/images/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: parentId }),
       });
-      if (!updates.length) {
+      const j = await r.json();
+      if (!r.ok) {
         finishProgress({
-          ok: true,
-          phase: 'Images',
+          ok: false,
+          phase: 'Fehler',
           percent: 100,
-          message: data.message || ('Keine neueren Images auf ' + (hostName || parentId)),
-          log_lines: logLines,
+          message: j.detail || 'Image-Scan fehlgeschlagen',
+          error: j.detail || 'Image-Scan fehlgeschlagen',
         });
-        progressRoot().classList.remove('hidden');
-        return;
+        return null;
       }
-      const lines = updates.map(function (u) {
-        return (u.stack ? u.stack + '/' : '') + u.name + ' · ' + (u.image || '');
-      }).join('\n');
-      if (!confirm(
-        (data.count || updates.length) + ' Image-Update(s) auf ' + (hostName || parentId) + ':\n\n' +
-        lines + '\n\nJetzt pullen und Container/Stack neu starten?'
-      )) return;
-      const apply = await fetch('/api/docker/image-updates/apply', {
+      return j;
+    });
+    if (!scanned || !scanned.ok) return;
+    const updates = (scanned.result && scanned.result.updates) || [];
+    if (!updates.length) return;
+    const lines = updates.map(function (u) {
+      return (u.stack ? u.stack + '/' : '') + u.name + ' · ' + (u.image || '');
+    }).join('\n');
+    if (!confirm(
+      (scanned.result.count || updates.length) + ' Image-Update(s) auf ' + (hostName || parentId) + ':\n\n' +
+      lines + '\n\nJetzt pullen und Container/Stack neu starten?'
+    )) return;
+    await runJob('image-apply', parentId, hostName, async function () {
+      const r = await fetch(API + '/images/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          parent_id: parentId,
-          restart: true,
+          target_id: parentId,
           confirm: true,
+          restart: true,
           names: updates.map(function (u) { return u.name; }),
         }),
       });
-      const out = await apply.json().catch(function () { return {}; });
-      if (!apply.ok) throw new Error(out.detail || 'Pull fehlgeschlagen');
-      finishProgress({
-        ok: true,
-        phase: 'Images',
-        percent: 100,
-        message: out.message || 'Images aktualisiert',
-      });
-      progressRoot().classList.remove('hidden');
-    } catch (e) {
-      const raw = String(e.message || e);
-      const unique = [];
-      raw.split('\n').forEach(function (line) {
-        const t = line.trim();
-        if (t && unique.indexOf(t) < 0) unique.push(t);
-      });
-      const msg = unique.join('\n') || raw;
-      finishProgress({
-        ok: false,
-        phase: 'Images',
-        percent: 100,
-        message: msg,
-        error: msg,
-        log_lines: unique.length > 1 ? unique : [],
-      });
-      progressRoot().classList.remove('hidden');
-    } finally {
-      if (btn) btn.disabled = false;
-    }
+      const j = await r.json();
+      if (!r.ok) {
+        finishProgress({
+          ok: false,
+          phase: 'Fehler',
+          percent: 100,
+          message: j.detail || 'Image-Update fehlgeschlagen',
+          error: j.detail || 'Image-Update fehlgeschlagen',
+        });
+        return null;
+      }
+      return j;
+    });
   }
 
   document.getElementById('detail-close').addEventListener('click', function () {
@@ -1114,7 +1117,7 @@
       return;
     }
     if (t.classList.contains('btn-images')) {
-      scanHostImages(t.dataset.id, t.dataset.name, t);
+      scanHostImages(t.dataset.id, t.dataset.name);
       return;
     }
     if (busy) return;

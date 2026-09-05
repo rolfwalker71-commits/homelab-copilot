@@ -364,6 +364,10 @@ html[data-chrome="desktop"] .choice-opt {
   background: color-mix(in srgb, var(--info) 20%, transparent);
   color: var(--info);
 }
+.chip-images {
+  background: color-mix(in srgb, var(--primary) 28%, transparent);
+  color: var(--primary);
+}
 
 /* Soft tonal row fills by status (Docker + Proxmox detail panels).
    Rail uses status dots instead — see .topo-rail-status-*.

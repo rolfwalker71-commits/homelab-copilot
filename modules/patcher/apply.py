@@ -10,9 +10,14 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from patcher.config import get_patcher_settings
-from patcher.detect import check_reboot_required, detect_host
+from patcher.detect import HostDetect, check_reboot_required, detect_host
 from patcher.sshutil import ssh_run, ssh_run_stream
 from patcher.targets import PatchTarget
+from patcher.ubuntu_eol import (
+    rewrite_ubuntu_sources_cmd,
+    should_rewrite_after_apt_error,
+    ubuntu_eol_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +74,131 @@ def _line_buffered(cmd: str) -> str:
     )
 
 
+async def _maybe_rewrite_ubuntu_eol(
+    target: PatchTarget,
+    detect: HostDetect,
+    *,
+    timeout: float,
+    connect_timeout: float,
+    progress: ProgressFn | None,
+    on_log: LogFn | None,
+) -> bool:
+    reason = ubuntu_eol_reason(
+        distro=detect.distro,
+        version_id=detect.version_id,
+        pretty_name=detect.pretty_name,
+    )
+    if not reason:
+        return False
+    await _emit(progress, "EOL", 20, reason)
+    await _emit_log(on_log, reason)
+    return await _rewrite_ubuntu_sources(
+        target,
+        timeout=timeout,
+        connect_timeout=connect_timeout,
+        on_log=on_log,
+    )
+
+
+async def _rewrite_ubuntu_sources(
+    target: PatchTarget,
+    *,
+    timeout: float,
+    connect_timeout: float,
+    on_log: LogFn | None,
+) -> bool:
+    await _emit_log(
+        on_log,
+        "Schreibe apt-Quellen um: archive.ubuntu.com / security.ubuntu.com "
+        "→ old-releases.ubuntu.com (Backup *.bak-eol)…",
+    )
+    stdout, stderr, code = await ssh_run(
+        target.ip,
+        rewrite_ubuntu_sources_cmd(),
+        timeout=timeout,
+        username=target.ssh_user,
+        port=target.port,
+        connect_timeout=connect_timeout,
+    )
+    blob = ((stdout or "") + ("\n" + stderr if stderr else "")).strip()
+    for line in blob.splitlines():
+        if line.strip():
+            await _emit_log(on_log, line.strip())
+    if code != 0:
+        raise ApplyError(
+            "Umstellen der Paketquellen fehlgeschlagen: "
+            + (stderr or stdout or f"exit {code}")[:600]
+        )
+    rewritten = "EOL_REWRITE=1" in blob
+    if rewritten:
+        await _emit_log(
+            on_log,
+            "Paketquellen umgestellt. apt-get update nutzt jetzt old-releases.",
+        )
+    return rewritten
+
+
+async def _stream_apply_cmd(
+    target: PatchTarget,
+    cmd: str,
+    *,
+    timeout: float,
+    connect_timeout: float,
+    progress: ProgressFn | None,
+    on_log: LogFn | None,
+) -> tuple[str, str, int]:
+    line_n = 0
+    stop_beat = asyncio.Event()
+    started = time.monotonic()
+
+    async def handle_line(line: str) -> None:
+        nonlocal line_n
+        line_n += 1
+        await _emit_log(on_log, line)
+        if line_n == 1 or line_n % 3 == 0:
+            await _emit(
+                progress,
+                "Einspielen",
+                min(82, 28 + min(50, line_n)),
+                line[:200],
+            )
+
+    async def beat() -> None:
+        while not stop_beat.is_set():
+            try:
+                await asyncio.wait_for(stop_beat.wait(), timeout=10.0)
+                return
+            except asyncio.TimeoutError:
+                elapsed = int(time.monotonic() - started)
+                if line_n:
+                    continue
+                await _emit(
+                    progress,
+                    "Einspielen",
+                    min(80, 25 + elapsed // 8),
+                    f"Installation läuft seit {elapsed}s — bitte warten…",
+                )
+
+    beat_task = asyncio.create_task(beat())
+    try:
+        return await ssh_run_stream(
+            target.ip,
+            _line_buffered(cmd),
+            timeout=timeout,
+            username=target.ssh_user,
+            port=target.port,
+            connect_timeout=connect_timeout,
+            on_line=handle_line,
+        )
+    finally:
+        stop_beat.set()
+        beat_task.cancel()
+        try:
+            await beat_task
+        except asyncio.CancelledError:
+            pass
+
+
 async def apply_updates(
     target: PatchTarget,
     *,
@@ -114,6 +244,18 @@ async def apply_updates(
         18,
         f"{detect.pretty_name} · Paketmanager {pm}",
     )
+
+    eol_rewritten = False
+    if pm == "apt":
+        eol_rewritten = await _maybe_rewrite_ubuntu_eol(
+            target,
+            detect,
+            timeout=min(90.0, timeout),
+            connect_timeout=connect_timeout,
+            progress=progress,
+            on_log=on_log,
+        )
+
     await _emit_log(on_log, f"Installiere Updates ({filt}) auf {target.name}…")
     await _emit(
         progress,
@@ -122,63 +264,98 @@ async def apply_updates(
         f"Updates werden installiert ({filt}) — das kann einige Minuten dauern…",
     )
 
-    line_n = 0
-    stop_beat = asyncio.Event()
-    started = time.monotonic()
+    stdout, stderr, code = await _stream_apply_cmd(
+        target,
+        cmd,
+        timeout=timeout,
+        connect_timeout=connect_timeout,
+        progress=progress,
+        on_log=on_log,
+    )
+    log = ((stdout or "") + ("\n" + stderr if stderr else "")).strip()
 
-    async def handle_line(line: str) -> None:
-        nonlocal line_n
-        line_n += 1
-        await _emit_log(on_log, line)
-        if line_n == 1 or line_n % 3 == 0:
+    if (
+        code != 0
+        and pm == "apt"
+        and not eol_rewritten
+        and should_rewrite_after_apt_error(
+            distro=detect.distro,
+            version_id=detect.version_id,
+            pretty_name=detect.pretty_name,
+            apt_output=log,
+        )
+    ):
+        await _emit_log(
+            on_log,
+            "apt-get update deutet auf eine abgelaufene Ubuntu-Version hin — "
+            "stelle Paketquellen auf old-releases.ubuntu.com um und wiederhole…",
+        )
+        eol_rewritten = await _rewrite_ubuntu_sources(
+            target,
+            timeout=min(90.0, timeout),
+            connect_timeout=connect_timeout,
+            on_log=on_log,
+        )
+        if eol_rewritten:
             await _emit(
                 progress,
                 "Einspielen",
-                min(82, 28 + min(50, line_n)),
-                line[:200],
+                28,
+                "Paketquellen umgestellt — wiederhole apt-get update + Upgrade…",
             )
+            stdout, stderr, code = await _stream_apply_cmd(
+                target,
+                cmd,
+                timeout=timeout,
+                connect_timeout=connect_timeout,
+                progress=progress,
+                on_log=on_log,
+            )
+            log = ((stdout or "") + ("\n" + stderr if stderr else "")).strip()
 
-    async def beat() -> None:
-        while not stop_beat.is_set():
-            try:
-                await asyncio.wait_for(stop_beat.wait(), timeout=10.0)
-                return
-            except asyncio.TimeoutError:
-                elapsed = int(time.monotonic() - started)
-                if line_n:
-                    continue
-                await _emit(
-                    progress,
-                    "Einspielen",
-                    min(80, 25 + elapsed // 8),
-                    f"Installation läuft seit {elapsed}s — bitte warten…",
-                )
-
-    beat_task = asyncio.create_task(beat())
-    try:
-        stdout, stderr, code = await ssh_run_stream(
-            target.ip,
-            _line_buffered(cmd),
-            timeout=timeout,
-            username=target.ssh_user,
-            port=target.port,
-            connect_timeout=connect_timeout,
-            on_line=handle_line,
-        )
-    finally:
-        stop_beat.set()
-        beat_task.cancel()
-        try:
-            await beat_task
-        except asyncio.CancelledError:
-            pass
-
-    log = ((stdout or "") + ("\n" + stderr if stderr else "")).strip()
     if code != 0:
         raise ApplyError(
             f"Update fehlgeschlagen (exit {code}): "
             + (stderr or stdout or "")[:800]
         )
+
+    if pm == "apt":
+        await _emit(
+            progress,
+            "Aufräumen",
+            86,
+            "Entferne nicht mehr benötigte Pakete (apt-get autoremove -y)…",
+        )
+        await _emit_log(on_log, "apt-get autoremove -y…")
+        try:
+            ar_out, ar_err, ar_code = await ssh_run(
+                target.ip,
+                (
+                    "export DEBIAN_FRONTEND=noninteractive; "
+                    "apt-get -y autoremove "
+                    "-o DPkg::Lock::Timeout=60"
+                ),
+                timeout=min(600.0, timeout),
+                username=target.ssh_user,
+                port=target.port,
+                connect_timeout=connect_timeout,
+            )
+            ar_blob = ((ar_out or "") + ("\n" + ar_err if ar_err else "")).strip()
+            if ar_blob:
+                log = (log + "\n" + ar_blob).strip()
+            if ar_code != 0:
+                await _emit_log(
+                    on_log,
+                    "autoremove fehlgeschlagen (Updates bleiben gültig): "
+                    + (ar_err or ar_out or f"exit {ar_code}")[:400],
+                )
+            else:
+                await _emit_log(on_log, "Nicht mehr benötigte Pakete entfernt.")
+        except Exception as exc:
+            await _emit_log(
+                on_log,
+                f"autoremove übersprungen: {getattr(exc, 'message', None) or exc}",
+            )
 
     await _emit(
         progress,

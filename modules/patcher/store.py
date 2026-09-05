@@ -97,6 +97,22 @@ CREATE TABLE IF NOT EXISTS target_prefs (
     updated_at TEXT,
     updated_at_iso TEXT
 );
+
+CREATE TABLE IF NOT EXISTS image_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id TEXT NOT NULL,
+    target_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    update_count INTEGER NOT NULL DEFAULT 0,
+    summary_json TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    created_at_iso TEXT NOT NULL,
+    finished_at TEXT,
+    finished_at_iso TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_patcher_image_scans_target
+    ON image_scans(target_id, created_at_iso DESC);
 """
 
 
@@ -571,3 +587,80 @@ class PatcherStore:
         db = self._require()
         await db.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
         await db.commit()
+
+    # --- image scans ---
+
+    async def create_image_scan(
+        self,
+        *,
+        target_id: str,
+        target_name: str,
+        status: str = "running",
+    ) -> int:
+        db = self._require()
+        stamp, stamp_iso = self._stamp()
+        cur = await db.execute(
+            """
+            INSERT INTO image_scans (
+                target_id, target_name, status, created_at, created_at_iso
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (target_id, target_name, status, stamp, stamp_iso),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+
+    async def finish_image_scan(
+        self,
+        scan_id: int,
+        *,
+        status: str,
+        update_count: int = 0,
+        summary: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        db = self._require()
+        stamp, stamp_iso = self._stamp()
+        await db.execute(
+            """
+            UPDATE image_scans SET status=?, update_count=?, summary_json=?,
+                error_message=?, finished_at=?, finished_at_iso=?
+            WHERE id=?
+            """,
+            (
+                status,
+                int(update_count),
+                json.dumps(summary or {}, ensure_ascii=False),
+                error_message,
+                stamp,
+                stamp_iso,
+                scan_id,
+            ),
+        )
+        await db.commit()
+
+    async def latest_image_scan_for_target(
+        self, target_id: str, *, success_only: bool = False
+    ) -> dict[str, Any] | None:
+        db = self._require()
+        sql = "SELECT * FROM image_scans WHERE target_id = ?"
+        if success_only:
+            sql += " AND status = 'success'"
+        sql += " ORDER BY created_at_iso DESC LIMIT 1"
+        async with db.execute(sql, (target_id,)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return self._image_scan_dict(row)
+
+    def _image_scan_dict(self, row: aiosqlite.Row) -> dict[str, Any]:
+        d = dict(row)
+        raw = d.get("summary_json")
+        if isinstance(raw, str) and raw:
+            try:
+                d["summary"] = json.loads(raw)
+            except json.JSONDecodeError:
+                d["summary"] = {}
+        else:
+            d["summary"] = {}
+        return d

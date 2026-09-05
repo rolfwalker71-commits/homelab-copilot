@@ -14,6 +14,8 @@ class HostDetect:
     pm: str  # apt | dnf | yum | apk
     distro: str
     pretty_name: str
+    version_id: str = ""
+    version_codename: str = ""
     raw_os_release: str = ""
 
 
@@ -33,10 +35,12 @@ if [ -f /etc/os-release ]; then
   echo "ID=${ID:-}"
   echo "PRETTY_NAME=${PRETTY_NAME:-}"
   echo "VERSION_ID=${VERSION_ID:-}"
+  echo "VERSION_CODENAME=${VERSION_CODENAME:-}"
 else
   echo "ID="
   echo "PRETTY_NAME="
   echo "VERSION_ID="
+  echo "VERSION_CODENAME="
 fi
 """
     stdout, stderr, code = await ssh_run(
@@ -64,7 +68,16 @@ fi
         )
     distro = fields.get("ID") or "linux"
     pretty = fields.get("PRETTY_NAME") or distro
-    return HostDetect(pm=pm, distro=distro, pretty_name=pretty, raw_os_release=stdout)
+    version_id = fields.get("VERSION_ID") or ""
+    codename = fields.get("VERSION_CODENAME") or ""
+    return HostDetect(
+        pm=pm,
+        distro=distro,
+        pretty_name=pretty,
+        version_id=version_id,
+        version_codename=codename,
+        raw_os_release=stdout,
+    )
 
 
 _REBOOT_CHECK = (

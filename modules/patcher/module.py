@@ -19,7 +19,12 @@ if str(_MODULES_ROOT) not in sys.path:
     sys.path.insert(0, str(_MODULES_ROOT))
 
 from app.config import get_settings
-from app.core.docker_control import DockerControlError, ssh_key_present
+from app.core.docker_control import (
+    DockerControlError,
+    apply_image_updates,
+    scan_image_updates,
+    ssh_key_present,
+)
 from app.core.locale import format_de, now_berlin
 from app.core.topology import TopologyStore
 
@@ -141,6 +146,19 @@ class MonitorPayload(BaseModel):
     monitored: bool
 
 
+class ImageScanPayload(BaseModel):
+    target_id: str = Field(..., min_length=1)
+    wait: bool = False
+
+
+class ImageApplyPayload(BaseModel):
+    target_id: str = Field(..., min_length=1)
+    confirm: bool = False
+    names: list[str] = Field(default_factory=list)
+    restart: bool = True
+    wait: bool = False
+
+
 # --- helpers ---
 
 
@@ -170,8 +188,217 @@ async def _enrich_targets(store: PatcherStore, snapshot) -> list[dict[str, Any]]
             d["security"] = None
             if latest:
                 d["last_scan_error"] = latest.get("error_message")
+        img = await store.latest_image_scan_for_target(t.id, success_only=True)
+        if img and img.get("status") == "success":
+            d["image_updates"] = int(img.get("update_count") or 0)
+            d["last_image_scan"] = {
+                "id": img["id"],
+                "created_at": img.get("created_at"),
+                "count": int(img.get("update_count") or 0),
+                "summary": img.get("summary") or {},
+            }
+        else:
+            d["image_updates"] = None
+            d["last_image_scan"] = None
         out.append(d)
     return out
+
+
+def _compact_image_summary(result: dict[str, Any]) -> dict[str, Any]:
+    updates = []
+    for u in result.get("updates") or []:
+        if not isinstance(u, dict):
+            continue
+        updates.append(
+            {
+                "name": u.get("name"),
+                "image": u.get("image"),
+                "stack": u.get("stack") or "",
+            }
+        )
+    return {
+        "count": int(result.get("count") or 0),
+        "message": result.get("message"),
+        "updates": updates,
+    }
+
+
+async def _scan_and_persist_images(target, snapshot) -> dict[str, Any]:
+    """Scan Docker images on a host and persist the last result (daily / card)."""
+    store = _store
+    if store is None:
+        return {"ok": False, "count": 0, "error": "Store nicht bereit"}
+    scan_id = await store.create_image_scan(
+        target_id=target.id, target_name=target.name, status="running"
+    )
+    try:
+        result = await scan_image_updates(
+            get_settings(),
+            parent_id=target.id,
+            snapshot=snapshot,
+        )
+        count = int(result.get("count") or 0)
+        await store.finish_image_scan(
+            scan_id,
+            status="success",
+            update_count=count,
+            summary=_compact_image_summary(result),
+        )
+        return result
+    except (DockerControlError, Exception) as exc:
+        msg = getattr(exc, "message", None) or str(exc)
+        logger.info("image scan %s: %s", getattr(target, "id", "?"), msg)
+        try:
+            await store.finish_image_scan(
+                scan_id, status="failed", error_message=msg
+            )
+        except Exception:
+            logger.exception("finish_image_scan failed")
+        return {"ok": False, "count": 0, "error": msg, "updates": []}
+
+
+async def _run_image_scan_job(
+    job_id: str,
+    *,
+    target_id: str,
+    snapshot,
+) -> None:
+    store = _store
+    if store is None:
+        JOBS.finish(job_id, status="failed", error="Store nicht bereit")
+        return
+    try:
+        target = await resolve_target(store, snapshot, target_id)
+        JOBS.set_progress(
+            job_id,
+            phase="Images",
+            percent=15,
+            message=f"Prüfe Docker-Images auf {target.name}…",
+        )
+        JOBS.append_log(job_id, f"Image-Scan auf {target.name} ({target.ip})")
+        result = await _scan_and_persist_images(target, snapshot)
+        if result.get("error") and not result.get("ok", True):
+            JOBS.finish(
+                job_id,
+                status="failed",
+                error=str(result.get("error")),
+                result=result,
+            )
+            return
+        count = int(result.get("count") or 0)
+        for u in result.get("updates") or []:
+            if isinstance(u, dict):
+                JOBS.append_log(
+                    job_id,
+                    f"{(u.get('stack') + '/') if u.get('stack') else ''}"
+                    f"{u.get('name')} · {u.get('image') or ''}",
+                )
+        for c in result.get("containers") or []:
+            if isinstance(c, dict) and c.get("error"):
+                JOBS.append_log(
+                    job_id,
+                    f"{c.get('name')}: {c.get('error')}",
+                )
+        JOBS.finish(
+            job_id,
+            status="success",
+            result={
+                "count": count,
+                "updates": result.get("updates") or [],
+                "message": result.get("message"),
+            },
+            message=result.get("message") or f"{count} Image-Update(s)",
+            phase="Fertig",
+        )
+    except (DockerControlError, RuntimeError) as exc:
+        msg = getattr(exc, "message", None) or str(exc)
+        JOBS.finish(job_id, status="failed", error=msg)
+    except Exception as exc:
+        logger.exception("image-scan job failed")
+        JOBS.finish(job_id, status="failed", error=str(exc))
+
+
+async def _run_image_apply_job(
+    job_id: str,
+    *,
+    target_id: str,
+    snapshot,
+    names: list[str],
+    restart: bool,
+) -> None:
+    store = _store
+    if store is None:
+        JOBS.finish(job_id, status="failed", error="Store nicht bereit")
+        return
+    try:
+        target = await resolve_target(store, snapshot, target_id)
+        JOBS.set_progress(
+            job_id,
+            phase="Pull",
+            percent=10,
+            message=f"Hole Images auf {target.name}…",
+        )
+        JOBS.append_log(
+            job_id,
+            f"Image-Update auf {target.name}: {len(names)} Container, "
+            f"{'mit Neustart' if restart else 'ohne Neustart'}",
+        )
+
+        async def on_progress(phase: str, percent: int, message: str) -> None:
+            JOBS.set_progress(job_id, phase=phase, percent=percent, message=message)
+
+        line_n = 0
+
+        async def on_line(line: str) -> None:
+            nonlocal line_n
+            line_n += 1
+            JOBS.append_log(job_id, line)
+            if line_n == 1 or line_n % 4 == 0:
+                await on_progress(
+                    "Pull",
+                    min(85, 15 + min(60, line_n)),
+                    line[:200],
+                )
+
+        result = await apply_image_updates(
+            get_settings(),
+            parent_id=target.id,
+            snapshot=snapshot,
+            names=names,
+            restart=restart,
+            on_line=on_line,
+        )
+        JOBS.set_progress(
+            job_id, phase="Prüfen", percent=90, message="Zähle verbleibende Image-Updates…"
+        )
+        refreshed = await _scan_and_persist_images(target, snapshot)
+        if refreshed.get("error") and store is not None:
+            sid = await store.create_image_scan(
+                target_id=target.id, target_name=target.name
+            )
+            await store.finish_image_scan(
+                sid,
+                status="success",
+                update_count=0,
+                summary={
+                    "count": 0,
+                    "message": result.get("message") or "Images aktualisiert.",
+                    "updates": [],
+                },
+            )
+        JOBS.finish(
+            job_id,
+            status="success",
+            result=result,
+            message=result.get("message") or "Images aktualisiert.",
+            phase="Fertig",
+        )
+    except (DockerControlError, RuntimeError) as exc:
+        msg = getattr(exc, "message", None) or str(exc)
+        JOBS.finish(job_id, status="failed", error=msg)
+    except Exception as exc:
+        logger.exception("image-apply job failed")
+        JOBS.finish(job_id, status="failed", error=str(exc))
 
 
 async def _run_scan_job(
@@ -406,9 +633,13 @@ async def _run_scan_all(
         )
 
     async def scan_one(target):
-        return await _scan_one_target_sync(
+        result = await _scan_one_target_sync(
             target, snapshot=snapshot, do_summarize=do_summarize
         )
+        SCAN_ALL.message = f"Prüfe Images auf {target.name}…"
+        img = await _scan_and_persist_images(target, snapshot)
+        result["image_count"] = int((img or {}).get("count") or 0)
+        return result
 
     async def on_complete(summary: dict[str, Any]) -> None:
         try:
@@ -948,6 +1179,87 @@ async def api_apply_batch(
     return job.to_dict()
 
 
+@router.post("/images/scan")
+async def api_image_scan(
+    payload: ImageScanPayload,
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, Any]:
+    store = _get_store()
+    snap = _snapshot(request)
+    try:
+        target = await resolve_target(store, snap, payload.target_id)
+    except DockerControlError as exc:
+        raise _http_docker(exc) from exc
+
+    job = JOBS.create(kind="image-scan", target_id=target.id)
+    if payload.wait:
+        await _run_image_scan_job(job.id, target_id=target.id, snapshot=snap)
+        done = JOBS.get(job.id)
+        return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
+
+    background.add_task(
+        _run_image_scan_job, job.id, target_id=target.id, snapshot=snap
+    )
+    return job.to_dict()
+
+
+@router.post("/images/apply")
+async def api_image_apply(
+    payload: ImageApplyPayload,
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, Any]:
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Image-Update erfordert confirm=true.",
+        )
+    store = _get_store()
+    snap = _snapshot(request)
+    try:
+        target = await resolve_target(store, snap, payload.target_id)
+    except DockerControlError as exc:
+        raise _http_docker(exc) from exc
+
+    names = [n.strip() for n in payload.names if (n or "").strip()]
+    if not names:
+        latest = await store.latest_image_scan_for_target(target.id)
+        raw = ((latest or {}).get("summary") or {}).get("updates") or []
+        names = [
+            str(u.get("name"))
+            for u in raw
+            if isinstance(u, dict) and u.get("name")
+        ]
+    if not names:
+        raise HTTPException(
+            status_code=400,
+            detail="Keine Image-Updates zum Einspielen (bitte zuerst Images prüfen).",
+        )
+
+    job = JOBS.create(kind="image-apply", target_id=target.id)
+    if payload.wait:
+        await _run_image_apply_job(
+            job.id,
+            target_id=target.id,
+            snapshot=snap,
+            names=names,
+            restart=payload.restart,
+        )
+        done = JOBS.get(job.id)
+        return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
+
+    background.add_task(
+        _run_image_apply_job,
+        job.id,
+        target_id=target.id,
+        snapshot=snap,
+        names=names,
+        restart=payload.restart,
+    )
+    return job.to_dict()
+
+
 @router.post("/reboot")
 async def api_reboot(payload: RebootPayload, request: Request) -> dict[str, Any]:
     store = _get_store()
@@ -1193,7 +1505,7 @@ class PatcherModule:
             app.state.patcher_daily_task = _daily_task
 
         logger.info(
-            "patcher ready — DB %s · daily=%s hour=%s cron=%r",
+            "patcher ready — DB %s · daily=%s hour=%s cron=%r (OS + Images)",
             ps.db_path,
             ps.patcher_daily_enabled,
             ps.patcher_daily_hour,
