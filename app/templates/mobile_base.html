@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="de" class="mobile-app" data-chrome="android" data-theme="dark" data-theme-pref="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#15221f" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="description" content="Homelab Operations Copilot — Begleit-App fürs Telefon." />
+  <meta name="application-name" content="HomelabOps" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="HomelabOps" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="format-detection" content="telephone=no" />
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml" />
+  <link rel="icon" href="/static/icons/icon-192.png" type="image/png" sizes="192x192" />
+  <link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+  <title>{% block title %}{{ section_title }} — {{ app_name }}{% endblock %}</title>
+  <script>
+    /* /mobile theme: hlops-mobile-theme, else inherit hlops-theme, else dark.
+       Never writes hlops-theme — desktop preference stays intact. Chrome is always android. */
+    (function () {
+      var root = document.documentElement;
+      root.dataset.chrome = 'android';
+      var mobilePref = localStorage.getItem('hlops-mobile-theme');
+      var deskPref = localStorage.getItem('hlops-theme');
+      var themePref = 'dark';
+      if (mobilePref === 'light' || mobilePref === 'dark' || mobilePref === 'system') themePref = mobilePref;
+      else if (deskPref === 'light' || deskPref === 'dark' || deskPref === 'system') themePref = deskPref;
+      var theme = themePref === 'system'
+        ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        : themePref;
+      root.dataset.theme = theme;
+      root.dataset.themePref = themePref;
+      root.style.colorScheme = theme;
+      var colors = { dark: '#15221f', light: '#d4ebe5' };
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', colors[theme] || colors.dark);
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,400;8..144,500;8..144,600;8..144,700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: 'var(--primary)',
+            surface: 'var(--surface-container)',
+            card: 'var(--card)',
+            muted: 'var(--on-surface-variant)',
+          },
+          fontFamily: {
+            sans: ['var(--font)'],
+            display: ['var(--font-display)'],
+          },
+          borderRadius: {
+            chrome: 'var(--radius)',
+          },
+        }
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body class="mobile-app antialiased" data-mobile-section="{{ section }}">
+  {% from "_icons.html" import ico %}
+  <a href="#m-main" class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-[var(--primary)] focus:px-3 focus:py-2 focus:text-[var(--on-primary)]">Zum Inhalt</a>
+
+  <header class="m-top">
+    <div class="m-top-row">
+      <p class="m-brand">Homelab<span>Ops</span></p>
+      <div class="m-top-actions">
+        <button type="button" id="m-refresh" class="m-icon-btn" title="Aktualisieren" aria-label="Aktualisieren">
+          {{ ico('refresh', 20) }}
+        </button>
+        <a href="/mobile/mehr" class="m-icon-btn{% if section == 'mehr' %} is-active{% endif %}" title="Mehr" aria-label="Mehr">
+          {{ ico('more', 20) }}
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main id="m-main" class="m-main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <p id="m-toast" class="m-toast" hidden role="status"></p>
+
+  <div id="m-sheet" class="m-sheet" hidden>
+    <button type="button" class="m-sheet-backdrop" id="m-sheet-backdrop" aria-label="Schließen"></button>
+    <div class="m-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="m-sheet-title">
+      <div class="m-sheet-handle" aria-hidden="true"></div>
+      <div id="m-sheet-body"></div>
+    </div>
+  </div>
+
+  <nav class="nav-android" aria-label="Begleit-App">
+    <a href="/mobile" class="{% if section == 'lage' %}active{% endif %}">
+      <span class="nav-icon" aria-hidden="true">{{ ico('health', 22) }}</span>
+      Lage
+    </a>
+    <a href="/mobile/hosts" class="{% if section == 'hosts' %}active{% endif %}">
+      <span class="nav-icon" aria-hidden="true">{{ ico('host', 22) }}</span>
+      Hosts
+    </a>
+    <a href="/mobile/hinweise" class="{% if section == 'hinweise' %}active{% endif %}">
+      <span class="nav-icon" aria-hidden="true">{{ ico('bell', 22) }}</span>
+      Hinweise
+    </a>
+    <a href="/mobile/sichern" class="{% if section == 'sichern' %}active{% endif %}">
+      <span class="nav-icon" aria-hidden="true">{{ ico('backup', 22) }}</span>
+      Sichern
+    </a>
+  </nav>
+
+  <script src="/static/js/chrome.js" defer></script>
+  <script src="/static/js/mobile.js" defer></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((err) => {
+          console.warn('SW registration failed', err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>

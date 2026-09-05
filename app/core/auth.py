@@ -163,7 +163,12 @@ def wants_html(request_headers: dict[str, str] | MutableHeaders, path: str) -> b
     if "text/html" in accept:
         return True
     # Navigations and bare page paths without Accept
-    if path == "/" or path.startswith("/modules/") or path.startswith("/setup"):
+    if (
+        path == "/"
+        or path.startswith("/modules/")
+        or path.startswith("/setup")
+        or path.startswith("/mobile")
+    ):
         return True
     return False
 

@@ -50,6 +50,12 @@
       "short_name": "Setup",
       "url": "/setup",
       "icons": [{ "src": "/static/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Mobil",
+      "short_name": "Mobil",
+      "url": "/mobile",
+      "icons": [{ "src": "/static/icons/icon-192.png", "sizes": "192x192" }]
     }
   ]
 }

@@ -23,3 +23,21 @@ Docker wird **nicht** mehr in der Übersicht aufgeklappt. Stacks sind Karten (Ti
 ### Umsetzung
 
 Die Live-UI folgt diesem Muster (`topo-shell`: Rail + Detail). Feinschliff (Status-Dots, Filter über Stacks) kann schrittweise nachziehen.
+
+## `mobile/` — Begleit-App `/mobile`
+
+Phone-first (≈390×844), Material You 3 Expressive, Homelab-Teal + Ochre. Default-Look ist **Dunkel**.
+
+| Datei | Screen |
+|--------|--------|
+| `01-lage-dark.png` / `01-lage-light.png` | Lage (Zähler) |
+| `02-hosts.png` | Host-Liste |
+| `03-host-sheet.png` | Host-Sheet (Power, Updates, Desktop) |
+| `04-hinweise.png` | Nur Störungen |
+| `05-sichern.png` | Letzter Lauf + Backup starten |
+| `06-confirm-backup.png` | Confirm Backup |
+| `07-confirm-patch.png` | Confirm Einspielen |
+| `08-confirm-power.png` | Confirm Guest-Power |
+| `09-mehr.png` | Theme, Desktop, Logout |
+
+Nicht im Scope der Begleit-App: Release-Upgrade, Wipe, Browse, Planner, Terminal, Inventar/Doku, volle Topologie-Rail.

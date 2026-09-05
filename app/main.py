@@ -168,6 +168,39 @@ def create_app() -> FastAPI:
     async def auth_redirect() -> RedirectResponse:
         return RedirectResponse(url="/auth/login", status_code=302)
 
+    def _mobile_page(request: Request, section: str, title: str) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request,
+            "mobile.html",
+            {
+                "app_name": settings.app_name,
+                "app_version": settings.app_version,
+                "now": format_de(now_berlin()),
+                "section": section,
+                "section_title": title,
+            },
+        )
+
+    @app.get("/mobile", response_class=HTMLResponse)
+    async def mobile_lage(request: Request) -> HTMLResponse:
+        return _mobile_page(request, "lage", "Lage")
+
+    @app.get("/mobile/hosts", response_class=HTMLResponse)
+    async def mobile_hosts(request: Request) -> HTMLResponse:
+        return _mobile_page(request, "hosts", "Hosts")
+
+    @app.get("/mobile/hinweise", response_class=HTMLResponse)
+    async def mobile_hinweise(request: Request) -> HTMLResponse:
+        return _mobile_page(request, "hinweise", "Hinweise")
+
+    @app.get("/mobile/sichern", response_class=HTMLResponse)
+    async def mobile_sichern(request: Request) -> HTMLResponse:
+        return _mobile_page(request, "sichern", "Sichern")
+
+    @app.get("/mobile/mehr", response_class=HTMLResponse)
+    async def mobile_mehr(request: Request) -> HTMLResponse:
+        return _mobile_page(request, "mehr", "Mehr")
+
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> HTMLResponse:
         store: TopologyStore = request.app.state.topology_store

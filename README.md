@@ -85,6 +85,8 @@ Alternativ: Setup-Assistent unter `/setup` (Laufzeit; für Persistenz Env-Vars s
 - **Desktop (lg+):** Fluent 2 — Mica-Header, kompakter Radius, Accent-Underline-Nav (`#60cdff` / `#005fb8`)
 - Chrome-Auto: `document.documentElement.dataset.chrome` (`android` | `desktop`); Override via `localStorage.hlops-chrome`
 - Darstellung: `data-theme` (`light` | `dark`); Wahl via `localStorage.hlops-theme` (`system` | `light` | `dark`)
+- **Begleit-App `/mobile`:** phone-first (Lage, Hosts, Hinweise, Sichern). Theme: `hlops-mobile-theme` — wenn gesetzt, gilt sie; sonst erbt `/mobile` `hlops-theme`; sonst **Dunkel**. `/mobile` schreibt nie `hlops-theme` (Desktop-Präferenz bleibt).
+- PWA `start_url` bleibt `/` (Desktop). Shortcut „Mobil“ öffnet `/mobile`.
 - Installierbar (Chrome/Edge/Android; iOS: Teilen → „Zum Home-Bildschirm“)
 - Offline-Fallback unter `/offline`
 

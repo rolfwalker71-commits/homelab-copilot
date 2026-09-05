@@ -2515,6 +2515,10 @@
       initialNode = sessionStorage.getItem('topoSelectedNode');
       initialGuest = sessionStorage.getItem('topoSelectedGuest');
     } catch (_) {}
+    try {
+      const qGuest = new URLSearchParams(location.search).get('guest');
+      if (qGuest) initialGuest = qGuest;
+    } catch (_) {}
     const nodeExists = initialNode && Array.from(document.querySelectorAll('[data-node-panel]'))
       .some((p) => p.getAttribute('data-node-panel') === initialNode);
     const guestExists = initialGuest && Array.from(document.querySelectorAll('[data-guest-panel]'))

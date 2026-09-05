@@ -1,0 +1,62 @@
+{% extends "mobile_base.html" %}
+{% from "_icons.html" import ico %}
+
+{% block content %}
+{% if section == 'lage' %}
+<section class="m-page animate-in" data-page="lage">
+  <h1 class="m-title">Lage</h1>
+  <p id="m-lage-stamp" class="m-sub">Lade Übersicht…</p>
+  <div id="m-lage-grid" class="m-stat-grid" aria-live="polite"></div>
+  <div id="m-lage-pills" class="m-pill-row"></div>
+</section>
+
+{% elif section == 'hosts' %}
+<section class="m-page animate-in" data-page="hosts">
+  <h1 class="m-title">Hosts</h1>
+  <p id="m-hosts-stamp" class="m-sub">Lade Systeme…</p>
+  <div id="m-hosts-list" class="m-list"></div>
+</section>
+
+{% elif section == 'hinweise' %}
+<section class="m-page animate-in" data-page="hinweise">
+  <h1 class="m-title">Hinweise</h1>
+  <p class="m-sub">Nur Störungen und Push-würdige Ereignisse.</p>
+  <div id="m-hinweise-list" class="m-list"></div>
+</section>
+
+{% elif section == 'sichern' %}
+<section class="m-page animate-in" data-page="sichern">
+  <h1 class="m-title">Sichern</h1>
+  <p class="m-sub">Letzter Lauf pro Stack. Backup starten mit Bestätigung.</p>
+  <div id="m-sichern-list" class="m-list"></div>
+</section>
+
+{% elif section == 'mehr' %}
+<section class="m-page animate-in" data-page="mehr">
+  <h1 class="m-title">Mehr</h1>
+  <p class="m-sub">Begleit-App · /mobile</p>
+
+  <article class="m-card">
+    <h2 class="m-card-title">Darstellung</h2>
+    <p class="m-card-meta">Standard: Dunkel. Schreibt nur <code>hlops-mobile-theme</code>, nicht das Desktop-Theme.</p>
+    <div class="m-seg" role="radiogroup" aria-label="Darstellung">
+      <button type="button" role="radio" data-theme-set="light">{{ ico('sun', 16) }} Hell</button>
+      <button type="button" role="radio" data-theme-set="dark">{{ ico('moon', 16) }} Dunkel</button>
+      <button type="button" role="radio" data-theme-set="system">{{ ico('system', 16) }} System</button>
+    </div>
+  </article>
+
+  <a class="m-card m-card-link" href="/">
+    <span class="m-card-title">Desktop öffnen</span>
+    <span class="m-card-meta">Volle Topologie, Terminal, Inventar</span>
+  </a>
+
+  <button type="button" id="m-logout" class="m-card m-card-btn m-card-danger">
+    <span class="m-card-title">Abmelden</span>
+    <span class="m-card-meta">TOTP-Sitzung beenden</span>
+  </button>
+
+  <p class="m-footnote">{{ app_name }} · v{{ app_version }}</p>
+</section>
+{% endif %}
+{% endblock %}

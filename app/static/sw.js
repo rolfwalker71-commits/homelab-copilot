@@ -2,7 +2,7 @@
  * Cache-first for static assets; network-first for HTML/API with offline fallback.
  * Web Push: show notifications for patch findings etc.
  */
-const CACHE_VERSION = "hlops-v26";
+const CACHE_VERSION = "hlops-v27";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const OFFLINE_URL = "/offline";
 
@@ -10,6 +10,7 @@ const PRECACHE = [
   OFFLINE_URL,
   "/static/css/app.css",
   "/static/js/chrome.js",
+  "/static/js/mobile.js",
   "/static/manifest.webmanifest",
   "/static/icons/icon-192.png",
   "/static/icons/icon-512.png",

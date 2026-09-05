@@ -2,32 +2,57 @@
  * Dual chrome + appearance theme.
  * Chrome: localStorage `hlops-chrome` = auto | android | desktop | ios
  * Theme:  localStorage `hlops-theme`  = system | light | dark
+ * Mobile companion (`/mobile`): localStorage `hlops-mobile-theme`.
+ *   1) hlops-mobile-theme if set
+ *   2) else inherit hlops-theme (read-only, never overwritten from /mobile)
+ *   3) else dark
  * data-theme is always resolved light|dark; System follows prefers-color-scheme.
  */
 (function () {
   const CHROME_KEY = "hlops-chrome";
   const THEME_KEY = "hlops-theme";
+  const MOBILE_THEME_KEY = "hlops-mobile-theme";
   const MQ_LG = window.matchMedia("(min-width: 1024px)");
   const MQ_LIGHT = window.matchMedia("(prefers-color-scheme: light)");
   const THEME_LABELS = { light: "Hell", dark: "Dunkel", system: "System" };
+  const isMobileApp = () => location.pathname.startsWith("/mobile");
   const THEME_COLORS = {
     dark: { android: "#15221f", desktop: "#161c1b", ios: "#15221f" },
     light: { android: "#d4ebe5", desktop: "#e8eeec", ios: "#d4ebe5" },
   };
 
   function resolveChrome(pref) {
+    if (isMobileApp()) return "android";
     const p = pref || localStorage.getItem(CHROME_KEY) || "auto";
     if (p === "android" || p === "desktop" || p === "ios") return p;
     return MQ_LG.matches ? "desktop" : "android";
   }
 
-  function normalizeThemePref(pref) {
+  function normalizeThemePref(pref, fallback) {
     if (pref === "light" || pref === "dark" || pref === "system") return pref;
-    return "system";
+    return fallback || "system";
+  }
+
+  function readThemePref() {
+    if (isMobileApp()) {
+      const mobile = localStorage.getItem(MOBILE_THEME_KEY);
+      if (mobile === "light" || mobile === "dark" || mobile === "system") return mobile;
+      const desk = localStorage.getItem(THEME_KEY);
+      if (desk === "light" || desk === "dark" || desk === "system") return desk;
+      return "dark";
+    }
+    return normalizeThemePref(localStorage.getItem(THEME_KEY), "system");
+  }
+
+  function persistThemePref(pref) {
+    const n = normalizeThemePref(pref, isMobileApp() ? "dark" : "system");
+    if (isMobileApp()) localStorage.setItem(MOBILE_THEME_KEY, n);
+    else localStorage.setItem(THEME_KEY, n);
+    return n;
   }
 
   function resolveTheme(pref) {
-    const p = normalizeThemePref(pref || localStorage.getItem(THEME_KEY) || "system");
+    const p = normalizeThemePref(pref || readThemePref(), isMobileApp() ? "dark" : "system");
     if (p === "light" || p === "dark") return p;
     return MQ_LIGHT.matches ? "light" : "dark";
   }
@@ -61,7 +86,7 @@
 
   function apply() {
     const chromePref = localStorage.getItem(CHROME_KEY) || "auto";
-    const themePref = normalizeThemePref(localStorage.getItem(THEME_KEY) || "system");
+    const themePref = readThemePref();
     const chrome = resolveChrome(chromePref);
     const theme = resolveTheme(themePref);
     const root = document.documentElement;
@@ -87,13 +112,13 @@
     if ((localStorage.getItem(CHROME_KEY) || "auto") === "auto") apply();
   });
   MQ_LIGHT.addEventListener("change", () => {
-    if (normalizeThemePref(localStorage.getItem(THEME_KEY) || "system") === "system") apply();
+    if (readThemePref() === "system") apply();
   });
 
   document.addEventListener("click", (e) => {
     const setBtn = e.target.closest("[data-theme-set]");
     if (setBtn) {
-      localStorage.setItem(THEME_KEY, normalizeThemePref(setBtn.getAttribute("data-theme-set")));
+      persistThemePref(setBtn.getAttribute("data-theme-set"));
       apply();
       closeThemeMenu();
       return;
@@ -124,10 +149,10 @@
   };
 
   window.HomelabTheme = {
-    getPref: () => normalizeThemePref(localStorage.getItem(THEME_KEY) || "system"),
+    getPref: () => readThemePref(),
     get: () => document.documentElement.dataset.theme,
     set(pref) {
-      localStorage.setItem(THEME_KEY, normalizeThemePref(pref));
+      persistThemePref(pref);
       apply();
     },
     apply,
