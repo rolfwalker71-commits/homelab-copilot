@@ -12,6 +12,7 @@ from app.core.docker_control import DockerControlError
 from patcher.config import get_patcher_settings
 from patcher.detect import HostDetect, check_reboot_required, detect_host
 from patcher.priority import classify_package, summarize_packages
+from patcher.release import suggest_release_upgrade, suggestion_to_summary
 from patcher.sshutil import ssh_run
 from patcher.targets import PatchTarget
 
@@ -583,7 +584,20 @@ async def scan_target(
     summary["distro"] = detect.pretty_name
     summary["pm"] = pm
     summary["reboot_required"] = reboot
+    summary["os_version"] = detect.version_id
+    summary["os_codename"] = detect.version_codename
+    summary["virt"] = detect.virt
+    summary["container"] = bool(detect.container)
     summary.update(extras)
+
+    suggestion = suggest_release_upgrade(
+        distro=detect.distro,
+        version_id=detect.version_id,
+        pretty_name=detect.pretty_name,
+        codename=detect.version_codename,
+    )
+    release_upgrade = suggestion_to_summary(suggestion)
+    summary["release_upgrade"] = release_upgrade
 
     note = extras.get("note")
     done_msg = (
@@ -591,6 +605,8 @@ async def scan_target(
         f"({summary.get('security', 0)} Security)"
         + (" — Reboot empfohlen" if reboot else "")
     )
+    if release_upgrade and release_upgrade.get("headline"):
+        done_msg = f"{done_msg} — {release_upgrade['headline']}"
     if note:
         done_msg = f"{done_msg} — {note}"
 
@@ -605,7 +621,12 @@ async def scan_target(
         "pm": pm,
         "distro": detect.pretty_name,
         "distro_id": detect.distro,
+        "version_id": detect.version_id,
+        "version_codename": detect.version_codename,
+        "virt": detect.virt,
+        "container": bool(detect.container),
         "packages": packages,
         "summary": summary,
         "reboot_required": reboot,
+        "release_upgrade": release_upgrade,
     }

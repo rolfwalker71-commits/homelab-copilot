@@ -72,7 +72,7 @@
               '<div class="flex flex-wrap justify-between gap-2">' +
                 '<div><strong>' + esc(a.target_name || a.target_id) + '</strong>' +
                 '<p class="text-xs text-[var(--muted)]">' + esc(a.created_at) +
-                ' · ' + esc(a.package_filter) +
+                ' · ' + esc(a.package_filter === 'release-upgrade' ? 'Release-Upgrade' : a.package_filter) +
                 (a.reboot_required ? ' · Reboot' : '') + '</p></div>' +
                 statusChip(a.status) +
               '</div>' +

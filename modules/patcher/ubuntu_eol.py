@@ -68,6 +68,36 @@ def is_ubuntu_lts(version_id: str) -> bool:
     return int(m.group(1)) % 2 == 0
 
 
+def ubuntu_interim_eol_date(version_id: str) -> date | None:
+    """Public wrapper: official/typical EOL date for an Ubuntu interim."""
+    return _interim_eol_date(version_id)
+
+
+def ubuntu_is_supported_lts(version_id: str) -> bool:
+    """True if this LTS is still served from archive (not old-releases)."""
+    ver = (version_id or "").strip()
+    if ver in _ARCHIVED_LTS:
+        return False
+    if ver in _SUPPORTED_LTS:
+        return True
+    return bool(ver) and is_ubuntu_lts(ver) and ver not in _ARCHIVED_LTS
+
+
+def ubuntu_is_eol_release(
+    *,
+    distro: str | None,
+    version_id: str = "",
+    pretty_name: str = "",
+    today: date | None = None,
+) -> bool:
+    return ubuntu_eol_reason(
+        distro=distro,
+        version_id=version_id,
+        pretty_name=pretty_name,
+        today=today,
+    ) is not None
+
+
 def _interim_eol_date(version_id: str) -> date | None:
     known = _INTERIM_EOL.get(version_id)
     if known:

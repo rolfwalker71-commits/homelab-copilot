@@ -23,6 +23,8 @@ class PatcherSettings(BaseSettings):
     # Per-host SSH command budget (detect / list / reboot). Not shared across scan-all.
     patcher_scan_timeout: float = Field(default=180.0, ge=30.0, le=600.0)
     patcher_apply_timeout: float = Field(default=3600.0, ge=300.0, le=14400.0)
+    # do-release-upgrade per hop (24.10→26.04 = 3 hops; 30–90+ min each).
+    patcher_release_timeout: float = Field(default=10800.0, ge=600.0, le=21600.0)
     patcher_connect_timeout: float = Field(default=15.0, ge=3.0, le=60.0)
     # Time-boxed apt-get update / dnf / apk index refresh. Scan falls back to cache.
     patcher_index_timeout: float = Field(default=45.0, ge=10.0, le=180.0)

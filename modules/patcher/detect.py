@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from patcher.release import parse_virt_fields
 from patcher.sshutil import ssh_run
 from patcher.targets import PatchTarget
 
@@ -16,6 +17,8 @@ class HostDetect:
     pretty_name: str
     version_id: str = ""
     version_codename: str = ""
+    virt: str = "unknown"
+    container: bool = False
     raw_os_release: str = ""
 
 
@@ -42,6 +45,27 @@ else
   echo "VERSION_ID="
   echo "VERSION_CODENAME="
 fi
+VIRT=unknown
+CONTAINER=0
+if [ -f /.dockerenv ]; then
+  VIRT=docker; CONTAINER=1
+elif [ -f /run/.containerenv ]; then
+  VIRT=podman; CONTAINER=1
+elif command -v systemd-detect-virt >/dev/null 2>&1; then
+  V=$(systemd-detect-virt 2>/dev/null || true)
+  if [ -n "$V" ] && [ "$V" != none ]; then VIRT=$V; fi
+  if systemd-detect-virt -q --container 2>/dev/null; then CONTAINER=1; fi
+fi
+if [ "$CONTAINER" != 1 ]; then
+  if [ -d /dev/.lxc ] || grep -qa container=lxc /proc/1/environ 2>/dev/null; then
+    VIRT=lxc; CONTAINER=1
+  elif [ -f /run/systemd/container ]; then
+    VIRT=$(head -c 64 /run/systemd/container 2>/dev/null || echo container)
+    CONTAINER=1
+  fi
+fi
+echo "VIRT=$VIRT"
+echo "CONTAINER=$CONTAINER"
 """
     stdout, stderr, code = await ssh_run(
         target.ip,
@@ -70,12 +94,15 @@ fi
     pretty = fields.get("PRETTY_NAME") or distro
     version_id = fields.get("VERSION_ID") or ""
     codename = fields.get("VERSION_CODENAME") or ""
+    virt, container = parse_virt_fields(fields)
     return HostDetect(
         pm=pm,
         distro=distro,
         pretty_name=pretty,
         version_id=version_id,
         version_codename=codename,
+        virt=virt,
+        container=container,
         raw_os_release=stdout,
     )
 

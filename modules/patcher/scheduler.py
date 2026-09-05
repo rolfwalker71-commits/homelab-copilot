@@ -152,6 +152,7 @@ async def run_scan_all_hosts(
     total_security = 0
     hosts_with_image_updates = 0
     total_image_updates = 0
+    hosts_with_release_upgrade = 0
     update_host_details: list[dict[str, Any]] = []
     error_host_names: list[str] = []
 
@@ -188,6 +189,9 @@ async def run_scan_all_hosts(
                 if image_count > 0:
                     total_image_updates += image_count
                     hosts_with_image_updates += 1
+                ru = result.get("release_upgrade") or summary.get("release_upgrade")
+                if isinstance(ru, dict) and ru.get("available"):
+                    hosts_with_release_upgrade += 1
                 if status == "failed":
                     hosts_with_errors += 1
                     error_host_names.append(str(tname))
@@ -226,6 +230,7 @@ async def run_scan_all_hosts(
             "total_security": total_security,
             "hosts_with_image_updates": hosts_with_image_updates,
             "total_image_updates": total_image_updates,
+            "hosts_with_release_upgrade": hosts_with_release_upgrade,
             "update_hosts": update_host_details,
             "error_hosts": error_host_names,
             "trigger": trigger,
@@ -237,7 +242,12 @@ async def run_scan_all_hosts(
             f"Fertig: {hosts_with_updates} Host(s) mit Updates, "
             f"{hosts_with_errors} Fehler, {total_updates} Pakete "
             f"({total_security} Security), "
-            f"{total_image_updates} Image-Update(s)."
+            f"{total_image_updates} Image-Update(s)"
+            + (
+                f", {hosts_with_release_upgrade} Release-Upgrade(s)."
+                if hosts_with_release_upgrade
+                else "."
+            )
         )
         if on_complete:
             try:

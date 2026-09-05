@@ -29,6 +29,7 @@ from app.core.locale import format_de, now_berlin
 from app.core.topology import TopologyStore
 
 from patcher.apply import ApplyError, apply_updates, reboot_host
+from patcher.release_upgrade import perform_release_upgrade
 from patcher.config import get_patcher_settings
 from patcher import cron as cron_mod
 from patcher.jobs import JOBS
@@ -156,6 +157,14 @@ class ImageApplyPayload(BaseModel):
     confirm: bool = False
     names: list[str] = Field(default_factory=list)
     restart: bool = True
+    prune: bool = True
+    wait: bool = False
+
+
+class ReleaseUpgradePayload(BaseModel):
+    target_id: str = Field(..., min_length=1)
+    confirm: bool = False
+    reboot_after: bool = False
     wait: bool = False
 
 
@@ -171,21 +180,28 @@ async def _enrich_targets(store: PatcherStore, snapshot) -> list[dict[str, Any]]
         d["monitored"] = t.id not in unmonitored
         latest = await store.latest_scan_for_target(t.id)
         if latest and latest.get("status") == "success":
+            scan_sum = latest.get("summary") or {}
+            ru = scan_sum.get("release_upgrade")
+            if not isinstance(ru, dict) or not ru.get("available"):
+                ru = None
             d["last_scan"] = {
                 "id": latest["id"],
                 "created_at": latest.get("created_at"),
                 "pm": latest.get("pm"),
                 "distro": latest.get("distro"),
-                "summary": latest.get("summary") or {},
+                "summary": scan_sum,
                 "llm_summary": latest.get("llm_summary"),
                 "reboot_required": latest.get("reboot_required"),
+                "release_upgrade": ru,
             }
-            d["pending"] = (latest.get("summary") or {}).get("total", 0)
-            d["security"] = (latest.get("summary") or {}).get("security", 0)
+            d["pending"] = scan_sum.get("total", 0)
+            d["security"] = scan_sum.get("security", 0)
+            d["release_upgrade"] = ru
         else:
             d["last_scan"] = None
             d["pending"] = None
             d["security"] = None
+            d["release_upgrade"] = None
             if latest:
                 d["last_scan_error"] = latest.get("error_message")
         img = await store.latest_image_scan_for_target(t.id, success_only=True)
@@ -276,6 +292,10 @@ async def _run_image_scan_job(
             message=f"Prüfe Docker-Images auf {target.name}…",
         )
         JOBS.append_log(job_id, f"Image-Scan auf {target.name} ({target.ip})")
+        JOBS.append_log(
+            job_id,
+            "Prüfung ohne Pull — vergleiche lokale Digests mit dem Registry-Manifest.",
+        )
         result = await _scan_and_persist_images(target, snapshot)
         if result.get("error") and not result.get("ok", True):
             JOBS.finish(
@@ -325,6 +345,7 @@ async def _run_image_apply_job(
     snapshot,
     names: list[str],
     restart: bool,
+    prune: bool = True,
 ) -> None:
     store = _store
     if store is None:
@@ -353,6 +374,9 @@ async def _run_image_apply_job(
             nonlocal line_n
             line_n += 1
             JOBS.append_log(job_id, line)
+            if "Ungenutzte Images" in line:
+                await on_progress("Bereinigen", 88, line[:200])
+                return
             if line_n == 1 or line_n % 4 == 0:
                 await on_progress(
                     "Pull",
@@ -366,6 +390,7 @@ async def _run_image_apply_job(
             snapshot=snapshot,
             names=names,
             restart=restart,
+            prune=prune,
             on_line=on_line,
         )
         JOBS.set_progress(
@@ -386,11 +411,17 @@ async def _run_image_apply_job(
                     "updates": [],
                 },
             )
+        remaining = int(refreshed.get("count") or 0)
+        done_msg = result.get("message") or "Images aktualisiert."
+        if remaining:
+            done_msg = f"{done_msg} Noch {remaining} Image-Update(s)."
+        else:
+            done_msg = f"{done_msg} Keine weiteren Image-Updates."
         JOBS.finish(
             job_id,
             status="success",
             result=result,
-            message=result.get("message") or "Images aktualisiert.",
+            message=done_msg,
             phase="Fertig",
         )
     except (DockerControlError, RuntimeError) as exc:
@@ -473,11 +504,17 @@ async def _run_scan_job(
                 "pm": result.get("pm"),
                 "distro": result.get("distro"),
                 "reboot_required": result.get("reboot_required"),
+                "release_upgrade": result.get("release_upgrade"),
                 "llm_summary": llm_text,
             },
             message=(
                 f"{summary.get('total', 0)} Updates "
                 f"({summary.get('security', 0)} Security)"
+                + (
+                    " — " + (result.get("release_upgrade") or {}).get("headline", "")
+                    if (result.get("release_upgrade") or {}).get("headline")
+                    else ""
+                )
             ),
             phase="Fertig",
         )
@@ -485,6 +522,7 @@ async def _run_scan_job(
             "status": "success",
             "scan_id": scan_id,
             "summary": summary,
+            "release_upgrade": result.get("release_upgrade"),
             "error": None,
         }
     except (ScanError, DockerControlError, RuntimeError) as exc:
@@ -540,7 +578,8 @@ async def _notify_scan_findings(summary: dict[str, Any]) -> None:
     hosts_e = int(summary.get("hosts_with_errors") or 0)
     total = int(summary.get("total_updates") or 0)
     security = int(summary.get("total_security") or 0)
-    if hosts_u <= 0 and hosts_e <= 0:
+    hosts_rel = int(summary.get("hosts_with_release_upgrade") or 0)
+    if hosts_u <= 0 and hosts_e <= 0 and hosts_rel <= 0:
         return
     try:
         from app.core.push import send_push_to_all
@@ -578,6 +617,8 @@ async def _notify_scan_findings(summary: dict[str, Any]) -> None:
                     name_bits.append(str(h))
             if name_bits:
                 lines.append("Updates: " + _join_truncated(name_bits, max_len=110))
+        if hosts_rel:
+            lines.append(f"{hosts_rel} Host(s) mit Release-Upgrade")
         if hosts_e:
             err_names = [str(x) for x in (summary.get("error_hosts") or []) if x]
             if err_names:
@@ -940,6 +981,114 @@ async def _run_apply_batch_job(
         JOBS.finish(job_id, status="failed", error=str(exc))
 
 
+async def _run_release_upgrade_job(
+    job_id: str,
+    *,
+    target_id: str,
+    snapshot,
+    reboot_after: bool = False,
+) -> None:
+    store = _store
+    if store is None:
+        JOBS.finish(job_id, status="failed", error="Store nicht bereit")
+        return
+    try:
+        target = await resolve_target(store, snapshot, target_id)
+        JOBS.set_progress(
+            job_id,
+            phase="Start",
+            percent=3,
+            message=f"Release-Upgrade für {target.name} wird vorbereitet…",
+        )
+        JOBS.append_log(
+            job_id,
+            f"Release-Upgrade auf {target.name} ({target.ip})"
+            + (" — Reboot am Ende." if reboot_after else " — kein automatischer Schluss-Reboot."),
+        )
+
+        async def on_progress(phase: str, percent: int, message: str) -> None:
+            JOBS.set_progress(job_id, phase=phase, percent=percent, message=message)
+
+        async def on_log(line: str) -> None:
+            JOBS.append_log(job_id, line)
+
+        apply_id = await store.create_apply_run(
+            target_id=target.id,
+            target_name=target.name,
+            package_filter="release-upgrade",
+            packages=[],
+        )
+        try:
+            result = await perform_release_upgrade(
+                target,
+                reboot_after=reboot_after,
+                progress=on_progress,
+                on_log=on_log,
+            )
+            await store.finish_apply_run(
+                apply_id,
+                status="success",
+                log_text=result.get("log"),
+                reboot_required=bool(result.get("reboot_required")),
+                pm=result.get("pm"),
+            )
+        except Exception as exc:
+            msg = getattr(exc, "message", None) or str(exc)
+            try:
+                await store.finish_apply_run(
+                    apply_id, status="failed", error_message=msg
+                )
+            except Exception:
+                logger.exception("finish_apply_run failed")
+            raise
+
+        JOBS.set_progress(job_id, apply_id=int(apply_id))
+        JOBS.set_progress(
+            job_id, phase="Scan", percent=97, message="OS-Version nach dem Upgrade prüfen…"
+        )
+        try:
+            scan_id = await store.create_scan(
+                target_id=target.id, target_name=target.name, status="running"
+            )
+            scanned = await scan_target(target)
+            await store.finish_scan(
+                scan_id,
+                status="success",
+                pm=scanned.get("pm"),
+                distro=scanned.get("distro"),
+                summary=scanned.get("summary"),
+                reboot_required=bool(scanned.get("reboot_required")),
+                packages=scanned.get("packages") or [],
+            )
+            JOBS.append_log(
+                job_id,
+                f"Nach-Scan: {scanned.get('distro') or 'ok'}",
+            )
+        except Exception:
+            logger.exception("post-release scan failed")
+            JOBS.append_log(job_id, "Nach-Scan fehlgeschlagen — bitte manuell scannen.")
+
+        msg = f"Release-Upgrade fertig: {result.get('distro') or target.name}."
+        if result.get("reboot_scheduled"):
+            msg += " Reboot wurde geplant."
+        elif result.get("reboot_error"):
+            msg += f" Reboot fehlgeschlagen: {result.get('reboot_error')}"
+        elif result.get("reboot_required"):
+            msg += " Reboot empfohlen — bitte manuell bestätigen."
+        JOBS.finish(
+            job_id,
+            status="success",
+            result={**result, "apply_id": apply_id},
+            message=msg,
+        )
+    except (ApplyError, DockerControlError) as exc:
+        msg = getattr(exc, "message", None) or str(exc)
+        JOBS.finish(job_id, status="failed", error=msg)
+    except Exception as exc:
+        logger.exception("release-upgrade job failed")
+        JOBS.finish(job_id, status="failed", error=str(exc))
+
+
 # --- API ---
 
 
@@ -1179,6 +1328,45 @@ async def api_apply_batch(
     return job.to_dict()
 
 
+@router.post("/release-upgrade")
+async def api_release_upgrade(
+    payload: ReleaseUpgradePayload,
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, Any]:
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Release-Upgrade erfordert confirm=true.",
+        )
+    store = _get_store()
+    snap = _snapshot(request)
+    try:
+        target = await resolve_target(store, snap, payload.target_id)
+    except DockerControlError as exc:
+        raise _http_docker(exc) from exc
+
+    job = JOBS.create(kind="release-upgrade", target_id=target.id)
+    if payload.wait:
+        await _run_release_upgrade_job(
+            job.id,
+            target_id=target.id,
+            snapshot=snap,
+            reboot_after=payload.reboot_after,
+        )
+        done = JOBS.get(job.id)
+        return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
+
+    background.add_task(
+        _run_release_upgrade_job,
+        job.id,
+        target_id=target.id,
+        snapshot=snap,
+        reboot_after=payload.reboot_after,
+    )
+    return job.to_dict()
+
+
 @router.post("/images/scan")
 async def api_image_scan(
     payload: ImageScanPayload,
@@ -1245,6 +1433,7 @@ async def api_image_apply(
             snapshot=snap,
             names=names,
             restart=payload.restart,
+            prune=payload.prune,
         )
         done = JOBS.get(job.id)
         return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
@@ -1256,6 +1445,7 @@ async def api_image_apply(
         snapshot=snap,
         names=names,
         restart=payload.restart,
+        prune=payload.prune,
     )
     return job.to_dict()
 
@@ -1409,7 +1599,8 @@ class PatcherModule:
     version = "0.1.0"
     description = (
         "AI-Driven Patch-Management: Updates auf Proxmox-Guests und manuellen "
-        "Linux-Hosts scannen, melden und mit Bestätigung einspielen (apt/dnf/apk)."
+        "Linux-Hosts scannen, melden und mit Bestätigung einspielen (apt/dnf/apk). "
+        "Ubuntu-Release-Upgrade nur nach Confirm (nie automatisch)."
     )
     enabled = True
     meta = {
