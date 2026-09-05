@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import re
 import shlex
 import shutil
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -29,9 +31,14 @@ _SSH_KEEPALIVE_COUNT_MAX = 3
 _SFTP_RETRIES = 4
 _SFTP_RETRY_SLEEP = 2.0
 _SFTP_PROGRESS_EVERY = 40
+_RSYNC_PROGRESS_EVERY = 8.0
 _RSYNC_MISSING = re.compile(
     r"command not found|kommando nicht gefunden|not installed|"
     r"connection unexpectedly closed",
+    re.I,
+)
+_RSYNC_INFO_UNSUPPORTED = re.compile(
+    r"--info|progress2|unknown option|unbekannte option",
     re.I,
 )
 
@@ -915,12 +922,20 @@ def _rsync_missing_error(detail: str) -> bool:
     return bool(_RSYNC_MISSING.search(detail or ""))
 
 
+async def local_has_rsync() -> bool:
+    which, _, code = await local_run("command -v rsync", timeout=10)
+    return code == 0 and bool((which or "").strip())
+
+
 async def _remote_has_rsync(
     settings: Settings,
     ip: str,
     *,
     username: str | None = None,
     port: int | None = None,
+    key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
 ) -> bool:
     out, err, code = await ssh_run(
         settings,
@@ -929,6 +944,9 @@ async def _remote_has_rsync(
         timeout=15,
         username=username,
         port=port,
+        key=key,
+        key_pem=key_pem,
+        password=password,
     )
     if code == 0 and (out or "").strip():
         return True
@@ -1438,16 +1456,294 @@ async def sftp_mirror_put(
     return stats
 
 
+class _RsyncSshPrep:
+    """Build ``rsync -e ssh`` auth (Docker key, dest key, PEM, or password)."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        username: str | None,
+        port: int | None,
+        key: Path | None = None,
+        key_pem: str | None = None,
+        password: str | None = None,
+    ) -> None:
+        self.user = username or settings.docker_ssh_user
+        self.port = int(port or settings.docker_ssh_port)
+        self.env: dict[str, str] = {}
+        self._temps: list[Path] = []
+        identity: Path | None = None
+        if key_pem:
+            identity = self._write_key_pem(key_pem)
+        elif key is not None:
+            identity = key
+        elif not password:
+            identity = ssh_key_path(settings)
+
+        parts = ["ssh"]
+        if identity is not None:
+            parts += ["-i", shlex.quote(str(identity))]
+        parts += [
+            f"-p {self.port}",
+            "-o StrictHostKeyChecking=no",
+            "-o UserKnownHostsFile=/dev/null",
+            "-o LogLevel=ERROR",
+        ]
+        if password:
+            ask = self._write_askpass(password)
+            self.env["SSH_ASKPASS"] = str(ask)
+            self.env["SSH_ASKPASS_REQUIRE"] = "force"
+            self.env["DISPLAY"] = ":0"
+            parts += [
+                "-o BatchMode=no",
+                "-o PreferredAuthentications=password,keyboard-interactive",
+                "-o NumberOfPasswordPrompts=1",
+            ]
+        else:
+            parts += ["-o BatchMode=yes"]
+        self.ssh_cmd = " ".join(parts)
+
+    def _write_key_pem(self, pem: str) -> Path:
+        fd, name = tempfile.mkstemp(prefix="hc-rsync-key-", suffix=".pem")
+        path = Path(name)
+        data = pem if pem.endswith("\n") else pem + "\n"
+        os.write(fd, data.encode())
+        os.close(fd)
+        os.chmod(path, 0o600)
+        self._temps.append(path)
+        return path
+
+    def _write_askpass(self, password: str) -> Path:
+        fd, name = tempfile.mkstemp(prefix="hc-askpass-", suffix=".sh")
+        path = Path(name)
+        body = "#!/bin/sh\nprintf '%s\\n' " + shlex.quote(password) + "\n"
+        os.write(fd, body.encode())
+        os.close(fd)
+        os.chmod(path, 0o700)
+        self._temps.append(path)
+        return path
+
+    def close(self) -> None:
+        for path in self._temps:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._temps.clear()
+
+
 def _rsync_ssh_cmd(settings: Settings, *, username: str | None, port: int | None) -> tuple[str, str, int]:
-    key = ssh_key_path(settings)
-    user = username or settings.docker_ssh_user
-    ssh_port = port or settings.docker_ssh_port
-    ssh_cmd = (
-        f"ssh -i {shlex.quote(str(key))} -p {int(ssh_port)} "
-        f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-        f"-o BatchMode=yes -o LogLevel=ERROR"
+    prep = _RsyncSshPrep(settings, username=username, port=port)
+    return prep.ssh_cmd, prep.user, prep.port
+
+
+def _rsync_info_unsupported(detail: str) -> bool:
+    return bool(_RSYNC_INFO_UNSUPPORTED.search(detail or ""))
+
+
+def _rsync_mirror_cmd(
+    ssh_cmd: str,
+    src: str,
+    dest: str,
+    excludes: str,
+    *,
+    progress2: bool,
+) -> str:
+    info = "--info=progress2 " if progress2 else ""
+    return (
+        f"rsync -a --delete {info}{excludes} "
+        f"-e {shlex.quote(ssh_cmd)} "
+        f"{shlex.quote(src)} {shlex.quote(dest)}"
     )
-    return ssh_cmd, user, int(ssh_port)
+
+
+def _format_rsync_progress(raw: str, *, label: str) -> str:
+    cleaned = " ".join((raw or "").split())
+    if not cleaned:
+        return ""
+    name = (label or "").strip() or "rsync"
+    return f"rsync → {name}: {cleaned}"
+
+
+async def _rsync_local_run(
+    cmd: str,
+    *,
+    timeout: float,
+    log: LogFn | None = None,
+    label: str = "Copilot",
+    env: dict[str, str] | None = None,
+) -> None:
+    """Run rsync locally; stream --info=progress2 lines when log is set."""
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+    if log is None:
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            executable="/bin/bash",
+            env=run_env,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            proc.kill()
+            raise DockerControlError(
+                f"Lokaler Befehl-Timeout: {cmd[:80]}…",
+                status_code=504,
+            ) from exc
+        if int(proc.returncode or 0) != 0:
+            detail = (stderr_b or stdout_b or b"").decode("utf-8", errors="replace")
+            raise DockerControlError(
+                f"Lokaler Befehl fehlgeschlagen: {detail.strip() or f'exit {proc.returncode}'}",
+                status_code=502,
+            )
+        return
+
+    proc = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        executable="/bin/bash",
+        env=run_env,
+    )
+    last_emit = 0.0
+    last_line = ""
+    collected_err: list[str] = []
+    collected_out: list[str] = []
+
+    async def _read(stream: asyncio.StreamReader, sink: list[str]) -> None:
+        nonlocal last_emit, last_line
+        buf = ""
+        while True:
+            chunk = await stream.read(512)
+            if not chunk:
+                break
+            buf += chunk.decode("utf-8", errors="replace")
+            buf = buf.replace("\r", "\n")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                sink.append(line)
+                if "%" in line or "to-chk=" in line or "xfer#" in line.lower():
+                    last_line = line
+                    now = time.monotonic()
+                    if now - last_emit >= _RSYNC_PROGRESS_EVERY:
+                        last_emit = now
+                        msg = _format_rsync_progress(line, label=label)
+                        if msg:
+                            await log(msg)
+        leftover = buf.strip()
+        if leftover:
+            sink.append(leftover)
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                _read(proc.stdout, collected_out),
+                _read(proc.stderr, collected_err),
+            ),
+            timeout=timeout,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        raise DockerControlError(
+            f"Lokaler Befehl-Timeout: {cmd[:80]}…",
+            status_code=504,
+        ) from exc
+
+    if last_line:
+        msg = _format_rsync_progress(last_line, label=label)
+        if msg:
+            await log(msg)
+
+    if int(proc.returncode or 0) != 0:
+        detail = "\n".join(collected_err or collected_out) or f"exit {proc.returncode}"
+        raise DockerControlError(
+            f"Lokaler Befehl fehlgeschlagen: {detail.strip()}",
+            status_code=502,
+        )
+
+
+async def _rsync_exec(
+    *,
+    ssh_cmd: str,
+    src: str,
+    dest: str,
+    excludes: str,
+    timeout: float,
+    log: LogFn | None,
+    label: str,
+    env: dict[str, str] | None,
+) -> bool:
+    """Run rsync; retry without ``--info=progress2`` on older remotes. False = missing."""
+    cmd = _rsync_mirror_cmd(ssh_cmd, src, dest, excludes, progress2=True)
+    try:
+        await _rsync_local_run(cmd, timeout=timeout, log=log, label=label, env=env)
+        return True
+    except DockerControlError as exc:
+        if _rsync_missing_error(exc.message):
+            return False
+        if not _rsync_info_unsupported(exc.message):
+            raise
+        if log:
+            await log(
+                "rsync --info=progress2 nicht unterstützt — "
+                "erneut ohne Fortschrittsanzeige…"
+            )
+        cmd = _rsync_mirror_cmd(ssh_cmd, src, dest, excludes, progress2=False)
+        try:
+            await _rsync_local_run(cmd, timeout=timeout, log=log, label=label, env=env)
+        except DockerControlError as retry_exc:
+            if _rsync_missing_error(retry_exc.message):
+                return False
+            raise
+        return True
+
+
+async def ensure_remote_path_for_rsync(
+    settings: Settings,
+    ip: str,
+    remote_dir: str,
+    *,
+    username: str | None = None,
+    key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
+    port: int | None = None,
+    restricted: bool = False,
+) -> None:
+    """Create remote dest dirs. Storage Box: one ``mkdir`` per level (no ``-p``)."""
+    path = remote_dir.rstrip("/")
+    if not path:
+        return
+    run_kw = dict(
+        username=username,
+        key=key,
+        key_pem=key_pem,
+        password=password,
+        port=port,
+        timeout=15,
+    )
+    if not restricted:
+        await ssh_run_ok(
+            settings, ip, f"mkdir -p -- {shlex.quote(path)}", **run_kw
+        )
+        return
+    acc = ""
+    for part in path.strip("/").split("/"):
+        acc += "/" + part
+        if acc in ("/", "/home"):
+            continue
+        try:
+            await ssh_run_ok(settings, ip, f"mkdir {shlex.quote(acc)}", **run_kw)
+        except DockerControlError:
+            pass
 
 
 async def rsync_pull(
@@ -1460,29 +1756,50 @@ async def rsync_pull(
     exclude: tuple[str, ...] = ("locks",),
     username: str | None = None,
     port: int | None = None,
+    key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
+    log: LogFn | None = None,
+    label: str = "Copilot",
+    require_remote_rsync: bool = True,
 ) -> bool:
     """Pull remote→local with rsync if both sides have it. False = use SFTP."""
-    which, _, code = await local_run("command -v rsync", timeout=10)
-    if code != 0 or not (which or "").strip():
+    if not await local_has_rsync():
         return False
-    if not await _remote_has_rsync(settings, ip, username=username, port=port):
+    if require_remote_rsync and not await _remote_has_rsync(
+        settings,
+        ip,
+        username=username,
+        port=port,
+        key=key,
+        key_pem=key_pem,
+        password=password,
+    ):
         return False
     local_dir.mkdir(parents=True, exist_ok=True)
-    ssh_cmd, user, _ = _rsync_ssh_cmd(settings, username=username, port=port)
-    excludes = " ".join(f"--exclude {shlex.quote(x)}" for x in exclude)
-    src = f"{user}@{ip}:{remote_dir.rstrip('/')}/"
-    cmd = (
-        f"rsync -a --delete {excludes} "
-        f"-e {shlex.quote(ssh_cmd)} "
-        f"{shlex.quote(src)} {shlex.quote(str(local_dir) + '/')}"
+    prep = _RsyncSshPrep(
+        settings,
+        username=username,
+        port=port,
+        key=key,
+        key_pem=key_pem,
+        password=password,
     )
+    excludes = " ".join(f"--exclude {shlex.quote(x)}" for x in exclude)
+    src = f"{prep.user}@{ip}:{remote_dir.rstrip('/')}/"
     try:
-        await local_run_ok(cmd, timeout=timeout)
-    except DockerControlError as exc:
-        if _rsync_missing_error(exc.message):
-            return False
-        raise
-    return True
+        return await _rsync_exec(
+            ssh_cmd=prep.ssh_cmd,
+            src=src,
+            dest=str(local_dir) + "/",
+            excludes=excludes,
+            timeout=timeout,
+            log=log,
+            label=label,
+            env=prep.env or None,
+        )
+    finally:
+        prep.close()
 
 
 async def rsync_push(
@@ -1495,30 +1812,51 @@ async def rsync_push(
     exclude: tuple[str, ...] = ("locks",),
     username: str | None = None,
     port: int | None = None,
+    key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
+    log: LogFn | None = None,
+    label: str = "Host",
+    require_remote_rsync: bool = True,
 ) -> bool:
     """Push local→remote with rsync if both sides have it. False = use SFTP."""
-    which, _, code = await local_run("command -v rsync", timeout=10)
-    if code != 0 or not (which or "").strip():
+    if not await local_has_rsync():
         return False
-    if not await _remote_has_rsync(settings, ip, username=username, port=port):
+    if require_remote_rsync and not await _remote_has_rsync(
+        settings,
+        ip,
+        username=username,
+        port=port,
+        key=key,
+        key_pem=key_pem,
+        password=password,
+    ):
         return False
     if not local_dir.is_dir():
         raise DockerControlError(
             f"Lokales Verzeichnis fehlt: {local_dir}",
             status_code=400,
         )
-    ssh_cmd, user, _ = _rsync_ssh_cmd(settings, username=username, port=port)
-    excludes = " ".join(f"--exclude {shlex.quote(x)}" for x in exclude)
-    dest = f"{user}@{ip}:{remote_dir.rstrip('/')}/"
-    cmd = (
-        f"rsync -a --delete {excludes} "
-        f"-e {shlex.quote(ssh_cmd)} "
-        f"{shlex.quote(str(local_dir) + '/')} {shlex.quote(dest)}"
+    prep = _RsyncSshPrep(
+        settings,
+        username=username,
+        port=port,
+        key=key,
+        key_pem=key_pem,
+        password=password,
     )
+    excludes = " ".join(f"--exclude {shlex.quote(x)}" for x in exclude)
+    dest = f"{prep.user}@{ip}:{remote_dir.rstrip('/')}/"
     try:
-        await local_run_ok(cmd, timeout=timeout)
-    except DockerControlError as exc:
-        if _rsync_missing_error(exc.message):
-            return False
-        raise
-    return True
+        return await _rsync_exec(
+            ssh_cmd=prep.ssh_cmd,
+            src=str(local_dir) + "/",
+            dest=dest,
+            excludes=excludes,
+            timeout=timeout,
+            log=log,
+            label=label,
+            env=prep.env or None,
+        )
+    finally:
+        prep.close()

@@ -7,7 +7,7 @@
   <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug">Backup-Ziele</h1>
   <p class="mt-2 max-w-2xl text-[var(--muted)]">
     Reihenfolge der Pipeline: zuerst Host-Staging (ephemer), dann dauerhafte Ziele
-    (Copilot, Synology / Storage Box per SFTP). Zugangsdaten werden in der lokalen DB gespeichert.
+    (Copilot, Synology / Storage Box per rsync oder SFTP). Zugangsdaten werden in der lokalen DB gespeichert.
     restic nutzt dieselben Ziele (Repo unter <code>restic/&lt;host&gt;/&lt;stack&gt;</code>).
   </p>
 </section>
@@ -68,9 +68,9 @@
           </div>
         </div>
         <p id="f-port-hint" class="hidden text-xs text-[var(--muted)]">
-          Hetzner Storage Box: Port <strong>23</strong> (SSH mit mkdir/sha256sum).
-          Port 22 ist nur SFTP ohne Shell — Copilot braucht Port 23.
-          In der Hetzner Console „SSH-Unterstützung“ aktivieren.
+          Hetzner Storage Box: Port <strong>23</strong> (SSH für rsync / mkdir / sha256sum).
+          Port 22 ist nur SFTP ohne Shell — rsync braucht Port 23.
+          In Hetzner Robot „SSH-Unterstützung“ aktivieren.
           Test: <code>ssh -p 23 USER@HOST</code> (nicht Port 22).
         </p>
         <div>

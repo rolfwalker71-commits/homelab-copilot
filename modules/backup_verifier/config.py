@@ -49,6 +49,10 @@ class BackupSettings(BaseSettings):
     restic_install: bool = True
     # Wall-clock for apt/apk restic bootstrap on the LXC (not the short SSH probe).
     restic_install_timeout: float = Field(default=600.0, ge=60.0, le=3600.0)
+    # If guest rsync is missing, apt/apk-install it (nohup+poll) before SFTP fallback.
+    backup_rsync_install: bool = True
+    # Wall-clock for apt/apk rsync bootstrap on the LXC (same budget as restic).
+    backup_rsync_install_timeout: float = Field(default=600.0, ge=60.0, le=3600.0)
 
     @property
     def copilot_dir(self) -> Path:

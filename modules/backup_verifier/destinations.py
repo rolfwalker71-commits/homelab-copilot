@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 import tempfile
 from pathlib import Path
@@ -27,6 +28,117 @@ AUTH_KEY_PATH = "key_path"
 AUTH_KEY_PEM = "key_pem"
 
 PRESETS = ("synology", "storage_box", "custom")
+
+# Hetzner Storage Box: port 22 = SFTP only; port 23 = SSH (rsync / borg / cmds).
+_STORAGEBOX_HOST = re.compile(r"(^|\.)your-storagebox\.de$", re.I)
+
+
+def is_hetzner_storagebox(
+    host: str = "",
+    *,
+    preset: str = "",
+    dest: dict[str, Any] | None = None,
+) -> bool:
+    """True for Storage Box preset or ``*.your-storagebox.de`` hosts."""
+    if dest is not None:
+        host = str(dest.get("host") or host)
+        preset = str(dest.get("preset") or preset)
+    if (preset or "").strip() == "storage_box":
+        return True
+    hostname = (host or "").strip().lower().rstrip(".")
+    return bool(hostname and _STORAGEBOX_HOST.search(hostname))
+
+
+def _dest_explicit_port(dest: dict[str, Any]) -> int | None:
+    raw = dest.get("port")
+    if raw in (None, "", 0, "0"):
+        return None
+    return int(raw)
+
+
+def dest_rsync_ssh_port(dest: dict[str, Any]) -> int:
+    """SSH port for Copilot→dest rsync.
+
+    An explicit dest port wins, except Storage Box port 22 (SFTP-only) which
+    maps to 23. Unset + Storage Box host/preset defaults to 23.
+    """
+    port = _dest_explicit_port(dest)
+    box = is_hetzner_storagebox(dest=dest)
+    if port is not None:
+        if box and port == 22:
+            return 23
+        return port
+    return 23 if box else 22
+
+
+def dest_sftp_port(dest: dict[str, Any]) -> int:
+    """SFTP port. Storage Box SFTP stays on 22 when rsync uses 23."""
+    port = _dest_explicit_port(dest)
+    box = is_hetzner_storagebox(dest=dest)
+    if box:
+        if port is not None and port not in (22, 23):
+            return port
+        return 22
+    return port if port is not None else 22
+
+
+def dest_requires_remote_rsync(dest: dict[str, Any]) -> bool:
+    """Storage Box speaks rsync protocol — do not probe ``command -v rsync``."""
+    return not is_hetzner_storagebox(dest=dest)
+
+
+def decide_dest_mirror_transport(
+    *,
+    local_has_rsync: bool,
+    rsync_ok: bool | None = None,
+) -> str:
+    """How to copy Copilot→SFTP dest: ``rsync`` or ``sftp``."""
+    if not local_has_rsync:
+        return "sftp"
+    if rsync_ok is False:
+        return "sftp"
+    return "rsync"
+
+
+def dest_rsync_fallback_message(
+    detail: str = "",
+    *,
+    dest: dict[str, Any],
+    local_has_rsync: bool,
+    rsync_port: int,
+    sftp_port: int,
+) -> str:
+    """German job-log line when dest rsync is skipped or failed."""
+    label = str(dest.get("label") or "SFTP")
+    if not local_has_rsync:
+        return (
+            f"rsync im Copilot fehlt — spiegele nach {label} per SFTP "
+            f"(Port {sftp_port})…"
+        )
+    box = is_hetzner_storagebox(dest=dest)
+    low = (detail or "").lower()
+    if "permission denied" in low or "authentifizierung fehlgeschlagen" in low:
+        extra = (
+            " Key auf der Storage Box hochladen oder Passwort prüfen."
+            if box
+            else ""
+        )
+        return (
+            f"rsync/SSH (Port {rsync_port}) Authentifizierung fehlgeschlagen — "
+            f"SFTP-Fallback (Port {sftp_port}).{extra}"
+        )
+    if box:
+        clipped = f" ({detail[:100]})" if detail else ""
+        return (
+            f"rsync/SSH-Port {rsync_port} fehlgeschlagen — SFTP-Fallback "
+            f"(Port {sftp_port}). In Hetzner Robot „SSH-Unterstützung“ "
+            f"aktivieren (Port 23 = SSH/rsync, Port 22 = nur SFTP).{clipped}"
+        )
+    clipped = f": {detail[:100]}" if detail else ""
+    return (
+        f"rsync fehlgeschlagen — SFTP-Fallback nach {label} "
+        f"(Port {sftp_port}){clipped}"
+    )
 
 
 def public_destination(row: dict[str, Any]) -> dict[str, Any]:
@@ -162,8 +274,7 @@ def resolve_auth(
 
 def _restricted_ssh_shell(dest: dict[str, Any], port: int) -> bool:
     """Hetzner Storage Box port 23: limited shell (no pipes/&&, no ``test``)."""
-    preset = (dest.get("preset") or "").strip()
-    return preset == "storage_box" or port == 23
+    return is_hetzner_storagebox(dest=dest) or port == 23
 
 
 async def check_destination(

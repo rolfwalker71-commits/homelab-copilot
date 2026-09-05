@@ -476,6 +476,8 @@ async def module_status() -> dict[str, Any]:
         "quiesce_default": bs.backup_quiesce,
         "restic_install": bs.restic_install,
         "restic_install_timeout": bs.restic_install_timeout,
+        "backup_rsync_install": bs.backup_rsync_install,
+        "backup_rsync_install_timeout": bs.backup_rsync_install_timeout,
         "pipeline": pipeline,
         "synology": {
             "configured": any(

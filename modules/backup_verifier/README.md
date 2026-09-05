@@ -10,10 +10,10 @@ Default engine is **Voll (tar)** — full `.tar.gz` archives. **Incremental (res
 2. **Ordered pipeline** (configured under **Ziele** in the UI):
    - `host_staging` — build archive on the LXC (ephemeral; purged after the first durable hop)
    - `copilot` — copy to the Copilot host path
-   - `sftp` — Synology, Hetzner Storage Box, or custom SSH/SFTP
+   - `sftp` — Synology, Hetzner Storage Box, or custom SSH/SFTP (restic: rsync-over-SSH when possible)
 3. **Retention** per durable destination (`keep_count` in the UI; env values only seed defaults).
 4. **Verify** SHA256 after each hop; overall status in SQLite history.
-5. If a later SFTP hop fails but Copilot succeeded → run status **`partial`**.
+5. If a later SFTP/rsync hop fails but Copilot succeeded → run status **`partial`**.
 
 Credentials and host/paths live in **SQLite** (`backup_verifier.db`). Env vars are an optional **seed** on first start.
 
@@ -35,8 +35,8 @@ Default **quiesce**: `docker compose stop` before volume tar, then `up -d` / `st
 ## UI & API
 
 - Page: [`/modules/backup_verifier`](/modules/backup_verifier) (Backup / Zeitplan, volle Breite)
-- **Ziele:** [`/modules/backup_verifier/destinations`](/modules/backup_verifier/destinations) — pipeline order, SFTP auth, connection check
-- **Durchsuchen:** [`/modules/backup_verifier/browser`](/modules/backup_verifier/browser) — list Copilot + SFTP dest folders (`.tar.gz` and `restic/<host>/<stack>`), no binary dump; optional archive download
+- **Ziele:** [`/modules/backup_verifier/destinations`](/modules/backup_verifier/destinations) — pipeline order, SFTP/SSH auth, connection check
+- **Durchsuchen:** [`/modules/backup_verifier/browser`](/modules/backup_verifier/browser) — list Copilot + dest folders (`.tar.gz` and `restic/<host>/<stack>`), no binary dump; optional archive download
 - Verlauf: [`/modules/backup_verifier/history`](/modules/backup_verifier/history)
 - Stack cards: **Backup** / **Verlauf**
 - API prefix: `/api/modules/backup_verifier/`
@@ -82,9 +82,12 @@ Optional env seed / paths (see `.env.example`):
 - `BACKUP_API_BASE` — unused for firing (legacy host-cron URL; schedules are in-process)
 - `BACKUP_SSH_TIMEOUT` — short SSH (compose stop/start, `command -v restic`); default 120s. Not used for apt-get.
 - `BACKUP_ARCHIVE_TIMEOUT` — wall-clock for tar / restic backup / extract (nohup+poll); default 3600s
-- `BACKUP_TRANSFER_TIMEOUT` — SCP/SFTP hops and restic binary copy; default 3600s
+- `BACKUP_TRANSFER_TIMEOUT` — SCP/SFTP/rsync hops and restic binary copy; default 3600s
 - `RESTIC_INSTALL` — default `true`: if `restic` is missing, copy the Copilot image binary via SCP, else apt/apk via nohup+poll
 - `RESTIC_INSTALL_TIMEOUT` — wall-clock for apt/apk bootstrap only; default 600s (never `BACKUP_SSH_TIMEOUT`)
+- `BACKUP_RSYNC_INSTALL` — default `true`: if guest `rsync` is missing, apt/apk via nohup+poll, then rsync-over-SSH; SFTP only if that fails
+- `BACKUP_RSYNC_INSTALL_TIMEOUT` — wall-clock for apt/apk rsync bootstrap; default 600s (same as restic)
+- Hetzner Storage Box dest hop: Copilot already has `rsync` in the image. After the guest→Copilot mirror, Copilot→box uses `rsync -e "ssh -p 23"` when possible. In **Hetzner Robot** enable **SSH-Unterstützung**. Port **23** = SSH/rsync/Borg; port **22** = SFTP only (fallback if SSH-23 is off, the key is rejected, or local rsync is missing). An explicit dest port wins; `*.your-storagebox.de` / preset `storage_box` with unset or SFTP-22 defaults rsync to 23. The box already speaks rsync — Copilot does not install packages on the dest.
 
 DB: `$DATA_DIR/backup_verifier.db` (restic repo password lives here, never in git)
 
@@ -93,8 +96,10 @@ DB: `$DATA_DIR/backup_verifier.db` (restic repo password lives here, never in gi
 Opt-in on **Backup** / **Zeitplan**: Engine *Incremental (restic)*.
 
 1. First run per host: `command -v restic`. If missing and `RESTIC_INSTALL=true`, copy `/usr/bin/restic` from the Copilot container (same Debian/amd64 binary as the image). If that fails, apt/apk runs detached (nohup+poll, `RESTIC_INSTALL_TIMEOUT`).
+1b. LXC→Copilot repo sync: `command -v rsync` on the guest. If missing and `BACKUP_RSYNC_INSTALL=true`, apt/apk installs rsync (nohup+poll, `BACKUP_RSYNC_INSTALL_TIMEOUT`). Copilot already ships `rsync` in the image. SFTP is last resort if install fails or hangs.
+1c. Copilot→Hetzner (or other SFTP dest): prefer rsync-over-SSH (Storage Box: port 23 unless the dest sets another port). If rsync/SSH-23 fails, SFTP on port 22 with a German job-log reason (Robot SSH-Unterstützung, auth, or local rsync missing). `--info=progress2` when the box supports it; older Storage Box rsync retries without it.
 2. Repo password is generated once per stack and stored in SQLite (`restic_secrets`).
-3. Working repo on the LXC: `$BACKUP_LXC_DIR/restic/{project}`. Durable copy: `$BACKUP_COPILOT_DIR/restic/{parent}/{project}`. SFTP dests get the same repo tree (`…/restic/{parent}/{project}`).
+3. Working repo on the LXC: `$BACKUP_LXC_DIR/restic/{project}`. Durable copy: `$BACKUP_COPILOT_DIR/restic/{parent}/{project}`. Dest hops get the same repo tree (`…/restic/{parent}/{project}`).
 4. Same inventory as tar (compose, named volume mountpoints, readable binds). Quiesce still stops the stack.
 5. Every N days (default 7): `restic forget --keep-last/--keep-weekly --prune` and `restic check`. Restic has no classic full backup — a snapshot is always a complete restore point.
 6. Restore: Verlauf → Snapshots listen → Snapshot wählen → gleiche Ziele wie tar.

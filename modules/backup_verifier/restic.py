@@ -20,6 +20,12 @@ from backup_verifier.destinations import (
     KIND_COPILOT,
     KIND_HOST,
     KIND_SFTP,
+    decide_dest_mirror_transport,
+    dest_requires_remote_rsync,
+    dest_rsync_fallback_message,
+    dest_rsync_ssh_port,
+    dest_sftp_port,
+    is_hetzner_storagebox,
     legacy_role_for,
     resolve_auth,
 )
@@ -494,6 +500,161 @@ async def ensure_restic_installed(
     await log("restic ist installiert.")
 
 
+def decide_guest_mirror_transport(
+    *,
+    guest_has_rsync: bool,
+    allow_install: bool,
+    install_ok: bool | None = None,
+) -> str:
+    """How to copy LXC↔Copilot: ``rsync``, ``try_install``, or ``sftp``."""
+    if guest_has_rsync:
+        return "rsync"
+    if not allow_install:
+        return "sftp"
+    if install_ok is True:
+        return "rsync"
+    if install_ok is False:
+        return "sftp"
+    return "try_install"
+
+
+def _rsync_pkg_install_script() -> str:
+    """apt/apk install rsync — detached; never under the short SSH probe timeout."""
+    return r"""
+set -euo pipefail
+PROG="${HC_JOB_PROGRESS:-}"
+note() { if [ -n "$PROG" ]; then printf '%s\n' "$1" > "$PROG"; fi; }
+
+if command -v rsync >/dev/null 2>&1; then
+  note "rsync bereits vorhanden"
+  exit 0
+fi
+
+LOCK=0
+for f in /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock \
+  /var/lib/dpkg/lock /var/cache/apt/archives/lock; do
+  [ -e "$f" ] || continue
+  if command -v fuser >/dev/null 2>&1 && fuser "$f" >/dev/null 2>&1; then
+    LOCK=1; break
+  fi
+  if command -v lsof >/dev/null 2>&1 && lsof -t "$f" >/dev/null 2>&1; then
+    LOCK=1; break
+  fi
+done
+if [ "$LOCK" = "1" ]; then
+  echo "APT_LOCK=1" >&2
+  echo "Could not get lock — another apt/unattended-upgrades process is running." >&2
+  exit 2
+fi
+
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive LC_ALL=C
+  note "apt-get update …"
+  apt-get update -qq \
+    -o Acquire::Retries=1 \
+    -o Acquire::http::Timeout=20 \
+    -o Acquire::https::Timeout=20 \
+    -o DPkg::Lock::Timeout=0
+  note "apt-get install rsync …"
+  apt-get install -y -qq rsync -o DPkg::Lock::Timeout=0
+elif command -v apk >/dev/null 2>&1; then
+  note "apk add rsync …"
+  apk add --no-cache rsync
+else
+  echo "Kein apt/apk — rsync kann nicht automatisch installiert werden." >&2
+  exit 1
+fi
+
+if ! command -v rsync >/dev/null 2>&1; then
+  echo "rsync: not found after install" >&2
+  exit 1
+fi
+note "rsync installiert"
+"""
+
+
+async def _probe_rsync(
+    settings: Settings,
+    *,
+    ip: str | None,
+    local: bool,
+    timeout: float,
+) -> bool:
+    check = "command -v rsync 2>/dev/null"
+    if local:
+        out, _, code = await sshutil.local_run(check, timeout=min(15.0, timeout))
+    else:
+        assert ip is not None
+        out, _, code = await sshutil.ssh_run(
+            settings, ip, check, timeout=min(30.0, timeout)
+        )
+    return code == 0 and bool((out or "").strip())
+
+
+async def ensure_guest_rsync(
+    settings: Settings,
+    *,
+    ip: str | None,
+    local: bool,
+    allow_install: bool,
+    timeout: float,
+    log: LogFn,
+    work_dir: str | None = None,
+    install_timeout: float | None = None,
+) -> bool:
+    """Ensure guest rsync exists. Never fails the backup — False means use SFTP.
+
+    Probe is short; apt/apk runs detached (nohup+poll) like restic. rsync is
+    dynamically linked, so we install via guest apt/apk rather than SCP.
+    """
+    if local:
+        return await _probe_rsync(settings, ip=ip, local=True, timeout=timeout)
+    short = min(30.0, max(10.0, timeout))
+    long_install = float(install_timeout or 600.0)
+    has = await _probe_rsync(settings, ip=ip, local=False, timeout=short)
+    step = decide_guest_mirror_transport(
+        guest_has_rsync=has, allow_install=allow_install, install_ok=None
+    )
+    if step == "rsync":
+        return True
+    if step == "sftp":
+        return False
+
+    assert ip is not None
+    await log("rsync fehlt — installiere auf dem Guest…")
+    job_dir = (work_dir or "/tmp/homelab-copilot-rsync").rstrip("/")
+    try:
+        await sshutil.run_detached_and_poll(
+            settings,
+            ip,
+            _rsync_pkg_install_script(),
+            work_dir=job_dir,
+            job_name="rsync_install",
+            local=False,
+            overall_timeout=long_install,
+            poll_interval=5.0,
+            short_timeout=short,
+            log=log,
+            progress_label="rsync-Install",
+            job_label="rsync-Installation",
+        )
+    except DockerControlError as exc:
+        await log(
+            "rsync-Installation fehlgeschlagen — "
+            f"{translate_restic_error(exc.message)[:160]}"
+        )
+        return False
+
+    has = await _probe_rsync(settings, ip=ip, local=False, timeout=short)
+    if decide_guest_mirror_transport(
+        guest_has_rsync=has, allow_install=True, install_ok=has
+    ) == "rsync":
+        await log("rsync installiert, spiegele per rsync…")
+        return True
+    await log("rsync fehlt nach der Installation.")
+    return False
+
+
 def _build_restic_script(
     *,
     inventory: dict[str, Any],
@@ -666,6 +827,10 @@ async def _mirror_lxc_to_copilot(
     copilot_repo: Path,
     timeout: float,
     log: LogFn,
+    allow_rsync_install: bool = True,
+    rsync_install_timeout: float = 600.0,
+    rsync_work_dir: str | None = None,
+    probe_timeout: float = 30.0,
 ) -> None:
     copilot_repo.mkdir(parents=True, exist_ok=True)
     if local:
@@ -680,18 +845,43 @@ async def _mirror_lxc_to_copilot(
         await log(f"Repo nach Copilot gespiegelt: {copilot_repo}")
         return
     assert ip is not None
+    guest_ok = await ensure_guest_rsync(
+        settings,
+        ip=ip,
+        local=False,
+        allow_install=allow_rsync_install,
+        timeout=probe_timeout,
+        log=log,
+        work_dir=rsync_work_dir,
+        install_timeout=rsync_install_timeout,
+    )
     used_rsync = False
-    try:
-        used_rsync = await sshutil.rsync_pull(
-            settings, ip, lxc_repo, copilot_repo, timeout=timeout
-        )
-    except DockerControlError as exc:
-        await log(f"rsync fehlgeschlagen — SFTP-Fallback ({exc.message[:120]})")
-        used_rsync = False
+    rsync_error_logged = False
+    if guest_ok:
+        try:
+            used_rsync = await sshutil.rsync_pull(
+                settings,
+                ip,
+                lxc_repo,
+                copilot_repo,
+                timeout=timeout,
+                log=log,
+                label="Copilot",
+            )
+        except DockerControlError as exc:
+            await log(f"rsync fehlgeschlagen — SFTP-Fallback ({exc.message[:120]})")
+            rsync_error_logged = True
+            used_rsync = False
     if not used_rsync:
-        await log(
-            "rsync auf dem Guest fehlt — spiegele das Repo per SFTP nach Copilot…"
-        )
+        if not rsync_error_logged:
+            if guest_ok:
+                await log(
+                    "rsync im Copilot fehlt — spiegele das Repo per SFTP nach Copilot…"
+                )
+            else:
+                await log(
+                    "rsync auf dem Guest fehlt — spiegele das Repo per SFTP nach Copilot…"
+                )
         stats = await sshutil.sftp_mirror_get(
             settings,
             ip,
@@ -718,6 +908,10 @@ async def _mirror_copilot_to_lxc(
     copilot_repo: Path,
     timeout: float,
     log: LogFn,
+    allow_rsync_install: bool = True,
+    rsync_install_timeout: float = 600.0,
+    rsync_work_dir: str | None = None,
+    probe_timeout: float = 30.0,
 ) -> None:
     if not (copilot_repo / "config").is_file():
         return
@@ -733,14 +927,43 @@ async def _mirror_copilot_to_lxc(
         return
     assert ip is not None
     await sshutil.ensure_remote_dir(settings, ip, lxc_repo, timeout=30)
+    guest_ok = await ensure_guest_rsync(
+        settings,
+        ip=ip,
+        local=False,
+        allow_install=allow_rsync_install,
+        timeout=probe_timeout,
+        log=log,
+        work_dir=rsync_work_dir,
+        install_timeout=rsync_install_timeout,
+    )
     used_rsync = False
-    try:
-        used_rsync = await sshutil.rsync_push(
-            settings, ip, copilot_repo, lxc_repo, timeout=timeout
-        )
-    except DockerControlError:
-        used_rsync = False
+    rsync_error_logged = False
+    if guest_ok:
+        try:
+            used_rsync = await sshutil.rsync_push(
+                settings,
+                ip,
+                copilot_repo,
+                lxc_repo,
+                timeout=timeout,
+                log=log,
+                label="Host",
+            )
+        except DockerControlError as exc:
+            await log(f"rsync fehlgeschlagen — SFTP-Fallback ({exc.message[:120]})")
+            rsync_error_logged = True
+            used_rsync = False
     if not used_rsync:
+        if not rsync_error_logged:
+            if guest_ok:
+                await log(
+                    "rsync im Copilot fehlt — spiegele das Repo per SFTP auf den Host…"
+                )
+            else:
+                await log(
+                    "rsync auf dem Guest fehlt — spiegele das Repo per SFTP auf den Host…"
+                )
         await sshutil.sftp_mirror_put(
             settings,
             ip,
@@ -777,7 +1000,10 @@ async def _mirror_to_sftp(
     remote = f"{remote_base}/{sftp_repo_rel(parent_id, project)}"
     auth = resolve_auth(dest, settings)
     hop_label = str(dest.get("label") or "SFTP")
-    await log(f"Spiegele restic-Repo nach {hop_label}: {remote}")
+    rsync_port = dest_rsync_ssh_port(dest)
+    sftp_port = dest_sftp_port(dest)
+    local_ok = await sshutil.local_has_rsync()
+    step = decide_dest_mirror_transport(local_has_rsync=local_ok)
 
     async def hop_progress(message: str, file_pct: int) -> None:
         span = max(1, int(percent_end) - int(percent_start))
@@ -790,6 +1016,77 @@ async def _mirror_to_sftp(
             run_id=run_id,
         )
 
+    async def rsync_log(message: str) -> None:
+        await log(message)
+        match = re.search(r"(\d+)\s*%", message)
+        if match:
+            await hop_progress(message, int(match.group(1)))
+
+    used_rsync = False
+    rsync_error_logged = False
+    if step == "rsync":
+        await log(
+            f"Spiegele restic-Repo per rsync nach {hop_label} "
+            f"(SSH-Port {rsync_port}): {remote}"
+        )
+        try:
+            await sshutil.ensure_remote_path_for_rsync(
+                settings,
+                host,
+                remote,
+                username=auth["username"],
+                key=auth.get("key"),
+                key_pem=auth.get("key_pem"),
+                password=auth.get("password"),
+                port=rsync_port,
+                restricted=is_hetzner_storagebox(dest=dest),
+            )
+        except DockerControlError:
+            pass
+        try:
+            used_rsync = await sshutil.rsync_push(
+                settings,
+                host,
+                copilot_repo,
+                remote,
+                timeout=timeout,
+                username=auth["username"],
+                key=auth.get("key"),
+                key_pem=auth.get("key_pem"),
+                password=auth.get("password"),
+                port=rsync_port,
+                log=rsync_log,
+                label=hop_label,
+                require_remote_rsync=dest_requires_remote_rsync(dest),
+            )
+        except DockerControlError as exc:
+            await log(
+                dest_rsync_fallback_message(
+                    exc.message,
+                    dest=dest,
+                    local_has_rsync=True,
+                    rsync_port=rsync_port,
+                    sftp_port=sftp_port,
+                )
+            )
+            rsync_error_logged = True
+            used_rsync = False
+    if used_rsync:
+        await log(f"{hop_label}: Repo per rsync übertragen (SSH-Port {rsync_port})")
+        await hop_progress(f"{hop_label}: rsync fertig", 100)
+        return remote
+
+    if not rsync_error_logged:
+        await log(
+            dest_rsync_fallback_message(
+                "",
+                dest=dest,
+                local_has_rsync=local_ok,
+                rsync_port=rsync_port,
+                sftp_port=sftp_port,
+            )
+        )
+    await log(f"Spiegele restic-Repo per SFTP nach {hop_label} (Port {sftp_port}): {remote}")
     stats = await sshutil.sftp_mirror_put(
         settings,
         host,
@@ -800,7 +1097,7 @@ async def _mirror_to_sftp(
         key=auth.get("key"),
         key_pem=auth.get("key_pem"),
         password=auth.get("password"),
-        port=auth["port"],
+        port=sftp_port,
         log=log,
         label=hop_label,
         on_progress=hop_progress,
@@ -826,7 +1123,60 @@ async def _mirror_from_sftp(
     remote_base = (dest.get("remote_path") or "").rstrip("/")
     remote = f"{remote_base}/{sftp_repo_rel(parent_id, project)}"
     auth = resolve_auth(dest, settings)
-    await log(f"Hole restic-Repo von {dest.get('label')}: {remote}")
+    hop_label = str(dest.get("label") or "SFTP")
+    rsync_port = dest_rsync_ssh_port(dest)
+    sftp_port = dest_sftp_port(dest)
+    local_ok = await sshutil.local_has_rsync()
+    step = decide_dest_mirror_transport(local_has_rsync=local_ok)
+    used_rsync = False
+    rsync_error_logged = False
+    if step == "rsync":
+        await log(
+            f"Hole restic-Repo per rsync von {hop_label} "
+            f"(SSH-Port {rsync_port}): {remote}"
+        )
+        try:
+            used_rsync = await sshutil.rsync_pull(
+                settings,
+                host,
+                remote,
+                copilot_repo,
+                timeout=timeout,
+                username=auth["username"],
+                key=auth.get("key"),
+                key_pem=auth.get("key_pem"),
+                password=auth.get("password"),
+                port=rsync_port,
+                log=log,
+                label=hop_label,
+                require_remote_rsync=dest_requires_remote_rsync(dest),
+            )
+        except DockerControlError as exc:
+            await log(
+                dest_rsync_fallback_message(
+                    exc.message,
+                    dest=dest,
+                    local_has_rsync=True,
+                    rsync_port=rsync_port,
+                    sftp_port=sftp_port,
+                )
+            )
+            rsync_error_logged = True
+            used_rsync = False
+    if used_rsync:
+        await log(f"{hop_label}: Repo per rsync geholt (SSH-Port {rsync_port})")
+        return
+    if not rsync_error_logged:
+        await log(
+            dest_rsync_fallback_message(
+                "",
+                dest=dest,
+                local_has_rsync=local_ok,
+                rsync_port=rsync_port,
+                sftp_port=sftp_port,
+            )
+        )
+    await log(f"Hole restic-Repo per SFTP von {hop_label} (Port {sftp_port}): {remote}")
     copilot_repo.mkdir(parents=True, exist_ok=True)
     await sshutil.sftp_mirror_get(
         settings,
@@ -838,9 +1188,9 @@ async def _mirror_from_sftp(
         key=auth.get("key"),
         key_pem=auth.get("key_pem"),
         password=auth.get("password"),
-        port=auth["port"],
+        port=sftp_port,
         log=log,
-        label=str(dest.get("label") or "SFTP"),
+        label=hop_label,
     )
 
 
@@ -965,6 +1315,10 @@ async def run_restic_backup(
                 copilot_repo=copilot_repo,
                 timeout=transfer_timeout,
                 log=log,
+                allow_rsync_install=bsettings.backup_rsync_install,
+                rsync_install_timeout=bsettings.backup_rsync_install_timeout,
+                rsync_work_dir=work_dir,
+                probe_timeout=timeout,
             )
 
         if local:
@@ -1154,6 +1508,10 @@ async def run_restic_backup(
                             copilot_repo=copilot_repo,
                             timeout=transfer_timeout,
                             log=log,
+                            allow_rsync_install=bsettings.backup_rsync_install,
+                            rsync_install_timeout=bsettings.backup_rsync_install_timeout,
+                            rsync_work_dir=work_dir,
+                            probe_timeout=timeout,
                         )
                         dest_path = str(copilot_repo)
                         ok = (copilot_repo / "config").is_file()
@@ -1590,6 +1948,13 @@ async def run_restic_restore(
             copilot_repo=copilot_repo,
             timeout=transfer_timeout,
             log=log,
+            allow_rsync_install=bsettings.backup_rsync_install,
+            rsync_install_timeout=bsettings.backup_rsync_install_timeout,
+            rsync_work_dir=(
+                f"{bsettings.backup_lxc_dir.rstrip('/')}/restic-work/"
+                f"{safe_name(project)}"
+            ),
+            probe_timeout=timeout,
         )
 
     await ensure_restic_installed(
