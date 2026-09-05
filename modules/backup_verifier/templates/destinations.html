@@ -234,7 +234,10 @@
               <div class="mt-1.5">${keep}</div>
             </div>
           </div>
-          <div class="flex gap-1">
+          <div class="flex flex-wrap gap-1">
+            ${(it.kind === 'copilot' || it.kind === 'sftp') && it.id
+              ? `<a class="btn btn-ghost btn-xs" href="/modules/backup_verifier/browser?dest=${encodeURIComponent(it.id)}">Durchsuchen</a>`
+              : ''}
             <button type="button" class="btn btn-ghost btn-xs" data-up="${idx}" title="Nach oben">▲</button>
             <button type="button" class="btn btn-ghost btn-xs" data-down="${idx}" title="Nach unten">▼</button>
             <button type="button" class="btn btn-ghost btn-xs" data-toggle="${idx}" title="Aktiv umschalten">${it.enabled ? 'An' : 'Aus'}</button>

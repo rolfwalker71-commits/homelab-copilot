@@ -805,6 +805,76 @@ html[data-chrome="desktop"] .module-card-ico {
   color: var(--primary);
 }
 
+.dest-keep-badge.is-archive {
+  background: color-mix(in srgb, var(--info) 16%, transparent);
+  color: var(--info);
+}
+
+.dest-keep-badge.is-restic {
+  background: color-mix(in srgb, var(--partial) 18%, transparent);
+  color: var(--partial);
+}
+
+.dest-keep-badge.is-file {
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+  color: var(--muted);
+}
+
+.browse-crumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.875rem;
+}
+
+.browse-crumb-link {
+  min-height: 2.5rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary-container) 28%, var(--card));
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.browse-crumb-link:hover,
+.browse-crumb-link:focus-visible {
+  background: color-mix(in srgb, var(--primary-container) 48%, var(--card));
+}
+
+.browse-crumb-current {
+  min-height: 2.5rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--on-primary);
+  font-weight: 700;
+}
+
+.browse-crumb-sep {
+  color: var(--muted);
+}
+
+.browse-name {
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.browse-name.is-dir {
+  color: var(--primary);
+  text-align: left;
+}
+
+.browse-name.is-blocked {
+  color: var(--muted);
+}
+
+.browse-row + .browse-row {
+  border-top: 1px solid var(--outline);
+}
+
 .btn-icon svg {
   width: 0.9rem;
   height: 0.9rem;

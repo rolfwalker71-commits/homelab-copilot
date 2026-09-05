@@ -8,9 +8,10 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from jinja2 import ChoiceLoader, Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, Field
@@ -26,9 +27,11 @@ from app.core.locale import format_bytes, format_de, iso_utc, now_berlin
 from app.core.topology import TopologyStore
 
 from backup_verifier.backup import BackupError, list_backup_stacks, run_backup
+from backup_verifier import browser as browse_mod
 from backup_verifier.config import get_backup_settings
 from backup_verifier import cron as cron_mod
 from backup_verifier import destinations as dest_mod
+from backup_verifier import sshutil
 from backup_verifier.inventory import build_inventory, resolve_guest
 from backup_verifier.jobs import JOBS
 from backup_verifier.restic import ENGINE_RESTIC, ResticError, list_restic_snapshots
@@ -539,6 +542,99 @@ async def check_destination(payload: DestinationCheckPayload) -> dict[str, Any]:
     return result
 
 
+async def _load_browse_dest(dest_id: int) -> dict[str, Any]:
+    store = _get_store()
+    await dest_mod.ensure_seeded(store)
+    dest = await store.get_destination(int(dest_id))
+    if not dest:
+        raise HTTPException(status_code=404, detail="Ziel nicht gefunden.")
+    return dest
+
+
+@router.get("/browse")
+async def browse_destination(
+    dest_id: int = Query(..., ge=1),
+    path: str = Query("", max_length=1024),
+) -> dict[str, Any]:
+    dest = await _load_browse_dest(dest_id)
+    try:
+        return await browse_mod.browse_destination(dest, path)
+    except browse_mod.BrowserError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@router.get("/browse/download")
+async def browse_download(
+    dest_id: int = Query(..., ge=1),
+    path: str = Query(..., min_length=1, max_length=1024),
+):
+    dest = await _load_browse_dest(dest_id)
+    if not browse_mod.is_browsable(dest):
+        raise HTTPException(
+            status_code=400,
+            detail="Host-Staging ist ephemer und nicht durchsuchbar.",
+        )
+    try:
+        rel = browse_mod.normalize_rel(path)
+        root = browse_mod.dest_root(dest)
+        name = rel.rsplit("/", 1)[-1] if rel else ""
+        if dest.get("kind") == dest_mod.KIND_COPILOT:
+            local = browse_mod.resolve_local_file(root, rel)
+            headers = {
+                "Content-Disposition": (
+                    f"attachment; filename*=UTF-8''{quote(local.name)}"
+                ),
+                "Cache-Control": "no-store",
+            }
+            return FileResponse(
+                path=str(local),
+                filename=local.name,
+                media_type="application/gzip",
+                headers=headers,
+            )
+        remote = browse_mod.assert_sftp_downloadable(root, rel, name)
+        host = (dest.get("host") or "").strip()
+        if not host:
+            raise browse_mod.BrowserError("SFTP-Ziel hat keinen Host.", 400)
+        settings = get_settings()
+        auth = dest_mod.resolve_auth(dest, settings)
+        try:
+            await sshutil.sftp_stat_file(
+                settings,
+                host,
+                remote,
+                username=auth["username"],
+                key=auth.get("key"),
+                key_pem=auth.get("key_pem"),
+                password=auth.get("password"),
+                port=auth["port"],
+            )
+        except DockerControlError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        headers = {
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
+            "Cache-Control": "no-store",
+        }
+        return StreamingResponse(
+            sshutil.sftp_iter_file(
+                settings,
+                host,
+                remote,
+                username=auth["username"],
+                key=auth.get("key"),
+                key_pem=auth.get("key_pem"),
+                password=auth.get("password"),
+                port=auth["port"],
+            ),
+            media_type="application/gzip",
+            headers=headers,
+        )
+    except browse_mod.BrowserError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    except DockerControlError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
 @router.get("/stacks")
 async def stacks(request: Request) -> dict[str, Any]:
     return {"stacks": await list_backup_stacks(_snapshot(request))}
@@ -974,6 +1070,14 @@ class BackupVerifierModule:
                 request,
                 "destinations.html",
                 _page_ctx("destinations"),
+            )
+
+        @app.get("/modules/backup_verifier/browser", response_class=HTMLResponse)
+        async def backup_browser_page(request: Request) -> HTMLResponse:
+            return templates.TemplateResponse(
+                request,
+                "browser.html",
+                _page_ctx("browser"),
             )
 
         async def _sched_runner() -> None:

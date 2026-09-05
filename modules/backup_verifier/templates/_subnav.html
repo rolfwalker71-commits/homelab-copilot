@@ -13,6 +13,12 @@
     <span class="nav-ico">{{ ico('targets', 15) }}</span>
     Ziele
   </a>
+  <a href="/modules/backup_verifier/browser"
+     class="btn btn-sm {% if active_view == 'browser' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'browser' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('browse', 15) }}</span>
+    Durchsuchen
+  </a>
   <a href="/modules/backup_verifier/schedule"
      class="btn btn-sm {% if active_view == 'schedule' %}btn-primary{% else %}btn-ghost{% endif %}"
      {% if active_view == 'schedule' %}aria-current="page"{% endif %}>

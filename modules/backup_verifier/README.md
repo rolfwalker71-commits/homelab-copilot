@@ -36,12 +36,15 @@ Default **quiesce**: `docker compose stop` before volume tar, then `up -d` / `st
 
 - Page: [`/modules/backup_verifier`](/modules/backup_verifier) (Backup / Zeitplan, volle Breite)
 - **Ziele:** [`/modules/backup_verifier/destinations`](/modules/backup_verifier/destinations) — pipeline order, SFTP auth, connection check
+- **Durchsuchen:** [`/modules/backup_verifier/browser`](/modules/backup_verifier/browser) — list Copilot + SFTP dest folders (`.tar.gz` and `restic/<host>/<stack>`), no binary dump; optional archive download
 - Verlauf: [`/modules/backup_verifier/history`](/modules/backup_verifier/history)
 - Stack cards: **Backup** / **Verlauf**
 - API prefix: `/api/modules/backup_verifier/`
   - `GET /status` — setup / `pipeline` / in-process scheduler
   - `GET|PUT /destinations` — sorted list (secrets masked); full replace on PUT
   - `POST /destinations/check` — connection test for one destination payload
+  - `GET /browse?dest_id=&path=` — list files/dirs under a dest root (path relative; `../` rejected)
+  - `GET /browse/download?dest_id=&path=` — download a `.tar.gz` / `.tar` archive only (not restic keys/packs)
   - `GET /preflight?parent_id=&project=`
   - `POST /run` — body `{parent_id, project, quiesce?, engine?: tar|restic, restic_*?}` → background job (`job_id`); poll `GET /jobs/{id}` for percent/phase; `?wait=true` sync. **TOTP-gated** (not for host cron).
   - `GET /jobs?active=1` — laufende Jobs (Reconnect nach Navigation)

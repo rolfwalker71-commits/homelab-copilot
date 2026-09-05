@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 import shlex
+import shutil
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -22,6 +24,14 @@ LogFn = Callable[[str], Awaitable[None]]
 # Keepalive so idle long sessions are not dropped by NAT/firewall mid-command.
 _SSH_KEEPALIVE_INTERVAL = 30
 _SSH_KEEPALIVE_COUNT_MAX = 3
+_SFTP_RETRIES = 4
+_SFTP_RETRY_SLEEP = 2.0
+_SFTP_PROGRESS_EVERY = 40
+_RSYNC_MISSING = re.compile(
+    r"command not found|kommando nicht gefunden|not installed|"
+    r"connection unexpectedly closed",
+    re.I,
+)
 
 
 def _ssh_connect_kwargs(
@@ -613,6 +623,355 @@ def _sftp_is_dir(attrs: object | None) -> bool:
     return bool(int(perms) & 0o040000)
 
 
+def _sftp_is_symlink(attrs: object | None) -> bool:
+    if attrs is None:
+        return False
+    typ = getattr(attrs, "type", None)
+    link_type = getattr(asyncssh, "FILEXFER_TYPE_SYMLINK", 3)
+    if typ is not None:
+        return typ == link_type
+    perms = getattr(attrs, "permissions", None)
+    if perms is None:
+        return False
+    return (int(perms) & 0o170000) == 0o120000
+
+
+async def sftp_listdir(
+    settings: Settings,
+    ip: str,
+    remote_dir: str,
+    *,
+    timeout: float = 60.0,
+    username: str | None = None,
+    key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
+    port: int | None = None,
+) -> list[dict]:
+    """List one remote directory via SFTP (no file contents)."""
+    remote = remote_dir.rstrip("/") or "/"
+
+    async def _read() -> list[dict]:
+        async with _sftp_connect_ctx(
+            settings,
+            ip,
+            username=username,
+            key=key,
+            key_pem=key_pem,
+            password=password,
+            port=port,
+        ) as conn:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    entries = await sftp.readdir(remote)
+                except (OSError, asyncssh.SFTPError) as exc:
+                    text = str(exc).lower()
+                    if "no such" in text or "not found" in text:
+                        raise DockerControlError(
+                            f"SFTP-Ordner nicht gefunden ({ip}:{remote})",
+                            status_code=404,
+                        ) from exc
+                    if "permission" in text:
+                        raise DockerControlError(
+                            f"Keine Berechtigung für SFTP-Ordner ({ip}:{remote})",
+                            status_code=403,
+                        ) from exc
+                    raise DockerControlError(
+                        f"SFTP-Verzeichnis nicht lesbar ({ip}:{remote}): {exc}",
+                        status_code=502,
+                    ) from exc
+                out: list[dict] = []
+                for ent in entries:
+                    name = ent.filename
+                    if name in (".", ".."):
+                        continue
+                    rpath = f"{remote.rstrip('/')}/{name}"
+                    attrs = ent.attrs
+                    symlink = _sftp_is_symlink(attrs)
+                    is_dir = _sftp_is_dir(attrs)
+                    link_target = None
+                    if symlink:
+                        try:
+                            link_target = await sftp.readlink(rpath)
+                        except (OSError, asyncssh.SFTPError):
+                            link_target = None
+                    if not is_dir and not symlink:
+                        try:
+                            st = await sftp.stat(rpath)
+                            is_dir = _sftp_is_dir(st)
+                            attrs = st
+                        except (OSError, asyncssh.SFTPError):
+                            pass
+                    size = getattr(attrs, "size", None)
+                    mtime = getattr(attrs, "mtime", None)
+                    out.append(
+                        {
+                            "name": name,
+                            "path": rpath,
+                            "is_dir": is_dir,
+                            "symlink": symlink,
+                            "link_target": link_target,
+                            "size": int(size) if size is not None else None,
+                            "mtime": float(mtime) if mtime is not None else None,
+                        }
+                    )
+                return out
+
+    try:
+        return await asyncio.wait_for(_read(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise DockerControlError(
+            f"SFTP-Timeout bei {ip}:{remote}",
+            status_code=504,
+        ) from exc
+    except DockerControlError:
+        raise
+    except (OSError, asyncssh.Error) as exc:
+        raise DockerControlError(
+            format_ssh_failure(ip, exc, username=username),
+            status_code=502,
+        ) from exc
+
+
+async def sftp_stat_file(
+    settings: Settings,
+    ip: str,
+    remote_path: str,
+    *,
+    timeout: float = 30.0,
+    username: str | None = None,
+    key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
+    port: int | None = None,
+) -> dict:
+    """Stat a remote file; raises if missing or a directory."""
+
+    async def _stat() -> dict:
+        async with _sftp_connect_ctx(
+            settings,
+            ip,
+            username=username,
+            key=key,
+            key_pem=key_pem,
+            password=password,
+            port=port,
+        ) as conn:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    st = await sftp.stat(remote_path)
+                except (OSError, asyncssh.SFTPError) as exc:
+                    raise DockerControlError(
+                        f"SFTP-Datei nicht gefunden ({ip}:{remote_path})",
+                        status_code=404,
+                    ) from exc
+                if _sftp_is_dir(st):
+                    raise DockerControlError(
+                        "Nur Dateien können geladen werden.",
+                        status_code=400,
+                    )
+                return {
+                    "size": int(getattr(st, "size", 0) or 0),
+                    "mtime": getattr(st, "mtime", None),
+                }
+
+    try:
+        return await asyncio.wait_for(_stat(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise DockerControlError(
+            f"SFTP-Timeout bei {ip}:{remote_path}",
+            status_code=504,
+        ) from exc
+    except DockerControlError:
+        raise
+    except (OSError, asyncssh.Error) as exc:
+        raise DockerControlError(
+            format_ssh_failure(ip, exc, username=username),
+            status_code=502,
+        ) from exc
+
+
+async def sftp_iter_file(
+    settings: Settings,
+    ip: str,
+    remote_path: str,
+    *,
+    chunk_size: int = 65536,
+    username: str | None = None,
+    key: Path | None = None,
+    key_pem: str | None = None,
+    password: str | None = None,
+    port: int | None = None,
+):
+    """Yield file bytes via SFTP (connection held for the generator lifetime)."""
+    try:
+        async with _sftp_connect_ctx(
+            settings,
+            ip,
+            username=username,
+            key=key,
+            key_pem=key_pem,
+            password=password,
+            port=port,
+        ) as conn:
+            async with conn.start_sftp_client() as sftp:
+                async with sftp.open(remote_path, "rb") as fh:
+                    while True:
+                        chunk = await fh.read(chunk_size)
+                        if not chunk:
+                            break
+                        yield chunk
+    except DockerControlError:
+        raise
+    except (OSError, asyncssh.Error) as exc:
+        raise DockerControlError(
+            format_ssh_failure(ip, exc, username=username),
+            status_code=502,
+        ) from exc
+
+
+class _SftpSession:
+    """Reconnectable SFTP client for long restic-repo mirrors."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        ip: str,
+        *,
+        username: str | None = None,
+        key: Path | None = None,
+        key_pem: str | None = None,
+        password: str | None = None,
+        port: int | None = None,
+    ) -> None:
+        self._settings = settings
+        self._ip = ip
+        self._auth = {
+            "username": username,
+            "key": key,
+            "key_pem": key_pem,
+            "password": password,
+            "port": port,
+        }
+        self.conn: asyncssh.SSHClientConnection | None = None
+        self.sftp: asyncssh.SFTPClient | None = None
+
+    async def open(self) -> None:
+        await self.close()
+        self.conn = await asyncssh.connect(
+            self._ip,
+            **_ssh_connect_kwargs(self._settings, **self._auth),
+        )
+        self.sftp = await self.conn.start_sftp_client()
+
+    async def close(self) -> None:
+        sftp, conn = self.sftp, self.conn
+        self.sftp = None
+        self.conn = None
+        if sftp is not None:
+            try:
+                sftp.exit()
+            except Exception:
+                pass
+        if conn is not None:
+            conn.close()
+            try:
+                await conn.wait_closed()
+            except Exception:
+                pass
+
+    def client(self) -> asyncssh.SFTPClient:
+        if self.sftp is None:
+            raise DockerControlError(
+                f"SFTP-Sitzung zu {self._ip} ist geschlossen.",
+                status_code=502,
+            )
+        return self.sftp
+
+
+async def _sftp_mkdirs(sftp, remote: str) -> None:
+    """Create remote dirs one level at a time (Hetzner Storage Box SFTP)."""
+    remote = remote.rstrip("/")
+    if not remote or remote == "/":
+        return
+    try:
+        st = await sftp.stat(remote)
+        if _sftp_is_dir(st):
+            return
+    except (OSError, asyncssh.SFTPError):
+        pass
+    parent = str(Path(remote).parent).replace("\\", "/")
+    if parent not in (".", "", "/"):
+        await _sftp_mkdirs(sftp, parent)
+    try:
+        await sftp.mkdir(remote)
+    except (OSError, asyncssh.SFTPError):
+        pass
+
+
+def _rsync_missing_error(detail: str) -> bool:
+    return bool(_RSYNC_MISSING.search(detail or ""))
+
+
+async def _remote_has_rsync(
+    settings: Settings,
+    ip: str,
+    *,
+    username: str | None = None,
+    port: int | None = None,
+) -> bool:
+    out, err, code = await ssh_run(
+        settings,
+        ip,
+        "command -v rsync",
+        timeout=15,
+        username=username,
+        port=port,
+    )
+    if code == 0 and (out or "").strip():
+        return True
+    text = f"{out}\n{err}"
+    if _rsync_missing_error(text) or code != 0:
+        return False
+    return False
+
+
+async def _sftp_call(session: _SftpSession, op, *, timeout: float, retries: int = _SFTP_RETRIES):
+    """Run an SFTP coroutine with reconnect + per-call timeout."""
+    last: BaseException | None = None
+    for attempt in range(retries):
+        try:
+            return await asyncio.wait_for(op(session.client()), timeout=timeout)
+        except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
+            last = exc
+            if attempt + 1 >= retries:
+                break
+            await asyncio.sleep(_SFTP_RETRY_SLEEP * (attempt + 1))
+            try:
+                await session.open()
+            except (OSError, asyncssh.Error) as open_exc:
+                last = open_exc
+    assert last is not None
+    raise last
+
+
+async def _sftp_note_progress(
+    log: LogFn | None,
+    stats: dict[str, int],
+    *,
+    force: bool = False,
+) -> None:
+    n = stats["copied"] + stats["skipped"]
+    if log is None:
+        return
+    if not force and (n == 0 or n % _SFTP_PROGRESS_EVERY != 0):
+        return
+    await log(
+        f"SFTP … {stats['copied']} neu, {stats['skipped']} unverändert, "
+        f"{stats['deleted']} entfernt"
+    )
+
+
 async def sftp_mirror_get(
     settings: Settings,
     ip: str,
@@ -627,17 +986,46 @@ async def sftp_mirror_get(
     key_pem: str | None = None,
     password: str | None = None,
     port: int | None = None,
+    log: LogFn | None = None,
 ) -> dict[str, int]:
-    """Mirror remote directory → local (skip same-size files)."""
+    """Mirror remote directory → local (skip same-size files).
+
+    ``timeout`` is per file / stall; overall wall clock is 4× that so a
+    first 15 GB restic repo can finish over a slow SFTP link.
+    """
     skip = exclude or frozenset({"locks"})
     local_dir.mkdir(parents=True, exist_ok=True)
     stats = {"copied": 0, "skipped": 0, "deleted": 0}
+    started = time.monotonic()
+    overall = max(float(timeout) * 4.0, float(timeout))
 
-    async def _walk(sftp, remote: str, local: Path) -> None:
+    def _budget() -> None:
+        if time.monotonic() - started > overall:
+            raise DockerControlError(
+                f"SFTP-Sync-Timeout von {ip}:{remote_dir}",
+                status_code=504,
+            )
+
+    session = _SftpSession(
+        settings,
+        ip,
+        username=username,
+        key=key,
+        key_pem=key_pem,
+        password=password,
+        port=port,
+    )
+
+    async def _walk(remote: str, local: Path) -> None:
+        _budget()
         local.mkdir(parents=True, exist_ok=True)
+
+        async def _readdir(sftp):
+            return await sftp.readdir(remote)
+
         try:
-            entries = await sftp.readdir(remote)
-        except (OSError, asyncssh.SFTPError) as exc:
+            entries = await _sftp_call(session, _readdir, timeout=min(120.0, timeout))
+        except (OSError, asyncssh.SFTPError, asyncio.TimeoutError) as exc:
             raise DockerControlError(
                 f"SFTP-Verzeichnis nicht lesbar ({ip}:{remote}): {exc}",
                 status_code=502,
@@ -654,49 +1042,48 @@ async def sftp_mirror_get(
             is_dir = _sftp_is_dir(attrs)
             if not is_dir:
                 try:
-                    is_dir = _sftp_is_dir(await sftp.stat(rpath))
-                except (OSError, asyncssh.SFTPError):
+                    st = await _sftp_call(
+                        session, lambda sftp, p=rpath: sftp.stat(p), timeout=min(60.0, timeout)
+                    )
+                    is_dir = _sftp_is_dir(st)
+                except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
                     is_dir = False
             if is_dir:
-                await _walk(sftp, rpath, lpath)
+                await _walk(rpath, lpath)
                 continue
             try:
-                rst = await sftp.stat(rpath)
+                rst = await _sftp_call(
+                    session, lambda sftp, p=rpath: sftp.stat(p), timeout=min(60.0, timeout)
+                )
                 rsize = int(getattr(rst, "size", 0) or 0)
                 if lpath.is_file() and lpath.stat().st_size == rsize:
                     stats["skipped"] += 1
+                    await _sftp_note_progress(log, stats)
                     continue
-            except (OSError, asyncssh.SFTPError):
+            except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
                 pass
-            await sftp.get(rpath, str(lpath))
+            _budget()
+            await _sftp_call(
+                session,
+                lambda sftp, src=rpath, dst=str(lpath): sftp.get(src, dst),
+                timeout=timeout,
+            )
             stats["copied"] += 1
+            await _sftp_note_progress(log, stats)
         if delete_extra:
             for child in list(local.iterdir()):
                 if child.name in skip or child.name in remote_names:
                     continue
                 if child.is_dir():
-                    import shutil
-
                     shutil.rmtree(child, ignore_errors=True)
                 else:
                     child.unlink(missing_ok=True)
                 stats["deleted"] += 1
 
     try:
-        async with _sftp_connect_ctx(
-            settings,
-            ip,
-            username=username,
-            key=key,
-            key_pem=key_pem,
-            password=password,
-            port=port,
-        ) as conn:
-            async with conn.start_sftp_client() as sftp:
-                await asyncio.wait_for(
-                    _walk(sftp, remote_dir.rstrip("/"), local_dir),
-                    timeout=timeout,
-                )
+        await session.open()
+        await _walk(remote_dir.rstrip("/"), local_dir)
+        await _sftp_note_progress(log, stats, force=True)
     except asyncio.TimeoutError as exc:
         raise DockerControlError(
             f"SFTP-Sync-Timeout von {ip}:{remote_dir}",
@@ -709,6 +1096,8 @@ async def sftp_mirror_get(
             format_ssh_failure(ip, exc, username=username),
             status_code=502,
         ) from exc
+    finally:
+        await session.close()
     return stats
 
 
@@ -726,8 +1115,13 @@ async def sftp_mirror_put(
     key_pem: str | None = None,
     password: str | None = None,
     port: int | None = None,
+    log: LogFn | None = None,
 ) -> dict[str, int]:
-    """Mirror local directory → remote (skip same-size files)."""
+    """Mirror local directory → remote (skip same-size files).
+
+    ``timeout`` is per file / stall; overall wall clock is 4× that so a
+    first 15 GB restic repo can finish over a slow Storage-Box link.
+    """
     skip = exclude or frozenset({"locks"})
     if not local_dir.is_dir():
         raise DockerControlError(
@@ -735,11 +1129,32 @@ async def sftp_mirror_put(
             status_code=400,
         )
     stats = {"copied": 0, "skipped": 0, "deleted": 0}
+    started = time.monotonic()
+    overall = max(float(timeout) * 4.0, float(timeout))
 
-    async def _rm_tree(sftp, remote: str) -> None:
+    def _budget() -> None:
+        if time.monotonic() - started > overall:
+            raise DockerControlError(
+                f"SFTP-Sync-Timeout nach {ip}:{remote_dir}",
+                status_code=504,
+            )
+
+    session = _SftpSession(
+        settings,
+        ip,
+        username=username,
+        key=key,
+        key_pem=key_pem,
+        password=password,
+        port=port,
+    )
+
+    async def _rm_tree(remote: str) -> None:
         try:
-            entries = await sftp.readdir(remote)
-        except (OSError, asyncssh.SFTPError):
+            entries = await _sftp_call(
+                session, lambda sftp, p=remote: sftp.readdir(p), timeout=min(120.0, timeout)
+            )
+        except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
             return
         for ent in entries:
             name = ent.filename
@@ -749,32 +1164,35 @@ async def sftp_mirror_put(
             attrs = ent.attrs
             is_dir = _sftp_is_dir(attrs)
             if is_dir:
-                await _rm_tree(sftp, rpath)
+                await _rm_tree(rpath)
                 try:
-                    await sftp.rmdir(rpath)
-                except (OSError, asyncssh.SFTPError):
+                    await _sftp_call(
+                        session, lambda sftp, p=rpath: sftp.rmdir(p), timeout=min(60.0, timeout)
+                    )
+                except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
                     pass
             else:
                 try:
-                    await sftp.remove(rpath)
-                except (OSError, asyncssh.SFTPError):
+                    await _sftp_call(
+                        session, lambda sftp, p=rpath: sftp.remove(p), timeout=min(60.0, timeout)
+                    )
+                except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
                     pass
 
-    async def _walk(sftp, local: Path, remote: str) -> None:
-        try:
-            await sftp.makedirs(remote, exist_ok=True)
-        except (OSError, asyncssh.SFTPError):
-            try:
-                await sftp.mkdir(remote)
-            except (OSError, asyncssh.SFTPError):
-                pass
+    async def _walk(local: Path, remote: str) -> None:
+        _budget()
+        await _sftp_call(
+            session, lambda sftp, p=remote: _sftp_mkdirs(sftp, p), timeout=min(120.0, timeout)
+        )
         remote_names: set[str] = set()
         try:
-            entries = await sftp.readdir(remote)
+            entries = await _sftp_call(
+                session, lambda sftp, p=remote: sftp.readdir(p), timeout=min(120.0, timeout)
+            )
             for ent in entries:
                 if ent.filename not in (".", ".."):
                     remote_names.add(ent.filename)
-        except (OSError, asyncssh.SFTPError):
+        except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
             entries = []
         local_names: set[str] = set()
         for item in local.iterdir():
@@ -783,47 +1201,49 @@ async def sftp_mirror_put(
             local_names.add(item.name)
             rpath = f"{remote.rstrip('/')}/{item.name}"
             if item.is_dir():
-                await _walk(sftp, item, rpath)
+                await _walk(item, rpath)
                 continue
             try:
-                rst = await sftp.stat(rpath)
+                rst = await _sftp_call(
+                    session, lambda sftp, p=rpath: sftp.stat(p), timeout=min(60.0, timeout)
+                )
                 if int(getattr(rst, "size", 0) or 0) == item.stat().st_size:
                     stats["skipped"] += 1
+                    await _sftp_note_progress(log, stats)
                     continue
-            except (OSError, asyncssh.SFTPError):
+            except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
                 pass
-            await sftp.put(str(item), rpath)
+            _budget()
+            await _sftp_call(
+                session,
+                lambda sftp, src=str(item), dst=rpath: sftp.put(src, dst),
+                timeout=timeout,
+            )
             stats["copied"] += 1
+            await _sftp_note_progress(log, stats)
         if delete_extra:
             for name in remote_names - local_names:
                 if name in skip:
                     continue
                 rpath = f"{remote.rstrip('/')}/{name}"
-                await _rm_tree(sftp, rpath)
+                await _rm_tree(rpath)
                 try:
-                    await sftp.remove(rpath)
-                except (OSError, asyncssh.SFTPError):
+                    await _sftp_call(
+                        session, lambda sftp, p=rpath: sftp.remove(p), timeout=min(60.0, timeout)
+                    )
+                except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
                     try:
-                        await sftp.rmdir(rpath)
-                    except (OSError, asyncssh.SFTPError):
+                        await _sftp_call(
+                            session, lambda sftp, p=rpath: sftp.rmdir(p), timeout=min(60.0, timeout)
+                        )
+                    except (OSError, asyncssh.SFTPError, asyncio.TimeoutError):
                         pass
                 stats["deleted"] += 1
 
     try:
-        async with _sftp_connect_ctx(
-            settings,
-            ip,
-            username=username,
-            key=key,
-            key_pem=key_pem,
-            password=password,
-            port=port,
-        ) as conn:
-            async with conn.start_sftp_client() as sftp:
-                await asyncio.wait_for(
-                    _walk(sftp, local_dir, remote_dir.rstrip("/")),
-                    timeout=timeout,
-                )
+        await session.open()
+        await _walk(local_dir, remote_dir.rstrip("/"))
+        await _sftp_note_progress(log, stats, force=True)
     except asyncio.TimeoutError as exc:
         raise DockerControlError(
             f"SFTP-Sync-Timeout nach {ip}:{remote_dir}",
@@ -836,7 +1256,21 @@ async def sftp_mirror_put(
             format_ssh_failure(ip, exc, username=username),
             status_code=502,
         ) from exc
+    finally:
+        await session.close()
     return stats
+
+
+def _rsync_ssh_cmd(settings: Settings, *, username: str | None, port: int | None) -> tuple[str, str, int]:
+    key = ssh_key_path(settings)
+    user = username or settings.docker_ssh_user
+    ssh_port = port or settings.docker_ssh_port
+    ssh_cmd = (
+        f"ssh -i {shlex.quote(str(key))} -p {int(ssh_port)} "
+        f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        f"-o BatchMode=yes -o LogLevel=ERROR"
+    )
+    return ssh_cmd, user, int(ssh_port)
 
 
 async def rsync_pull(
@@ -850,19 +1284,14 @@ async def rsync_pull(
     username: str | None = None,
     port: int | None = None,
 ) -> bool:
-    """Pull remote→local with rsync if available. Returns False if rsync missing."""
+    """Pull remote→local with rsync if both sides have it. False = use SFTP."""
     which, _, code = await local_run("command -v rsync", timeout=10)
     if code != 0 or not (which or "").strip():
         return False
+    if not await _remote_has_rsync(settings, ip, username=username, port=port):
+        return False
     local_dir.mkdir(parents=True, exist_ok=True)
-    key = ssh_key_path(settings)
-    user = username or settings.docker_ssh_user
-    ssh_port = port or settings.docker_ssh_port
-    ssh_cmd = (
-        f"ssh -i {shlex.quote(str(key))} -p {int(ssh_port)} "
-        f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-        f"-o BatchMode=yes -o LogLevel=ERROR"
-    )
+    ssh_cmd, user, _ = _rsync_ssh_cmd(settings, username=username, port=port)
     excludes = " ".join(f"--exclude {shlex.quote(x)}" for x in exclude)
     src = f"{user}@{ip}:{remote_dir.rstrip('/')}/"
     cmd = (
@@ -870,7 +1299,12 @@ async def rsync_pull(
         f"-e {shlex.quote(ssh_cmd)} "
         f"{shlex.quote(src)} {shlex.quote(str(local_dir) + '/')}"
     )
-    await local_run_ok(cmd, timeout=timeout)
+    try:
+        await local_run_ok(cmd, timeout=timeout)
+    except DockerControlError as exc:
+        if _rsync_missing_error(exc.message):
+            return False
+        raise
     return True
 
 
@@ -885,23 +1319,18 @@ async def rsync_push(
     username: str | None = None,
     port: int | None = None,
 ) -> bool:
-    """Push local→remote with rsync if available. Returns False if rsync missing."""
+    """Push local→remote with rsync if both sides have it. False = use SFTP."""
     which, _, code = await local_run("command -v rsync", timeout=10)
     if code != 0 or not (which or "").strip():
+        return False
+    if not await _remote_has_rsync(settings, ip, username=username, port=port):
         return False
     if not local_dir.is_dir():
         raise DockerControlError(
             f"Lokales Verzeichnis fehlt: {local_dir}",
             status_code=400,
         )
-    key = ssh_key_path(settings)
-    user = username or settings.docker_ssh_user
-    ssh_port = port or settings.docker_ssh_port
-    ssh_cmd = (
-        f"ssh -i {shlex.quote(str(key))} -p {int(ssh_port)} "
-        f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-        f"-o BatchMode=yes -o LogLevel=ERROR"
-    )
+    ssh_cmd, user, _ = _rsync_ssh_cmd(settings, username=username, port=port)
     excludes = " ".join(f"--exclude {shlex.quote(x)}" for x in exclude)
     dest = f"{user}@{ip}:{remote_dir.rstrip('/')}/"
     cmd = (
@@ -909,5 +1338,10 @@ async def rsync_push(
         f"-e {shlex.quote(ssh_cmd)} "
         f"{shlex.quote(str(local_dir) + '/')} {shlex.quote(dest)}"
     )
-    await local_run_ok(cmd, timeout=timeout)
+    try:
+        await local_run_ok(cmd, timeout=timeout)
+    except DockerControlError as exc:
+        if _rsync_missing_error(exc.message):
+            return False
+        raise
     return True
