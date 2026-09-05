@@ -33,6 +33,110 @@ logger = logging.getLogger(__name__)
 _IP_RE = re.compile(
     r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\b"
 )
+_NON_STATIC_NET_IP = frozenset({"dhcp", "manual", "auto"})
+
+
+def _usable_guest_ipv4(ip: str) -> bool:
+    if not ip or not _IP_RE.fullmatch(ip):
+        return False
+    if ip.startswith("127.") or ip.startswith("169.254.") or ip == "0.0.0.0":
+        return False
+    return True
+
+
+def prefer_guest_ipv4s(ips: list[str]) -> list[str]:
+    """LAN ``192.168.`` first, then other global IPv4 (skip loopback / link-local)."""
+    usable: list[str] = []
+    seen: set[str] = set()
+    for raw in ips:
+        ip = str(raw or "").strip()
+        if not ip or ip in seen or not _usable_guest_ipv4(ip):
+            continue
+        seen.add(ip)
+        usable.append(ip)
+    lan = [ip for ip in usable if ip.startswith("192.168.")]
+    other = [ip for ip in usable if not ip.startswith("192.168.")]
+    return lan + other
+
+
+def _ipv4_tokens_from_value(val: Any) -> list[str]:
+    if val is None:
+        return []
+    if isinstance(val, (list, tuple)):
+        out: list[str] = []
+        for item in val:
+            out.extend(_ipv4_tokens_from_value(item))
+        return out
+    text = str(val).strip()
+    if not text:
+        return []
+    found: list[str] = []
+    for token in re.split(r"[\s,;]+", text):
+        addr = token.split("/")[0].strip()
+        if _IP_RE.fullmatch(addr):
+            found.append(addr)
+    return found
+
+
+def ips_from_lxc_config(cfg: dict[str, Any]) -> list[str]:
+    """Static ``netN=...,ip=a.b.c.d/xx`` only — not ``dhcp`` / ``manual`` / ``auto``."""
+    ips: list[str] = []
+    for key, val in cfg.items():
+        if not str(key).startswith("net") or not isinstance(val, str):
+            continue
+        ips.extend(_ips_from_ip_equals_parts(val))
+    return prefer_guest_ipv4s(ips)
+
+
+def ips_from_qemu_config(cfg: dict[str, Any]) -> list[str]:
+    """Cloud-init ``ipconfigN=ip=a.b.c.d/xx`` (skip dhcp/manual)."""
+    ips: list[str] = []
+    for key, val in cfg.items():
+        if not str(key).lower().startswith("ipconfig") or not isinstance(val, str):
+            continue
+        ips.extend(_ips_from_ip_equals_parts(val))
+    return prefer_guest_ipv4s(ips)
+
+
+def _ips_from_ip_equals_parts(val: str) -> list[str]:
+    ips: list[str] = []
+    for part in val.split(","):
+        part = part.strip()
+        if not part.lower().startswith("ip="):
+            continue
+        raw = part.split("=", 1)[1].strip()
+        token = raw.split("/")[0].strip()
+        if not token or token.lower() in _NON_STATIC_NET_IP:
+            continue
+        if _IP_RE.fullmatch(token):
+            ips.append(token)
+    return ips
+
+
+def ips_from_iface_payload(payload: Any) -> list[str]:
+    """PVE LXC ``/interfaces`` (inet / ip-addresses) or QEMU guest-agent ifaces."""
+    rows = payload
+    if isinstance(payload, dict):
+        rows = payload.get("result", payload.get("data", payload))
+    if isinstance(rows, dict):
+        rows = list(rows.values())
+    if not isinstance(rows, list):
+        return []
+    ips: list[str] = []
+    for iface in rows:
+        if not isinstance(iface, dict):
+            continue
+        ips.extend(_ipv4_tokens_from_value(iface.get("inet")))
+        ips.extend(_ipv4_tokens_from_value(iface.get("ip")))
+        for addr in iface.get("ip-addresses") or []:
+            if not isinstance(addr, dict):
+                ips.extend(_ipv4_tokens_from_value(addr))
+                continue
+            typ = str(addr.get("ip-address-type") or "").strip().lower()
+            if typ and typ not in {"ipv4", "inet"}:
+                continue
+            ips.extend(_ipv4_tokens_from_value(addr.get("ip-address")))
+    return prefer_guest_ipv4s(ips)
 
 
 _RAIL_LIVE_STATUS = {
@@ -931,9 +1035,6 @@ class DiscoveryEngine:
 
         if kind == EntityKind.LXC and isinstance(cfg, dict):
             self._apply_lxc_config_meta(entity.meta, cfg)
-            cfg_ips = sorted(set(self._ips_from_lxc_config(cfg)))
-            if cfg_ips:
-                entity.ip_addresses = cfg_ips
         elif kind == EntityKind.QEMU:
             if isinstance(cfg, dict) and not entity.meta.get("tags_list"):
                 cfg_tags = cfg.get("tags")
@@ -943,18 +1044,17 @@ class DiscoveryEngine:
                         cfg_tags if isinstance(cfg_tags, str) else ";".join(tags_list)
                     )
                     entity.meta["tags_list"] = tags_list
-            if entity.status == EntityStatus.RUNNING:
-                try:
-                    ifaces = await self._proxmox_get(
-                        client,
-                        f"/nodes/{quote(node)}/qemu/{vmid}/agent/network-get-interfaces",
-                        headers,
-                    )
-                    entity.ip_addresses = sorted(
-                        set(self._ips_from_qemu_agent(ifaces))
-                    )
-                except Exception as exc:
-                    logger.debug("QEMU agent IPs for %s failed: %s", entity.id, exc)
+        live_ips = await self._resolve_guest_ipv4s(
+            client,
+            headers,
+            kind.value,
+            node,
+            vmid,
+            cfg if isinstance(cfg, dict) else None,
+            running=entity.status == EntityStatus.RUNNING,
+        )
+        if live_ips:
+            entity.ip_addresses = live_ips
 
         return entity
 
@@ -1431,6 +1531,8 @@ class DiscoveryEngine:
         vmid: int,
         status_raw: dict[str, Any],
         cfg: dict[str, Any] | None,
+        *,
+        ip_addresses: list[str] | None = None,
     ) -> dict[str, Any]:
         """Normalize ``status/current`` (+ optional config) for rail + card.
 
@@ -1449,6 +1551,9 @@ class DiscoveryEngine:
                 )
                 meta["tags_list"] = tags_list
         guest_status = str(status_raw.get("status") or "").strip().lower()
+        ips = list(ip_addresses) if ip_addresses is not None else []
+        if not ips and isinstance(cfg, dict):
+            ips = self._static_guest_ipv4s(kind, cfg)
         return {
             "guest_id": guest_id,
             "kind": kind,
@@ -1468,6 +1573,7 @@ class DiscoveryEngine:
             "lock": meta.get("lock") or "",
             "unprivileged": meta.get("unprivileged"),
             "name": resource_guest_name(status_raw, cfg=cfg) or "",
+            "ip_addresses": ips,
         }
 
     async def _read_guest_live(
@@ -1490,13 +1596,19 @@ class DiscoveryEngine:
         cfg, _http = await self._fetch_guest_config(
             client, headers, node, kind_enum, vmid
         )
+        cfg_dict = cfg if isinstance(cfg, dict) else None
+        running = str(status_raw.get("status") or "").strip().lower() == "running"
+        ips = await self._resolve_guest_ipv4s(
+            client, headers, kind, node, vmid, cfg_dict, running=running
+        )
         return self._guest_live_from_pve(
             guest_id,
             kind,
             node,
             vmid,
             status_raw,
-            cfg if isinstance(cfg, dict) else None,
+            cfg_dict,
+            ip_addresses=ips,
         )
 
     async def fetch_guest_status(self, guest_id: str) -> dict[str, Any]:
@@ -2335,34 +2447,52 @@ class DiscoveryEngine:
         return vols
 
     @staticmethod
+    def _static_guest_ipv4s(kind: str, cfg: dict[str, Any] | None) -> list[str]:
+        if not isinstance(cfg, dict):
+            return []
+        if kind == "lxc":
+            return ips_from_lxc_config(cfg)
+        if kind == "qemu":
+            return ips_from_qemu_config(cfg)
+        return []
+
+    async def _resolve_guest_ipv4s(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        kind: str,
+        node: str,
+        vmid: int,
+        cfg: dict[str, Any] | None,
+        *,
+        running: bool,
+    ) -> list[str]:
+        """Static config IP, else live PVE interfaces / QEMU guest-agent."""
+        static = self._static_guest_ipv4s(kind, cfg)
+        if static:
+            return static
+        if not running:
+            return []
+        if kind == "lxc":
+            path = f"/nodes/{quote(node)}/lxc/{vmid}/interfaces"
+        elif kind == "qemu":
+            path = f"/nodes/{quote(node)}/qemu/{vmid}/agent/network-get-interfaces"
+        else:
+            return []
+        try:
+            payload = await self._proxmox_get(client, path, headers)
+        except Exception as exc:
+            logger.debug("Guest-IPs %s %s/%s: %s", kind, node, vmid, exc)
+            return []
+        return ips_from_iface_payload(payload)
+
+    @staticmethod
     def _ips_from_lxc_config(cfg: dict[str, Any]) -> list[str]:
-        ips: list[str] = []
-        for key, val in cfg.items():
-            if not str(key).startswith("net") or not isinstance(val, str):
-                continue
-            # e.g. name=eth0,bridge=vmbr0,ip=192.168.1.10/24,gw=...
-            for part in val.split(","):
-                part = part.strip()
-                if part.startswith("ip=") and not part.startswith("ip=dhcp"):
-                    addr = part[3:].split("/")[0]
-                    if _IP_RE.fullmatch(addr) and not addr.startswith("127."):
-                        ips.append(addr)
-        return ips
+        return ips_from_lxc_config(cfg)
 
     @staticmethod
     def _ips_from_qemu_agent(payload: Any) -> list[str]:
-        ips: list[str] = []
-        result = payload.get("result", payload) if isinstance(payload, dict) else payload
-        if not isinstance(result, list):
-            return ips
-        for iface in result:
-            for addr in iface.get("ip-addresses", []) or []:
-                if addr.get("ip-address-type") != "ipv4":
-                    continue
-                ip = addr.get("ip-address", "")
-                if _IP_RE.fullmatch(ip) and not ip.startswith("127."):
-                    ips.append(ip)
-        return ips
+        return ips_from_iface_payload(payload)
 
     # ------------------------------------------------------------------
     # Docker — local socket

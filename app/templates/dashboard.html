@@ -796,7 +796,7 @@
               <span class="topo-rail-item-body">
                 <span class="topo-rail-item-name break-words">{{ g.name }}</span>
                 <span class="topo-rail-item-sub">
-                  {% if g.ip_addresses %}{{ g.ip_addresses[0] }}{% else %}{{ g.kind.value }}{% endif %}{% if g.vmid %} · {{ g.vmid }}{% endif %}
+                  <span data-guest-live="rail-ip">{% if g.ip_addresses %}{{ g.ip_addresses[0] }}{% else %}{{ g.kind.value }}{% endif %}</span>{% if g.vmid %} · {{ g.vmid }}{% endif %}
                   {% set rail_tags = (g.meta or {}).get('tags_list') or [] %}
                   {% if rail_tags %} · {{ rail_tags[:2] | join(', ') }}{% if rail_tags|length > 2 %}…{% endif %}{% endif %}
                 </span>
@@ -946,8 +946,7 @@
               </div>
               {{ guest_tag_chips(g) }}
               <p class="topo-detail-meta">
-                {{ g.kind.value }}{% if g.vmid %} · {{ g.vmid }}{% endif %}
-                {% if g.ip_addresses %} · {{ g.ip_addresses | join(', ') }}{% endif %}
+                {{ g.kind.value }}{% if g.vmid %} · {{ g.vmid }}{% endif %}<span data-guest-live="ip">{% if g.ip_addresses %} · {{ g.ip_addresses | join(', ') }}{% endif %}</span>
                 {% if row.docker_count %}
                 <span class="topo-sep" aria-hidden="true">·</span>
                 <span class="topo-node-docker-n">{{ row.docker_count }} Docker</span>
@@ -2354,10 +2353,37 @@
     }
   }
 
+  function applyGuestIps(guestId, ips) {
+    if (!guestId || !ips || !ips.length) return;
+    const shown = ips.join(', ');
+    const first = ips[0];
+    const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
+    if (panel) {
+      panel.querySelectorAll('[data-guest-live="ip"]').forEach((el) => {
+        el.textContent = ' · ' + shown;
+      });
+      panel.querySelectorAll('[data-ssh-terminal]').forEach((btn) => {
+        btn.setAttribute('data-guest-ip', first);
+      });
+    }
+    const rail = document.querySelector('[data-select-guest="' + guestId + '"]');
+    if (rail) {
+      const ipEl = rail.querySelector('[data-guest-live="rail-ip"]');
+      if (ipEl) ipEl.textContent = first;
+      const filter = rail.getAttribute('data-filter-text') || '';
+      if (first && filter.indexOf(first) < 0) {
+        rail.setAttribute('data-filter-text', (filter + ' ' + first).trim());
+      }
+    }
+  }
+
   function applyGuestLive(guestId, live) {
     if (!guestId || !live || live.error) return;
     const status = String(live.status || '').toLowerCase();
     if (status) applyGuestStatus(guestId, status);
+    if (Array.isArray(live.ip_addresses) && live.ip_addresses.length) {
+      applyGuestIps(guestId, live.ip_addresses.map((ip) => String(ip || '').trim()).filter(Boolean));
+    }
     const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
     if (!panel) return;
     if (live.uptime != null) {

@@ -131,6 +131,11 @@ class TopologyStore:
             updates: dict[str, Any] = {"meta": meta}
             if status is not None:
                 updates["status"] = status
+            live_ips = live.get("ip_addresses")
+            if isinstance(live_ips, list) and live_ips:
+                ips = [str(ip).strip() for ip in live_ips if str(ip).strip()]
+                if ips:
+                    updates["ip_addresses"] = ips
             guests.append(g.model_copy(update=updates))
             changed = True
         if not changed:
