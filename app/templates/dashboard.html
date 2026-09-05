@@ -3,12 +3,23 @@
 {% from "_icons.html" import ico %}
 
 {% macro inventory_section(entity_id) -%}
-<section class="topo-inventory" aria-labelledby="inv-{{ entity_id }}">
-  <div class="topo-node-section-head">
-    <h4 id="inv-{{ entity_id }}" class="topo-node-section-title">Inventar / Doku</h4>
-    <p class="topo-node-section-hint">Lokale Notizen, Extra-Tags und Links — unabhängig von Proxmox-Tags</p>
-  </div>
-  <form class="topo-inventory-form" data-inventory="{{ entity_id }}">
+<section class="topo-inventory is-collapsed" data-inventory-section data-inventory-key="{{ entity_id }}" aria-labelledby="inv-{{ entity_id }}">
+  <button type="button"
+    class="topo-inventory-toggle"
+    data-inventory-toggle
+    aria-expanded="false"
+    aria-controls="inv-form-{{ entity_id }}"
+    title="Inventar / Doku ein- oder ausklappen"
+    aria-label="Inventar / Doku ein- oder ausklappen">
+    <svg class="topo-inventory-chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path d="M3 4.5 L6 7.5 L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <span class="topo-inventory-toggle-text">
+      <span id="inv-{{ entity_id }}" class="topo-node-section-title">Inventar / Doku</span>
+      <span class="topo-node-section-hint">Lokale Notizen, Extra-Tags und Links — unabhängig von Proxmox-Tags</span>
+    </span>
+  </button>
+  <form id="inv-form-{{ entity_id }}" class="topo-inventory-form" data-inventory="{{ entity_id }}">
     <label class="label" for="inv-notes-{{ entity_id }}">Notizen</label>
     <textarea id="inv-notes-{{ entity_id }}" class="field topo-inventory-notes" rows="3" maxlength="8000" placeholder="Zweck, Zugänge, Besonderheiten…"></textarea>
     <label class="label" for="inv-tags-{{ entity_id }}">Extra-Tags (Komma oder Semikolon)</label>
@@ -2215,6 +2226,37 @@
     });
   }
 
+  function inventoryOpenState() {
+    try {
+      return JSON.parse(localStorage.getItem('topoInventoryOpen') || '{}') || {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function setInventoryOpen(section, open, persist) {
+    section.classList.toggle('is-collapsed', !open);
+    const toggle = section.querySelector('[data-inventory-toggle]');
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (persist === false) return;
+    const key = section.getAttribute('data-inventory-key');
+    if (!key) return;
+    try {
+      const state = inventoryOpenState();
+      state[key] = open;
+      localStorage.setItem('topoInventoryOpen', JSON.stringify(state));
+    } catch (_) {}
+  }
+
+  function initInventoryCollapse() {
+    const savedOpen = inventoryOpenState();
+    document.querySelectorAll('[data-inventory-section][data-inventory-key]').forEach((section) => {
+      const key = section.getAttribute('data-inventory-key');
+      const open = savedOpen[key] === true;
+      setInventoryOpen(section, open, false);
+    });
+  }
+
   function initTopoMasterDetail() {
     const shell = document.getElementById('topo-shell');
     if (!shell) return;
@@ -2227,6 +2269,7 @@
     initStackCardCollapse();
     initGuestDetailCollapse();
     initNodeDetailCollapse();
+    initInventoryCollapse();
     const filter = document.getElementById('topo-guest-filter');
     filter?.addEventListener('input', () => {
       const q = (filter.value || '').trim().toLowerCase();
@@ -2248,6 +2291,15 @@
       }
     });
     shell.addEventListener('click', (e) => {
+      const inventoryToggle = e.target.closest('[data-inventory-toggle]');
+      if (inventoryToggle && shell.contains(inventoryToggle)) {
+        e.preventDefault();
+        const section = inventoryToggle.closest('[data-inventory-section]');
+        if (!section) return;
+        const open = inventoryToggle.getAttribute('aria-expanded') !== 'true';
+        setInventoryOpen(section, open);
+        return;
+      }
       const nodeDetailToggle = e.target.closest('[data-node-detail-toggle]');
       if (nodeDetailToggle && shell.contains(nodeDetailToggle)) {
         e.preventDefault();

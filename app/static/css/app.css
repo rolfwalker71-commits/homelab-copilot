@@ -213,53 +213,78 @@ html[data-chrome="desktop"] .entity-card:hover {
   padding: 0.15rem 0.15rem 0.15rem 0;
 }
 
+/* Native checkbox stays operable (label + overlay hit target).
+   Visual chrome is .host-monitor-track — never appearance:none without that sibling. */
 label.host-monitor input.host-monitor-input[type="checkbox"] {
-  appearance: none;
-  -webkit-appearance: none;
-  position: relative;
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  position: absolute;
+  left: 0.15rem;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2.85rem;
+  height: 1.65rem;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.host-monitor-track {
+  display: inline-block;
   box-sizing: border-box;
   flex-shrink: 0;
   width: 2.85rem;
   height: 1.65rem;
   margin: 0;
-  padding: 0;
-  border: 1px solid var(--outline);
+  border: 2px solid var(--on-surface-variant);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 28%, transparent);
-  cursor: pointer;
+  background: color-mix(in srgb, var(--on-surface-variant) 32%, var(--card));
+  pointer-events: none;
+  position: relative;
   transition: background 0.2s var(--motion), border-color 0.2s var(--motion);
 }
 
-label.host-monitor input.host-monitor-input[type="checkbox"]::after {
+.host-monitor-track::after {
   content: "";
   position: absolute;
-  top: 0.14rem;
-  left: 0.14rem;
-  width: 1.28rem;
-  height: 1.28rem;
+  top: 0.12rem;
+  left: 0.12rem;
+  width: 1.2rem;
+  height: 1.2rem;
   border-radius: 999px;
   background: var(--on-surface);
+  box-shadow: 0 1px 2px color-mix(in srgb, #000 28%, transparent);
   transition: transform 0.2s var(--motion), background 0.2s var(--motion);
 }
 
-label.host-monitor input.host-monitor-input[type="checkbox"]:checked {
+label.host-monitor:has(input:checked) .host-monitor-track {
   background: var(--primary);
   border-color: var(--primary);
 }
 
-label.host-monitor input.host-monitor-input[type="checkbox"]:checked::after {
-  transform: translateX(1.18rem);
+label.host-monitor:has(input:checked) .host-monitor-track::after {
+  transform: translateX(1.12rem);
   background: var(--on-primary);
 }
 
-label.host-monitor input.host-monitor-input[type="checkbox"]:focus-visible {
+label.host-monitor:has(input:focus-visible) .host-monitor-track {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
-label.host-monitor input.host-monitor-input[type="checkbox"]:disabled {
+label.host-monitor:has(input:disabled) .host-monitor-track {
   opacity: 0.45;
-  cursor: wait;
+}
+
+html[data-theme="light"] .host-monitor-track {
+  border-color: var(--on-surface-variant);
+  background: color-mix(in srgb, var(--on-surface-variant) 22%, #ffffff);
+}
+
+html[data-theme="light"] .host-monitor-track::after {
+  background: var(--on-surface);
 }
 
 .host-monitor-label {
@@ -1460,16 +1485,11 @@ html[data-chrome="android"] .topo-detail {
   align-items: flex-start;
 }
 
-.topo-detail-panel.is-collapsed .topo-detail-body,
 .topo-detail-panel.is-collapsed .topo-detail-metrics,
 .topo-detail-panel.is-collapsed .topo-detail-facts,
-.topo-detail-panel.is-collapsed .topo-node-versions {
+.topo-detail-panel.is-collapsed .topo-node-versions,
+.topo-detail-panel.is-collapsed .topo-node-charts {
   display: none;
-}
-
-.topo-detail-panel.is-collapsed .topo-detail-head {
-  margin-bottom: 0;
-  border-bottom-color: transparent;
 }
 
 /* Guest detail header: status via background (no chip) */
@@ -2123,6 +2143,58 @@ html[data-chrome="android"] .topo-storage-row {
 .topo-inventory,
 .topo-snapshots {
   margin-bottom: 1.1rem;
+}
+
+.topo-inventory-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  margin: 0 0 0.55rem;
+  padding: 0.15rem 0.2rem 0.15rem 0;
+  text-align: left;
+  font: inherit;
+  border-radius: calc(var(--radius) * 0.4);
+}
+
+.topo-inventory.is-collapsed .topo-inventory-toggle {
+  margin-bottom: 0;
+}
+
+.topo-inventory-toggle:hover {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.topo-inventory-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.topo-inventory-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 0.18s var(--motion);
+}
+
+.topo-inventory.is-collapsed .topo-inventory-chevron {
+  transform: rotate(-90deg);
+}
+
+.topo-inventory-toggle-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.75rem;
+  min-width: 0;
+}
+
+.topo-inventory.is-collapsed .topo-inventory-form {
+  display: none;
 }
 
 .topo-inventory-form {

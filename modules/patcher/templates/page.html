@@ -650,11 +650,12 @@
     const monitorLabel = monitored ? 'Monitoring ein' : 'Monitoring aus';
     const monitorSwitch =
       '<label class="host-monitor inline-flex items-center gap-3 shrink-0">' +
-        '<input type="checkbox" class="host-monitor-input h-6 w-11 shrink-0" role="switch"' +
+        '<input type="checkbox" class="host-monitor-input" role="switch"' +
           ' data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '"' +
           (monitored ? ' checked' : '') +
           ' aria-checked="' + (monitored ? 'true' : 'false') + '"' +
           ' aria-label="' + monitorLabel + ': ' + esc(t.name) + '" />' +
+        '<span class="host-monitor-track" aria-hidden="true"></span>' +
         '<span class="host-monitor-label">' + monitorLabel + '</span>' +
       '</label>';
     return (

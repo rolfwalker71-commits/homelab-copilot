@@ -110,6 +110,10 @@
       <div class="flex items-center gap-2">
         <button type="button" id="btn-install" class="btn btn-ghost hidden !min-h-10 !px-3 !text-sm" aria-label="App installieren">Installieren</button>
         <time class="hidden text-sm text-[var(--muted)] lg:block" datetime="{{ now }}">{{ now }}</time>
+        <button type="button" id="btn-reload" class="theme-toggle"
+                title="Aktualisieren" aria-label="Aktualisieren">
+          {{ ico('refresh', 20) }}
+        </button>
         <div class="theme-control">
           <button type="button" id="btn-theme" class="theme-toggle"
                   aria-label="Darstellung: System" aria-haspopup="menu"
@@ -191,6 +195,10 @@
     window.addEventListener('appinstalled', () => {
       installBtn?.classList.add('hidden');
       deferredPrompt = null;
+    });
+
+    document.getElementById('btn-reload')?.addEventListener('click', () => {
+      location.reload();
     });
   </script>
   {% block scripts %}{% endblock %}
