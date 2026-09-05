@@ -217,7 +217,7 @@
       </button>
     </div>
     <div class="topo-stack-bak-body" data-stack-backups-body>
-      <p class="topo-node-loading text-sm text-[var(--muted)]">Backups werden geladen…</p>
+      <p class="topo-node-loading text-[var(--muted)]">Backups werden geladen…</p>
     </div>
   </section>
   {% endif %}
@@ -926,6 +926,8 @@
                 <span class="topo-node-docker-n">{{ row.docker_count }} Docker</span>
                 {% if row.docker_stacks %} · {{ row.docker_stacks|length }} Stack{% if row.docker_stacks|length != 1 %}s{% endif %}{% endif %}
                 {% endif %}
+                <span class="topo-sep" aria-hidden="true">·</span>
+                <span class="topo-node-docker-n" data-guest-backup-n="{{ g.id }}">0 Backups</span>
               </p>
             </div>
           </div>
@@ -1005,7 +1007,10 @@
                 {% if row.docker_count %}
                 <span class="topo-sep" aria-hidden="true">·</span>
                 <span class="topo-node-docker-n">{{ row.docker_count }} Docker</span>
+                {% if row.docker_stacks %} · {{ row.docker_stacks|length }} Stack{% if row.docker_stacks|length != 1 %}s{% endif %}{% endif %}
                 {% endif %}
+                <span class="topo-sep" aria-hidden="true">·</span>
+                <span class="topo-node-docker-n" data-guest-backup-n="{{ g.id }}">0 Backups</span>
               </p>
               <p class="topo-detail-meta" data-host-facts-line="{{ g.id }}">OS / Uptime / Disk werden per SSH geladen…</p>
             </div>
@@ -1894,6 +1899,43 @@
     );
   }
 
+  function existingBackupCount(data) {
+    if (!data) return 0;
+    if (Array.isArray(data.restic) || Array.isArray(data.tar)) {
+      return (data.restic || []).length + (data.tar || []).length;
+    }
+    if (typeof data.count === 'number') return data.count;
+    return (data.items || []).length;
+  }
+
+  function updateGuestBackupCount(panel) {
+    if (typeof panel === 'string') {
+      panel = document.querySelector('[data-guest-panel="' + panel + '"]');
+    }
+    if (!panel) return;
+    let total = 0;
+    panel.querySelectorAll('[data-stack-backups]').forEach((el) => {
+      const key = stackBackupCacheKey(
+        el.getAttribute('data-parent-id'),
+        el.getAttribute('data-project')
+      );
+      total += existingBackupCount(stackBackupCache.get(key));
+    });
+    const slot = panel.querySelector('[data-guest-backup-n]');
+    if (slot) slot.textContent = total + ' Backups';
+  }
+
+  function guestPanelForBackup(parentId, project, body) {
+    if (body && body.closest) {
+      const fromBody = body.closest('[data-guest-panel]');
+      if (fromBody) return fromBody;
+    }
+    const mount = document.querySelector(
+      '[data-stack-backups][data-parent-id="' + parentId + '"][data-project="' + project + '"]'
+    );
+    return mount && mount.closest ? mount.closest('[data-guest-panel]') : null;
+  }
+
   function hopLabel(status) {
     if (status === 'ok' || status === 'success') return 'OK';
     if (status === 'failed') return 'fehlgeschlagen';
@@ -2011,14 +2053,16 @@
     const body = stackBackupMount(parentId, project);
     if (!force && stackBackupCache.has(key)) {
       renderStackBackups(body, stackBackupCache.get(key));
+      updateGuestBackupCount(guestPanelForBackup(parentId, project, body));
       return;
     }
     if (!force && stackBackupInflight.has(key)) {
       try { await stackBackupInflight.get(key); } catch (_) {}
+      updateGuestBackupCount(guestPanelForBackup(parentId, project, body));
       return;
     }
     if (body && !stackBackupCache.has(key)) {
-      body.innerHTML = '<p class="topo-node-loading text-sm text-[var(--muted)]">Backups werden geladen…</p>';
+      body.innerHTML = '<p class="topo-node-loading text-[var(--muted)]">Backups werden geladen…</p>';
     }
     const url = '/api/modules/backup_verifier/stacks/' +
       encodeURIComponent(parentId) + '/' + encodeURIComponent(project) +
@@ -2028,7 +2072,9 @@
       if (!res.ok) throw new Error(await parseError(res));
       const data = await res.json();
       stackBackupCache.set(key, data);
-      renderStackBackups(stackBackupMount(parentId, project), data);
+      const mount = stackBackupMount(parentId, project);
+      renderStackBackups(mount, data);
+      updateGuestBackupCount(guestPanelForBackup(parentId, project, mount));
     })();
     stackBackupInflight.set(key, job);
     try {
@@ -2038,6 +2084,7 @@
         body.innerHTML = '<p class="topo-stack-bak-empty">' +
           escapeHtml(String(err.message || err || 'Backups nicht verfügbar')) + '</p>';
       }
+      updateGuestBackupCount(guestPanelForBackup(parentId, project, body));
     } finally {
       stackBackupInflight.delete(key);
     }
@@ -2047,6 +2094,7 @@
     if (!guestId || guestId.startsWith('__')) return;
     const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
     if (!panel || panel.hidden) return;
+    updateGuestBackupCount(panel);
     panel.querySelectorAll('[data-stack-backups]').forEach((el) => {
       const parentId = el.getAttribute('data-parent-id');
       const project = el.getAttribute('data-project');

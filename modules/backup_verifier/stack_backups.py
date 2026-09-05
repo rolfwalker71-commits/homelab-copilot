@@ -353,6 +353,28 @@ def _pick_schedule(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+def existing_backup_count(payload: dict[str, Any] | None) -> int:
+    """Restic snapshots + tar archives on Copilot (not Verlauf rows)."""
+    if not payload:
+        return 0
+    restic = payload.get("restic")
+    tar = payload.get("tar")
+    if isinstance(restic, list) or isinstance(tar, list):
+        return len(restic or []) + len(tar or [])
+    items = payload.get("items")
+    if isinstance(items, list):
+        return len(items)
+    try:
+        return max(0, int(payload.get("count") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def sum_parent_existing_counts(payloads: list[dict[str, Any]] | None) -> int:
+    """Sum existing backups across compose stacks of one parent_id."""
+    return sum(existing_backup_count(p) for p in (payloads or []))
+
+
 async def collect_stack_backups(
     store: BackupStore,
     *,
@@ -404,12 +426,14 @@ async def collect_stack_backups(
     items.sort(key=lambda x: str(x.get("time_iso") or ""), reverse=True)
 
     empty = not items
+    count = existing_backup_count({"restic": restic_items, "tar": tar_items, "items": items})
     payload: dict[str, Any] = {
         "ok": True,
         "cached": False,
         "parent_id": parent_id,
         "project": project,
         "empty": empty,
+        "count": count,
         "empty_label": "Noch keine Backups" if empty else None,
         "items": items,
         "restic": restic_items,

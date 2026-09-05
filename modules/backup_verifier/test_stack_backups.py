@@ -17,6 +17,7 @@ from backup_verifier.stack_backups import (
     cache_get,
     cache_put,
     dir_size_bytes,
+    existing_backup_count,
     last_job_payload,
     list_tar_archives,
     parse_restic_time,
@@ -24,6 +25,7 @@ from backup_verifier.stack_backups import (
     shape_restic_items,
     snapshot_kind,
     StackBackupError,
+    sum_parent_existing_counts,
     where_payload,
 )
 
@@ -197,6 +199,33 @@ class WhereTests(unittest.TestCase):
         self.assertFalse(where["copilot"]["present"])
         self.assertIsNone(where["dest"]["present"])
         self.assertTrue(where["dest"]["configured"])
+
+
+class CountTests(unittest.TestCase):
+    def test_sums_restic_and_tar_not_items_alone(self) -> None:
+        payload = {
+            "restic": [{}, {}],
+            "tar": [{}],
+            "items": [{}, {}, {}, {}],
+            "count": 99,
+        }
+        self.assertEqual(existing_backup_count(payload), 3)
+
+    def test_falls_back_to_items_then_count(self) -> None:
+        self.assertEqual(existing_backup_count({"items": [{}, {}]}), 2)
+        self.assertEqual(existing_backup_count({"count": 7}), 7)
+        self.assertEqual(existing_backup_count(None), 0)
+        self.assertEqual(existing_backup_count({}), 0)
+
+    def test_sum_parent_stacks(self) -> None:
+        total = sum_parent_existing_counts(
+            [
+                {"restic": [{}], "tar": [{}, {}]},
+                {"restic": [], "tar": []},
+                {"items": [{}]},
+            ]
+        )
+        self.assertEqual(total, 4)
 
 
 class CacheTests(unittest.TestCase):

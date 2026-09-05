@@ -3185,9 +3185,29 @@ html[data-chrome="desktop"] .topo-stack-card {
 }
 
 .topo-stack-backups {
-  margin-top: 0.55rem;
-  padding-top: 0.5rem;
+  margin-top: 0.45rem;
+  padding-top: 0.4rem;
   border-top: 1px solid color-mix(in srgb, var(--outline) 38%, transparent);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.topo-stack-backups,
+.topo-stack-backups p,
+.topo-stack-backups table,
+.topo-stack-backups th,
+.topo-stack-backups td,
+.topo-stack-backups .topo-stack-bak-title,
+.topo-stack-backups .topo-stack-bak-meta,
+.topo-stack-backups .topo-stack-bak-empty,
+.topo-stack-backups .topo-node-loading {
+  font-size: 0.75rem;
+}
+
+.topo-stack-backups .btn {
+  font-size: 0.6875rem;
+  min-height: 1.55rem;
+  padding: 0.12rem 0.45rem;
 }
 
 .topo-stack-bak-head {
@@ -3195,14 +3215,14 @@ html[data-chrome="desktop"] .topo-stack-card {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.35rem 0.75rem;
-  margin-bottom: 0.4rem;
+  gap: 0.25rem 0.65rem;
+  margin-bottom: 0.3rem;
 }
 
 .topo-stack-bak-title {
   margin: 0;
   font-size: 0.75rem;
-  font-weight: 750;
+  font-weight: 650;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--muted);
@@ -3210,9 +3230,9 @@ html[data-chrome="desktop"] .topo-stack-card {
 
 .topo-stack-bak-meta,
 .topo-stack-bak-empty {
-  margin: 0 0 0.4rem;
+  margin: 0 0 0.3rem;
   font-size: 0.75rem;
-  line-height: 1.4;
+  line-height: 1.35;
   color: var(--muted);
 }
 
@@ -3243,13 +3263,15 @@ html[data-chrome="desktop"] .topo-stack-card {
   text-align: left;
   font-weight: 600;
   color: var(--muted);
-  padding: 0.2rem 0.55rem 0.3rem 0;
+  padding: 0.15rem 0.5rem 0.22rem 0;
+  font-size: 0.75rem;
   border-bottom: 1px solid color-mix(in srgb, var(--outline) 40%, transparent);
 }
 
 .topo-stack-bak-table td {
-  padding: 0.32rem 0.55rem 0.32rem 0;
+  padding: 0.22rem 0.5rem 0.22rem 0;
   vertical-align: baseline;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 }
 
