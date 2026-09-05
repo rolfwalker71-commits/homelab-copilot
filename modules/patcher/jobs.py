@@ -25,8 +25,12 @@ class PatchJob:
     result: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    last_output_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
+        now = time.time()
+        last_out = self.last_output_at or self.updated_at
+        alive = self.status in ("queued", "running")
         return {
             "job_id": self.id,
             "id": self.id,
@@ -44,6 +48,9 @@ class PatchJob:
             "done": self.status in ("success", "failed"),
             "ok": self.status == "success",
             "updated_at": self.updated_at,
+            "last_output_at": last_out,
+            "alive": alive,
+            "silence_seconds": max(0, int(now - last_out)),
         }
 
 
@@ -116,10 +123,15 @@ class JobRegistry:
             if not job:
                 return
             text = line.strip()
+            if text and "libstdbuf.so" in text and "LD_PRELOAD" in text:
+                return
+            status = text.startswith("SSH-Sitzung offen")
             if text:
                 job.log_lines.append(text)
                 if len(job.log_lines) > 200:
                     job.log_lines = job.log_lines[-200:]
+                if not status:
+                    job.last_output_at = time.time()
             job.updated_at = time.time()
 
     def finish(

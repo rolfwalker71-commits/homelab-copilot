@@ -65,12 +65,42 @@ async def _emit_log(on_log: LogFn | None, line: str) -> None:
         await result
 
 
-def _line_buffered(cmd: str) -> str:
-    quoted = shlex.quote(cmd)
-    return (
-        "if command -v stdbuf >/dev/null 2>&1; then "
-        f"stdbuf -oL -eL sh -c {quoted}; "
-        f"else {cmd}; fi"
+_HEARTBEAT_INTERVAL = 15.0
+_SILENCE_LOG_INTERVAL = 75.0
+
+_APT_ENV = (
+    "export DEBIAN_FRONTEND=noninteractive "
+    "DEBIAN_PRIORITY=critical "
+    "DEBCONF_NONINTERACTIVE_SEEN=true "
+    "NEEDRESTART_MODE=a "
+    "NEEDRESTART_SUSPEND=1 "
+    "UCF_FORCE_CONFFOLD=1 "
+    "APT_LISTCHANGES_FRONTEND=none "
+    "LC_ALL=C; "
+)
+
+_APT_DPKG_OPTS = (
+    "-o Dpkg::Options::=--force-confold "
+    "-o Dpkg::Options::=--force-confdef "
+    "-o DPkg::Lock::Timeout=60"
+)
+
+
+def is_apply_noise_line(line: str) -> bool:
+    """rust-coreutils stdbuf ERROR is ignored by ld.so — not an apply failure."""
+    text = (line or "").strip()
+    if not text:
+        return False
+    return "libstdbuf.so" in text and "LD_PRELOAD" in text
+
+
+def is_status_heartbeat_line(line: str) -> bool:
+    return (line or "").lstrip().startswith("SSH-Sitzung offen")
+
+
+def _strip_apply_noise(text: str) -> str:
+    return "\n".join(
+        ln for ln in (text or "").splitlines() if not is_apply_noise_line(ln)
     )
 
 
@@ -148,42 +178,72 @@ async def _stream_apply_cmd(
     on_log: LogFn | None,
 ) -> tuple[str, str, int]:
     line_n = 0
+    last_pct = 28
+    last_silence_log = 0
+    keyboard_hinted = False
     stop_beat = asyncio.Event()
     started = time.monotonic()
+    last_line_at = started
 
     async def handle_line(line: str) -> None:
-        nonlocal line_n
+        nonlocal line_n, last_pct, last_line_at, keyboard_hinted
+        if is_apply_noise_line(line):
+            return
         line_n += 1
+        last_line_at = time.monotonic()
         await _emit_log(on_log, line)
-        if line_n == 1 or line_n % 3 == 0:
-            await _emit(
-                progress,
-                "Einspielen",
-                min(82, 28 + min(50, line_n)),
-                line[:200],
+        lower = line.lower()
+        if (
+            not keyboard_hinted
+            and "keyboard-configuration" in lower
+            and "setting up" in lower
+        ):
+            keyboard_hinted = True
+            await _emit_log(
+                on_log,
+                "keyboard-configuration: warte auf nicht-interaktive Konfiguration "
+                "(bestehende Tastaturbelegung bleibt)…",
             )
+        if line_n == 1 or line_n % 3 == 0:
+            last_pct = min(82, 28 + min(50, line_n))
+            await _emit(progress, "Einspielen", last_pct, line[:200])
 
     async def beat() -> None:
+        nonlocal last_silence_log
         while not stop_beat.is_set():
             try:
-                await asyncio.wait_for(stop_beat.wait(), timeout=10.0)
+                await asyncio.wait_for(stop_beat.wait(), timeout=_HEARTBEAT_INTERVAL)
                 return
             except asyncio.TimeoutError:
                 elapsed = int(time.monotonic() - started)
-                if line_n:
-                    continue
-                await _emit(
-                    progress,
-                    "Einspielen",
-                    min(80, 25 + elapsed // 8),
-                    f"Installation läuft seit {elapsed}s — bitte warten…",
-                )
+                silent = int(time.monotonic() - last_line_at)
+                if silent >= 60:
+                    msg = (
+                        f"SSH-Sitzung offen — keine neue Ausgabe seit {silent}s "
+                        "(dpkg configure kann mehrere Minuten still sein)"
+                    )
+                else:
+                    msg = f"Installation läuft seit {elapsed}s — bitte warten…"
+                await _emit(progress, "Einspielen", last_pct, msg)
+                if (
+                    silent >= _SILENCE_LOG_INTERVAL
+                    and (silent - last_silence_log) >= _SILENCE_LOG_INTERVAL
+                ):
+                    last_silence_log = silent
+                    await _emit_log(
+                        on_log,
+                        f"SSH-Sitzung offen — keine neue Ausgabe seit {silent}s "
+                        "(dpkg configure kann mehrere Minuten still sein)…",
+                    )
 
     beat_task = asyncio.create_task(beat())
     try:
+        # Do not wrap with remote stdbuf: rust-coreutils stdbuf LD_PRELOADs a
+        # missing libstdbuf.so and floods ERROR lines. Line delivery is
+        # ssh_run_stream + this local heartbeat (apt/dpkg can be silent for minutes).
         return await ssh_run_stream(
             target.ip,
-            _line_buffered(cmd),
+            cmd,
             timeout=timeout,
             username=target.ssh_user,
             port=target.port,
@@ -272,7 +332,9 @@ async def apply_updates(
         progress=progress,
         on_log=on_log,
     )
-    log = ((stdout or "") + ("\n" + stderr if stderr else "")).strip()
+    log = _strip_apply_noise(
+        ((stdout or "") + ("\n" + stderr if stderr else "")).strip()
+    )
 
     if (
         code != 0
@@ -311,12 +373,14 @@ async def apply_updates(
                 progress=progress,
                 on_log=on_log,
             )
-            log = ((stdout or "") + ("\n" + stderr if stderr else "")).strip()
+            log = _strip_apply_noise(
+                ((stdout or "") + ("\n" + stderr if stderr else "")).strip()
+            )
 
     if code != 0:
         raise ApplyError(
             f"Update fehlgeschlagen (exit {code}): "
-            + (stderr or stdout or "")[:800]
+            + _strip_apply_noise(stderr or stdout or "")[:800]
         )
 
     if pm == "apt":
@@ -331,16 +395,17 @@ async def apply_updates(
             ar_out, ar_err, ar_code = await ssh_run(
                 target.ip,
                 (
-                    "export DEBIAN_FRONTEND=noninteractive; "
-                    "apt-get -y autoremove "
-                    "-o DPkg::Lock::Timeout=60"
+                    f"{_APT_ENV}"
+                    f"apt-get -y {_APT_DPKG_OPTS} autoremove"
                 ),
                 timeout=min(600.0, timeout),
                 username=target.ssh_user,
                 port=target.port,
                 connect_timeout=connect_timeout,
             )
-            ar_blob = ((ar_out or "") + ("\n" + ar_err if ar_err else "")).strip()
+            ar_blob = _strip_apply_noise(
+                ((ar_out or "") + ("\n" + ar_err if ar_err else "")).strip()
+            )
             if ar_blob:
                 log = (log + "\n" + ar_blob).strip()
             if ar_code != 0:
@@ -402,25 +467,26 @@ async def apply_updates(
 
 def _apt_cmd(filt: str, selected: list[str]) -> str:
     base = (
-        "export DEBIAN_FRONTEND=noninteractive; "
+        f"{_APT_ENV}"
         "apt-get update -qq "
         "-o Acquire::ForceIPv4=true "
         "-o Acquire::http::Timeout=20 "
         "-o Acquire::https::Timeout=20 "
-        "-o DPkg::Lock::Timeout=60; "
+        f"{_APT_DPKG_OPTS}; "
     )
+    yes = f"-y {_APT_DPKG_OPTS}"
     if filt == "selected":
         pkgs = " ".join(shlex.quote(p) for p in selected)
-        return base + f"apt-get install -y --only-upgrade {pkgs}"
+        return base + f"apt-get install {yes} --only-upgrade {pkgs}"
     if filt == "security":
         # Prefer unattended-upgrade security pocket when available; else full upgrade
         return (
             base
             + "if command -v unattended-upgrade >/dev/null 2>&1; then "
             "unattended-upgrade -v; "
-            "else apt-get -y upgrade; fi"
+            f"else apt-get {yes} upgrade; fi"
         )
-    return base + "apt-get -y upgrade"
+    return base + f"apt-get {yes} upgrade"
 
 
 def _dnf_cmd(pm: str, filt: str, selected: list[str]) -> str:

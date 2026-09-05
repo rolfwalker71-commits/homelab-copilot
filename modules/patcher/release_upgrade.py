@@ -82,6 +82,7 @@ def _release_upgrade_cmd(*, container: bool) -> str:
         )
     return (
         "export DEBIAN_FRONTEND=noninteractive LC_ALL=C "
+        "DEBIAN_PRIORITY=critical DEBCONF_NONINTERACTIVE_SEEN=true "
         "NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 "
         "UCF_FORCE_CONFFOLD=1 APT_LISTCHANGES_FRONTEND=none "
         "RELEASE_UPGRADER_ALLOW_THIRD_PARTY=1; "

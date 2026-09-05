@@ -29,11 +29,11 @@
 <div id="setup-banner" class="mb-4 hidden animate-in surface p-3 text-sm" role="status"></div>
 
 <div id="job-progress" class="mb-4 hidden animate-in" aria-live="polite" aria-busy="false">
-  <div class="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 sm:p-4 space-y-3">
+  <div class="surface p-3 sm:p-4 space-y-3">
     <div class="flex items-start gap-3">
       <span id="jp-spinner" data-jp="spinner" class="mt-0.5 inline-block h-5 w-5 shrink-0 rounded-full border-2 border-[var(--border)] border-t-[var(--primary)] animate-spin" aria-hidden="true"></span>
       <div class="min-w-0 flex-1">
-        <p id="jp-title" data-jp="title" class="font-medium text-[var(--text)]">Auftrag läuft…</p>
+        <p id="jp-title" data-jp="title" class="font-medium break-words leading-snug text-[var(--text)]">Auftrag läuft…</p>
         <p id="jp-phase" data-jp="phase" class="mt-0.5 text-sm text-[var(--muted)]">—</p>
       </div>
       <span id="jp-percent" data-jp="percent" class="shrink-0 text-sm font-medium tabular-nums text-[var(--text)]">0&nbsp;%</span>
@@ -41,7 +41,8 @@
     <div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" id="jp-bar-wrap" data-jp="bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
       <div id="jp-bar" data-jp="bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>
     </div>
-    <p id="jp-message" data-jp="message" class="text-sm text-[var(--muted)]">Status wird geladen…</p>
+    <p id="jp-message" data-jp="message" class="text-sm text-[var(--muted)] break-words leading-snug">Status wird geladen…</p>
+    <p id="jp-liveness" data-jp="liveness" class="text-sm text-[var(--muted)] break-words leading-snug hidden" role="status"></p>
     <pre id="jp-log" data-jp="log" class="max-h-32 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words hidden"></pre>
     <p id="jp-footer" data-jp="footer" class="text-sm hidden"></p>
   </div>
@@ -227,7 +228,7 @@
       '<div class="flex items-start gap-3">' +
         '<span data-jp="spinner" class="mt-0.5 inline-block h-5 w-5 shrink-0 rounded-full border-2 border-[var(--border)] border-t-[var(--primary)] animate-spin" aria-hidden="true"></span>' +
         '<div class="min-w-0 flex-1">' +
-          '<p data-jp="title" class="font-medium text-[var(--text)]">Auftrag läuft…</p>' +
+          '<p data-jp="title" class="font-medium break-words leading-snug text-[var(--text)]">Auftrag läuft…</p>' +
           '<p data-jp="phase" class="mt-0.5 text-sm text-[var(--muted)]">—</p>' +
         '</div>' +
         '<span data-jp="percent" class="shrink-0 text-sm font-medium tabular-nums text-[var(--text)]">0&nbsp;%</span>' +
@@ -235,7 +236,8 @@
       '<div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" data-jp="bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">' +
         '<div data-jp="bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>' +
       '</div>' +
-      '<p data-jp="message" class="text-sm text-[var(--muted)]">Status wird geladen…</p>' +
+      '<p data-jp="message" class="text-sm text-[var(--muted)] break-words leading-snug">Status wird geladen…</p>' +
+      '<p data-jp="liveness" class="text-sm text-[var(--muted)] break-words leading-snug hidden" role="status"></p>' +
       '<pre data-jp="log" class="max-h-32 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words hidden"></pre>' +
       '<div class="flex flex-wrap items-center justify-between gap-2">' +
         '<p data-jp="footer" class="text-sm hidden m-0"></p>' +
@@ -252,7 +254,7 @@
       box = document.createElement('div');
       box.setAttribute('data-host-job', '');
       box.setAttribute('aria-live', 'polite');
-      box.className = 'mt-3 rounded-lg border border-[var(--border)] bg-[color-mix(in_srgb,var(--muted)_8%,transparent)] p-3 space-y-3';
+      box.className = 'mt-3 surface p-3 space-y-3';
       const slot = card.querySelector('[data-host-job-slot]');
       if (slot) slot.appendChild(box);
       else card.appendChild(box);
@@ -303,6 +305,12 @@
       log.textContent = '';
       log.classList.add('hidden');
     }
+    const live = jp('liveness');
+    if (live) {
+      live.classList.add('hidden');
+      live.textContent = '';
+      live.style.color = '';
+    }
     const foot = jp('footer');
     if (foot) {
       foot.classList.add('hidden');
@@ -343,6 +351,52 @@
     root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
+  function formatAgo(seconds) {
+    const s = Math.max(0, Math.round(Number(seconds) || 0));
+    if (s < 5) return 'gerade eben';
+    if (s < 60) return 'vor ' + s + 's';
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    if (r === 0) return 'vor ' + m + ' min';
+    return 'vor ' + m + ' min ' + r + 's';
+  }
+
+  function updateLiveness(job) {
+    const el = jp('liveness');
+    if (!el) return;
+    if (!job || job.done) {
+      el.textContent = '';
+      el.classList.add('hidden');
+      el.style.color = '';
+      return;
+    }
+    const now = Date.now() / 1000;
+    const lastOut = Number(job.last_output_at) || 0;
+    const updated = Number(job.updated_at) || 0;
+    const silent = lastOut
+      ? Math.max(0, Math.round(now - lastOut))
+      : Math.max(0, Number(job.silence_seconds) || 0);
+    const stale = updated ? Math.max(0, Math.round(now - updated)) : 0;
+    el.classList.remove('hidden');
+    if (job.alive === false) {
+      el.textContent = 'Auftrag nicht mehr aktiv.';
+      el.style.color = 'var(--danger, #c44)';
+      return;
+    }
+    if (stale >= 90) {
+      el.textContent = 'Keine Rückmeldung seit ' + stale + 's — Auftrag wirkt festgefahren (Copilot-Prozess tot oder ohne Heartbeat).';
+      el.style.color = 'var(--danger, #c44)';
+      return;
+    }
+    if (silent >= 75) {
+      el.textContent = 'Läuft noch, keine neue Ausgabe · letzte Ausgabe ' + formatAgo(silent);
+      el.style.color = '';
+      return;
+    }
+    el.textContent = 'Letzte Ausgabe ' + formatAgo(silent);
+    el.style.color = '';
+  }
+
   function updateProgress(job) {
     const pct = Math.max(0, Math.min(100, Number(job.percent) || 0));
     const phase = jp('phase');
@@ -362,6 +416,7 @@
       log.textContent = lines.join('\n');
       log.scrollTop = log.scrollHeight;
     }
+    updateLiveness(job);
   }
 
   function finishProgress(job) {
@@ -394,6 +449,12 @@
       foot.classList.remove('hidden');
       foot.style.color = ok ? '' : 'var(--danger, #c44)';
       foot.textContent = ok ? 'Abgeschlossen.' : ('Fehler: ' + msg);
+    }
+    const live = jp('liveness');
+    if (live) {
+      live.classList.add('hidden');
+      live.textContent = '';
+      live.style.color = '';
     }
     const dismiss = root.querySelector('.host-job-dismiss');
     if (dismiss) dismiss.classList.toggle('hidden', progressScope !== 'card');
@@ -872,6 +933,18 @@
       async function tick() {
         try {
           const r = await fetch(API + '/jobs/' + jobId);
+          if (r.status === 404) {
+            clearInterval(pollTimer);
+            finishProgress({
+              ok: false,
+              phase: 'Abgebrochen',
+              percent: 100,
+              message: 'Auftrag nicht mehr im Speicher — Copilot wurde vermutlich neu gestartet. Der Remote-Prozess auf dem Host kann trotzdem noch laufen (apt/dpkg prüfen).',
+              error: 'Job nicht gefunden',
+            });
+            resolve(null);
+            return;
+          }
           const j = await r.json();
           updateProgress(j);
           if (j.done) {
