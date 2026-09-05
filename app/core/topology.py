@@ -10,7 +10,7 @@ from typing import Any
 import aiosqlite
 
 from app.core.locale import format_de, iso_utc, now_berlin
-from app.core.models import TopologySnapshot
+from app.core.models import EntityStatus, TopologySnapshot
 from app.core.reconcile import ReconcileStats, reconcile_topology
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,64 @@ class TopologyStore:
         snapshot, stats = reconcile_topology(self._snapshot, live)
         await self.save(snapshot)
         return snapshot, stats
+
+    def _status_from_live(self, value: str | None) -> EntityStatus | None:
+        if not value:
+            return None
+        v = str(value).strip().lower()
+        if v in {"running", "online"}:
+            return EntityStatus.RUNNING
+        if v in {"stopped", "offline"}:
+            return EntityStatus.STOPPED
+        if v in {"paused", "suspended"}:
+            return EntityStatus.PAUSED
+        if v == "error":
+            return EntityStatus.ERROR
+        return EntityStatus.UNKNOWN
+
+    async def patch_guest_live(self, live: dict[str, Any]) -> TopologySnapshot | None:
+        """Update one guest's power/metrics in the cached snapshot (no Discovery)."""
+        snap = self._snapshot
+        if snap is None:
+            return None
+        gid = str(live.get("guest_id") or "").strip()
+        if not gid:
+            return snap
+        status = self._status_from_live(live.get("status") if isinstance(live.get("status"), str) else None)
+        guests: list = []
+        changed = False
+        for g in snap.guests:
+            if g.id != gid:
+                guests.append(g)
+                continue
+            meta = dict(g.meta or {})
+            for key in (
+                "uptime",
+                "cpu",
+                "cpu_pct",
+                "cpus",
+                "mem",
+                "maxmem",
+                "mem_pct",
+                "disk",
+                "maxdisk",
+                "disk_pct",
+                "lock",
+            ):
+                if key in live:
+                    meta[key] = live[key]
+            if live.get("unprivileged") is not None:
+                meta["unprivileged"] = live["unprivileged"]
+            updates: dict[str, Any] = {"meta": meta}
+            if status is not None:
+                updates["status"] = status
+            guests.append(g.model_copy(update=updates))
+            changed = True
+        if not changed:
+            return snap
+        new_snap = snap.model_copy(update={"guests": guests})
+        await self.save(new_snap)
+        return new_snap
 
     async def save(self, snapshot: TopologySnapshot) -> None:
         self._snapshot = snapshot

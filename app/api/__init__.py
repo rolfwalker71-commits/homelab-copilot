@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -20,6 +21,8 @@ from app.api.push import router as push_router
 def _ssh_key_present(s: Settings) -> bool:
     return docker_ctl.ssh_key_present(s)
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 router.include_router(auth_router)
@@ -50,6 +53,24 @@ class SetupPayload(BaseModel):
 class DockerActionPayload(BaseModel):
     parent_id: str = Field(..., min_length=1)
     name: str = Field(..., min_length=1)
+
+
+class GuestLiveStatusPayload(BaseModel):
+    """Optional guest IDs; empty = all PVE guests in the cached snapshot."""
+
+    ids: list[str] = Field(default_factory=list)
+
+
+async def _persist_guest_live(request: Request, live: dict[str, Any] | None) -> None:
+    if not live or live.get("error") or not live.get("guest_id"):
+        return
+    store = getattr(request.app.state, "topology_store", None)
+    if store is None:
+        return
+    try:
+        await store.patch_guest_live(live)
+    except Exception:
+        logger.debug("Live-Status konnte nicht ins Snapshot-Cache geschrieben werden.", exc_info=True)
 
 
 class DockerComposeRestartPayload(BaseModel):
@@ -240,6 +261,55 @@ async def apply_setup(request: Request, payload: SetupPayload) -> dict[str, Any]
 
 def _docker_http_error(exc: docker_ctl.DockerControlError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=exc.message)
+
+
+@router.get("/guests/{guest_id}/status")
+async def guest_status(guest_id: str, request: Request) -> dict[str, Any]:
+    """Live Proxmox ``status/current`` + config (no Discovery job)."""
+    engine = request.app.state.discovery_engine
+    try:
+        live = await engine.fetch_guest_status(guest_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Proxmox-Status fehlgeschlagen: {exc}",
+        ) from exc
+    await _persist_guest_live(request, live)
+    return live
+
+
+@router.post("/guests/live-status")
+async def guests_live_status(
+    request: Request,
+    body: GuestLiveStatusPayload | None = None,
+) -> dict[str, Any]:
+    """Re-query live power status for listed (or all cached) PVE guests."""
+    engine = request.app.state.discovery_engine
+    store = request.app.state.topology_store
+    ids = list((body.ids if body else []) or [])
+    if not ids:
+        snap = store.snapshot
+        ids = [g.id for g in (snap.guests if snap else [])]
+    try:
+        guests = await engine.fetch_guests_status(ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Proxmox-Status fehlgeschlagen: {exc}",
+        ) from exc
+    for live in guests:
+        if live.get("ok") is False:
+            continue
+        await _persist_guest_live(request, live)
+    return {"ok": True, "guests": guests}
 
 
 @router.get("/guests/{guest_id}/rrd")
@@ -494,7 +564,11 @@ async def guest_power(
     """Start / Stop / Shutdown / Reboot an LXC or QEMU guest via Proxmox."""
     engine = request.app.state.discovery_engine
     try:
-        return await engine.guest_power(guest_id, action)
+        data = await engine.guest_power(guest_id, action)
+        live = data.get("live") if isinstance(data, dict) else None
+        if isinstance(live, dict):
+            await _persist_guest_live(request, live)
+        return data
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:

@@ -13,7 +13,7 @@ from app.core.discovery import (
     resource_guest_name,
     should_emit_rail_guest,
 )
-from app.core.models import EntityKind, EntityStatus
+from app.core.models import EntityKind, EntityStatus, TopologyEntity, TopologySnapshot
 
 
 def _engine() -> DiscoveryEngine:
@@ -166,6 +166,116 @@ class PlainGuestTests(unittest.TestCase):
         assert guest is not None
         self.assertEqual(guest.name, "paperless")
         self.assertEqual(guest.meta.get("pve_source"), "pve02")
+
+
+class GuestLiveStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_status_current_running_keeps_uptime(self) -> None:
+        engine = _engine()
+        client = MagicMock()
+        client.aclose = AsyncMock()
+        engine._proxmox_authed_client = AsyncMock(return_value=(client, {}))
+
+        async def _get(_c, path, _h):
+            if str(path).endswith("/status/current"):
+                return {
+                    "status": "running",
+                    "uptime": 84,
+                    "cpu": 0.012,
+                    "cpus": 2,
+                    "mem": 256 * 1024 * 1024,
+                    "maxmem": 2 * 1024 * 1024 * 1024,
+                    "name": "n8n",
+                }
+            if str(path).endswith("/config"):
+                return {"hostname": "n8n", "unprivileged": 1}
+            return {}
+
+        engine._proxmox_get = AsyncMock(side_effect=_get)
+        live = await engine.fetch_guest_status("lxc:pve01:122")
+        self.assertEqual(live["status"], "running")
+        self.assertEqual(live["uptime"], 84)
+        self.assertEqual(live["cpu_pct"], 1.2)
+        self.assertTrue(live["unprivileged"])
+        client.aclose.assert_awaited()
+
+    async def test_missing_cpu_does_not_invent_pct(self) -> None:
+        live = _engine()._guest_live_from_pve(
+            "lxc:pve01:122",
+            "lxc",
+            "pve01",
+            122,
+            {"status": "running", "uptime": 12, "name": "n8n"},
+            {"hostname": "n8n"},
+        )
+        self.assertEqual(live["status"], "running")
+        self.assertEqual(live["uptime"], 12)
+        self.assertIsNone(live.get("cpu_pct"))
+
+    async def test_power_already_running_returns_live(self) -> None:
+        engine = _engine()
+        client = MagicMock()
+        client.aclose = AsyncMock()
+        engine._proxmox_authed_client = AsyncMock(return_value=(client, {}))
+        req = httpx.Request("POST", "https://pve/api2/json/nodes/pve01/lxc/122/status/start")
+        resp = httpx.Response(
+            500, request=req, json={"message": "CT 122 is already running"}
+        )
+        engine._proxmox_post = AsyncMock(
+            side_effect=httpx.HTTPStatusError("err", request=req, response=resp)
+        )
+        engine._read_guest_live = AsyncMock(
+            return_value={
+                "guest_id": "lxc:pve01:122",
+                "status": "running",
+                "uptime": 40,
+            }
+        )
+        out = await engine.guest_power("lxc:pve01:122", "start")
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["already"])
+        self.assertIn("läuft bereits", out["message"])
+        self.assertEqual(out["live"]["status"], "running")
+        self.assertEqual(out["live"]["uptime"], 40)
+
+
+class PatchGuestLiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_patches_status_and_uptime(self) -> None:
+        from app.core.topology import TopologyStore
+
+        store = TopologyStore.__new__(TopologyStore)
+        store._snapshot = TopologySnapshot(
+            refreshed_at="x",
+            refreshed_at_iso="x",
+            guests=[
+                TopologyEntity(
+                    id="lxc:pve01:122",
+                    kind=EntityKind.LXC,
+                    name="n8n",
+                    status=EntityStatus.STOPPED,
+                    meta={"uptime": 0, "cpu_pct": 0, "mem_pct": 0},
+                )
+            ],
+        )
+        async def _save(snapshot):
+            store._snapshot = snapshot
+
+        store.save = AsyncMock(side_effect=_save)
+        await store.patch_guest_live(
+            {
+                "guest_id": "lxc:pve01:122",
+                "status": "running",
+                "uptime": 40,
+                "cpu_pct": 1.2,
+                "mem": 100,
+                "maxmem": 2000,
+                "mem_pct": 5.0,
+            }
+        )
+        guest = store.snapshot.guests[0]
+        self.assertEqual(guest.status, EntityStatus.RUNNING)
+        self.assertEqual(guest.meta["uptime"], 40)
+        self.assertEqual(guest.meta["cpu_pct"], 1.2)
+        store.save.assert_awaited()
 
 
 if __name__ == "__main__":

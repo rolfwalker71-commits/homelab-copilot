@@ -452,7 +452,7 @@
           { method: "POST" }
         );
         toast(data.message || ent.name + " · " + verb);
-        setTimeout(() => location.reload(), 900);
+        await loadSection();
       },
     });
   }
@@ -684,7 +684,14 @@
     }
   }
 
-  document.getElementById("m-refresh")?.addEventListener("click", () => {
+  document.getElementById("m-refresh")?.addEventListener("click", async () => {
+    try {
+      await fetch("/api/guests/live-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch (_) {}
     loadSection();
   });
   document.getElementById("m-sheet-backdrop")?.addEventListener("click", closeSheet);

@@ -2304,11 +2304,78 @@ html[data-chrome="android"] .topo-chart-card {
   color: var(--muted);
 }
 
+.topo-chart-plot {
+  display: grid;
+  grid-template-columns: minmax(2.85rem, auto) minmax(0, 1fr);
+  grid-template-rows: 5.5rem auto;
+  column-gap: 0.35rem;
+  row-gap: 0.15rem;
+  min-width: 0;
+}
+
+.topo-chart-y {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding-block: calc(5.5rem * 4 / 96);
+  font-size: 0.6875rem;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.topo-chart-x {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.35rem;
+  min-height: 1.2em;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.topo-chart-x span:first-child {
+  text-align: start;
+}
+
+.topo-chart-x span:last-child {
+  text-align: end;
+}
+
 .topo-chart-svg {
+  grid-column: 2;
+  grid-row: 1;
   width: 100%;
   height: 5.5rem;
   display: block;
   overflow: visible;
+}
+
+.topo-chart-hair {
+  stroke: color-mix(in srgb, var(--outline) 58%, var(--primary));
+  stroke-width: 1;
+  opacity: 0.42;
+  vector-effect: non-scaling-stroke;
+}
+
+html[data-theme="light"] .topo-chart-y,
+html[data-theme="light"] .topo-chart-x {
+  color: color-mix(in srgb, var(--muted) 72%, var(--text));
+}
+
+html[data-theme="light"] .topo-chart-hair {
+  stroke: color-mix(in srgb, var(--outline) 35%, var(--primary));
+  opacity: 0.4;
 }
 
 .topo-chart-line {

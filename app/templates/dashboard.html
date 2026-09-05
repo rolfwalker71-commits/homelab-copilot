@@ -305,13 +305,11 @@
     <span class="topo-fact-value">{{ g.node }}</span>
   </li>
   {% endif %}
-  {% if m.get('uptime') is not none %}
   <li class="topo-fact" title="Laufzeit dieses {{ kind_label }}-Containers">
     <span class="topo-fact-icon" aria-hidden="true">{{ icon_clock|safe }}</span>
     <span class="topo-fact-label">{{ kind_label }}-Uptime</span>
-    <span class="topo-fact-value">{{ format_uptime(m.get('uptime')) }}</span>
+    <span class="topo-fact-value" data-guest-live="uptime">{% if m.get('uptime') is not none %}{{ format_uptime(m.get('uptime')) }}{% else %}—{% endif %}</span>
   </li>
-  {% endif %}
   {% if m.get('unprivileged') %}
   <li class="topo-fact" title="Unprivileged LXC">
     <span class="topo-fact-icon" aria-hidden="true">{{ icon_shield|safe }}</span>
@@ -495,48 +493,75 @@
           <span class="topo-chart-label">CPU · 1 Stunde</span>
           <span class="topo-chart-hint">Auslastung</span>
         </div>
-        <svg class="topo-chart-svg" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="CPU-Verlauf letzte Stunde">
-          <defs>
-            <linearGradient id="node-grad-cpu-{{ node_block.name }}" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.35"/>
-              <stop offset="100%" stop-color="var(--primary)" stop-opacity="0"/>
-            </linearGradient>
-          </defs>
-          <polygon class="topo-chart-area" fill="url(#node-grad-cpu-{{ node_block.name }})" points=""></polygon>
-          <polyline class="topo-chart-line" fill="none" points=""></polyline>
-        </svg>
+        <div class="topo-chart-plot">
+          <div class="topo-chart-y" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div>
+          <svg class="topo-chart-svg" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="CPU-Verlauf letzte Stunde">
+            <defs>
+              <linearGradient id="node-grad-cpu-{{ node_block.name }}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.35"/>
+                <stop offset="100%" stop-color="var(--primary)" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <g class="topo-chart-grid" aria-hidden="true">
+              <line class="topo-chart-hair" x1="0" x2="320" y1="4" y2="4"></line>
+              <line class="topo-chart-hair" x1="0" x2="320" y1="48" y2="48"></line>
+              <line class="topo-chart-hair" x1="0" x2="320" y1="92" y2="92"></line>
+            </g>
+            <polygon class="topo-chart-area" fill="url(#node-grad-cpu-{{ node_block.name }})" points=""></polygon>
+            <polyline class="topo-chart-line" fill="none" points=""></polyline>
+          </svg>
+          <div class="topo-chart-x" aria-hidden="true"><span>−60m</span><span>−30m</span><span>jetzt</span></div>
+        </div>
       </div>
       <div class="topo-chart-card" data-chart="mem" title="Arbeitsspeicher · letzte Stunde">
         <div class="topo-chart-head">
           <span class="topo-chart-label">RAM · 1 Stunde</span>
           <span class="topo-chart-hint">Belegung</span>
         </div>
-        <svg class="topo-chart-svg" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="RAM-Verlauf letzte Stunde">
-          <defs>
-            <linearGradient id="node-grad-mem-{{ node_block.name }}" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#2e7d32" stop-opacity="0.32"/>
-              <stop offset="100%" stop-color="#2e7d32" stop-opacity="0"/>
-            </linearGradient>
-          </defs>
-          <polygon class="topo-chart-area" fill="url(#node-grad-mem-{{ node_block.name }})" points=""></polygon>
-          <polyline class="topo-chart-line topo-chart-line-mem" fill="none" points=""></polyline>
-        </svg>
+        <div class="topo-chart-plot">
+          <div class="topo-chart-y" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div>
+          <svg class="topo-chart-svg" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="RAM-Verlauf letzte Stunde">
+            <defs>
+              <linearGradient id="node-grad-mem-{{ node_block.name }}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#2e7d32" stop-opacity="0.32"/>
+                <stop offset="100%" stop-color="#2e7d32" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <g class="topo-chart-grid" aria-hidden="true">
+              <line class="topo-chart-hair" x1="0" x2="320" y1="4" y2="4"></line>
+              <line class="topo-chart-hair" x1="0" x2="320" y1="48" y2="48"></line>
+              <line class="topo-chart-hair" x1="0" x2="320" y1="92" y2="92"></line>
+            </g>
+            <polygon class="topo-chart-area" fill="url(#node-grad-mem-{{ node_block.name }})" points=""></polygon>
+            <polyline class="topo-chart-line topo-chart-line-mem" fill="none" points=""></polyline>
+          </svg>
+          <div class="topo-chart-x" aria-hidden="true"><span>−60m</span><span>−30m</span><span>jetzt</span></div>
+        </div>
       </div>
       <div class="topo-chart-card" data-chart="net" title="Netzwerk · letzte Stunde">
         <div class="topo-chart-head">
           <span class="topo-chart-label">Netz · 1 Stunde</span>
           <span class="topo-chart-hint">In + Out</span>
         </div>
-        <svg class="topo-chart-svg" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="Netz-Verlauf letzte Stunde">
-          <defs>
-            <linearGradient id="node-grad-net-{{ node_block.name }}" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="color-mix(in srgb, var(--primary) 40%, #2e7d32)" stop-opacity="0.32"/>
-              <stop offset="100%" stop-color="color-mix(in srgb, var(--primary) 40%, #2e7d32)" stop-opacity="0"/>
-            </linearGradient>
-          </defs>
-          <polygon class="topo-chart-area" fill="url(#node-grad-net-{{ node_block.name }})" points=""></polygon>
-          <polyline class="topo-chart-line topo-chart-line-net" fill="none" points=""></polyline>
-        </svg>
+        <div class="topo-chart-plot">
+          <div class="topo-chart-y" aria-hidden="true"><span>1.0 KiB/s</span><span>512 B/s</span><span>0 B/s</span></div>
+          <svg class="topo-chart-svg" viewBox="0 0 320 96" preserveAspectRatio="none" role="img" aria-label="Netz-Verlauf letzte Stunde">
+            <defs>
+              <linearGradient id="node-grad-net-{{ node_block.name }}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="color-mix(in srgb, var(--primary) 40%, #2e7d32)" stop-opacity="0.32"/>
+                <stop offset="100%" stop-color="color-mix(in srgb, var(--primary) 40%, #2e7d32)" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <g class="topo-chart-grid" aria-hidden="true">
+              <line class="topo-chart-hair" x1="0" x2="320" y1="4" y2="4"></line>
+              <line class="topo-chart-hair" x1="0" x2="320" y1="48" y2="48"></line>
+              <line class="topo-chart-hair" x1="0" x2="320" y1="92" y2="92"></line>
+            </g>
+            <polygon class="topo-chart-area" fill="url(#node-grad-net-{{ node_block.name }})" points=""></polygon>
+            <polyline class="topo-chart-line topo-chart-line-net" fill="none" points=""></polyline>
+          </svg>
+          <div class="topo-chart-x" aria-hidden="true"><span>−60m</span><span>−30m</span><span>jetzt</span></div>
+        </div>
       </div>
     </div>
 
@@ -1244,10 +1269,19 @@
       if (!res.ok) throw new Error(await parseError(res));
       const data = await res.json();
       showToast(data.message || (action + ' OK'));
-      setTimeout(() => window.location.reload(), 900);
+      if (data.live) applyGuestLive(guestId, data.live);
+      else await loadGuestLive(guestId);
+      if (action === 'start' || action === 'reboot') {
+        setTimeout(() => loadGuestLive(guestId), 1500);
+      }
     } catch (e) {
       showToast(String(e.message || e), true);
-      if (btn) btn.disabled = false;
+      try { await loadGuestLive(guestId); } catch (_) {}
+    } finally {
+      const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
+      const st = panel && panel.getAttribute('data-status');
+      if (st) applyGuestStatus(guestId, st);
+      else if (btn) btn.disabled = false;
     }
   }
 
@@ -1632,12 +1666,16 @@
     return 'ok';
   }
 
-  function sparkPoints(values, width, height, pad) {
+  function sparkPoints(values, width, height, pad, domain) {
     const nums = (values || []).map((v) => (v == null || Number.isNaN(Number(v)) ? null : Number(v)));
     const known = nums.filter((v) => v != null);
     if (!known.length) return { points: '', area: '', empty: true };
-    const min = Math.min(...known);
-    const max = Math.max(...known);
+    let min = Math.min(...known);
+    let max = Math.max(...known);
+    if (domain && Number.isFinite(domain.min) && Number.isFinite(domain.max)) {
+      min = domain.min;
+      max = domain.max;
+    }
     const span = max - min || 1;
     const n = nums.length;
     const pts = [];
@@ -1655,7 +1693,154 @@
       area = pts[0].x.toFixed(1) + ',' + bottom.toFixed(1) + ' ' + points + ' ' +
         pts[pts.length - 1].x.toFixed(1) + ',' + bottom.toFixed(1);
     }
-    return { points: points, area: area, empty: pts.length < 2 };
+    return { points: points, area: area, empty: pts.length < 2, min: min, max: max };
+  }
+
+  function niceBytesCeil(value) {
+    if (!Number.isFinite(value) || value <= 0) return 1024;
+    const mag = Math.pow(1024, Math.max(0, Math.floor(Math.log(value) / Math.log(1024) + 1e-12)));
+    const f = value / mag;
+    const steps = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+    for (let i = 0; i < steps.length; i++) {
+      if (f <= steps[i]) return steps[i] * mag;
+    }
+    return 1024 * mag;
+  }
+
+  function formatChartRate(bytesPerSec) {
+    const n0 = Number(bytesPerSec);
+    if (!Number.isFinite(n0) || n0 < 0) return '—';
+    if (n0 === 0) return '0 B/s';
+    const units = ['B/s', 'KiB/s', 'MiB/s', 'GiB/s', 'TiB/s'];
+    let n = n0;
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024;
+      i += 1;
+    }
+    if (i === 0) return Math.round(n) + ' ' + units[i];
+    const rounded = n >= 10 ? String(Math.round(n)) : n.toFixed(1);
+    return rounded + ' ' + units[i];
+  }
+
+  function formatChartClock(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n)) return '';
+    try {
+      return new Intl.DateTimeFormat('de-DE', {
+        timeZone: 'Europe/Berlin',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).format(new Date(n * 1000));
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function chartXLabels(times) {
+    const t = (times || []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    if (t.length >= 2) {
+      const a = formatChartClock(t[0]);
+      const b = formatChartClock(t[Math.floor((t.length - 1) / 2)]);
+      const c = formatChartClock(t[t.length - 1]);
+      if (a && b && c) return [a, b, c];
+    }
+    return ['−60m', '−30m', 'jetzt'];
+  }
+
+  function chartYScale(key, values) {
+    const known = (values || []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    const dataMax = known.length ? Math.max(...known) : 0;
+    if (key === 'net') {
+      const max = niceBytesCeil(dataMax);
+      return {
+        min: 0,
+        max: max,
+        ticks: [0, max / 2, max],
+        format: formatChartRate,
+        aria: '0 bis ' + formatChartRate(max),
+      };
+    }
+    const max = dataMax > 100 ? Math.ceil(dataMax / 10) * 10 : 100;
+    return {
+      min: 0,
+      max: max,
+      ticks: max === 100 ? [0, 50, 100] : [0, max / 2, max],
+      format: (v) => String(Math.round(v)) + '%',
+      aria: '0 bis ' + Math.round(max) + ' Prozent',
+    };
+  }
+
+  function ensureChartAxes(el) {
+    const svg = el.querySelector('.topo-chart-svg');
+    if (!svg) return null;
+    let plot = el.querySelector('.topo-chart-plot');
+    if (!plot) {
+      plot = document.createElement('div');
+      plot.className = 'topo-chart-plot';
+      const y = document.createElement('div');
+      y.className = 'topo-chart-y';
+      y.setAttribute('aria-hidden', 'true');
+      const x = document.createElement('div');
+      x.className = 'topo-chart-x';
+      x.setAttribute('aria-hidden', 'true');
+      svg.parentNode.insertBefore(plot, svg);
+      plot.appendChild(y);
+      plot.appendChild(svg);
+      plot.appendChild(x);
+    }
+    let grid = svg.querySelector('.topo-chart-grid');
+    if (!grid) {
+      grid = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      grid.setAttribute('class', 'topo-chart-grid');
+      grid.setAttribute('aria-hidden', 'true');
+      const first = svg.querySelector('.topo-chart-area') || svg.querySelector('.topo-chart-line');
+      svg.insertBefore(grid, first || svg.firstChild);
+    }
+    return {
+      svg: svg,
+      y: plot.querySelector('.topo-chart-y'),
+      x: plot.querySelector('.topo-chart-x'),
+      grid: grid,
+      line: el.querySelector('.topo-chart-line'),
+      area: el.querySelector('.topo-chart-area'),
+    };
+  }
+
+  function paintChartAxes(parts, scale, times, width, height, pad) {
+    const span = scale.max - scale.min || 1;
+    const yToPx = (v) => height - pad - ((v - scale.min) / span) * (height - 2 * pad);
+    if (parts.grid) {
+      while (parts.grid.firstChild) parts.grid.removeChild(parts.grid.firstChild);
+      (scale.ticks || []).forEach((tick) => {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('class', 'topo-chart-hair');
+        line.setAttribute('x1', '0');
+        line.setAttribute('x2', String(width));
+        const y = yToPx(tick).toFixed(1);
+        line.setAttribute('y1', y);
+        line.setAttribute('y2', y);
+        parts.grid.appendChild(line);
+      });
+    }
+    if (parts.y) {
+      const ticks = (scale.ticks || []).slice().reverse();
+      parts.y.replaceChildren();
+      ticks.forEach((tick) => {
+        const spanEl = document.createElement('span');
+        spanEl.textContent = scale.format(tick);
+        parts.y.appendChild(spanEl);
+      });
+    }
+    if (parts.x) {
+      parts.x.replaceChildren();
+      chartXLabels(times).forEach((label) => {
+        const spanEl = document.createElement('span');
+        spanEl.textContent = label;
+        parts.x.appendChild(spanEl);
+      });
+    }
   }
 
   function paintSpark(root, key, values) {
@@ -1668,16 +1853,21 @@
     el.classList.toggle('is-empty', drawn.empty);
   }
 
-  function paintChart(root, key, values) {
+  function paintChart(root, key, values, times) {
     const el = root.querySelector('[data-chart="' + key + '"]');
     if (!el) return;
-    const line = el.querySelector('.topo-chart-line');
-    const area = el.querySelector('.topo-chart-area');
-    if (!line) return;
-    const drawn = sparkPoints(values, 320, 96, 4);
-    line.setAttribute('points', drawn.points || '0,48 320,48');
-    if (area) area.setAttribute('points', drawn.area || '');
+    const parts = ensureChartAxes(el);
+    if (!parts || !parts.line) return;
+    const scale = chartYScale(key, values);
+    const drawn = sparkPoints(values, 320, 96, 4, { min: scale.min, max: scale.max });
+    paintChartAxes(parts, scale, times, 320, 96, 4);
+    parts.line.setAttribute('points', drawn.empty ? '' : drawn.points);
+    if (parts.area) parts.area.setAttribute('points', drawn.empty ? '' : (drawn.area || ''));
     el.classList.toggle('is-empty', drawn.empty);
+    if (parts.svg && scale.aria) {
+      const names = { cpu: 'CPU-Verlauf', mem: 'RAM-Verlauf', net: 'Netz-Verlauf' };
+      parts.svg.setAttribute('aria-label', (names[key] || 'Verlauf') + ' letzte Stunde, Skala ' + scale.aria);
+    }
   }
 
   function updateGauge(metricsRoot, label, pct, valueText, subText) {
@@ -2159,8 +2349,107 @@
       if (dot) dot.className = 'topo-rail-status topo-rail-status-' + status;
       const name = ((rail.querySelector('.topo-rail-item-name') || {}).textContent || '').trim();
       rail.setAttribute('title', name ? name + ' · ' + status : status);
+      const label = name ? name + ', Status ' + status : status;
+      rail.setAttribute('aria-label', label);
     }
   }
+
+  function applyGuestLive(guestId, live) {
+    if (!guestId || !live || live.error) return;
+    const status = String(live.status || '').toLowerCase();
+    if (status) applyGuestStatus(guestId, status);
+    const panel = document.querySelector('[data-guest-panel="' + guestId + '"]');
+    if (!panel) return;
+    if (live.uptime != null) {
+      const up = formatUptimeJs(live.uptime);
+      panel.querySelectorAll('[data-guest-live="uptime"]').forEach((el) => {
+        el.textContent = up;
+      });
+    }
+    const metrics = panel.querySelector('[data-guest-metrics]');
+    if (!metrics) return;
+    if (live.cpu_pct != null) {
+      const cpuSub = live.cpus != null ? String(live.cpus) + ' vCPU' : null;
+      updateGauge(metrics, 'CPU', live.cpu_pct, live.cpu_pct + '%', cpuSub);
+    }
+    if (live.mem_pct != null || live.maxmem != null) {
+      const sub = live.maxmem != null
+        ? formatBytesJs(live.mem) + ' / ' + formatBytesJs(live.maxmem)
+        : '';
+      const pct = live.mem_pct;
+      updateGauge(metrics, 'RAM', pct, pct != null ? pct + '%' : '—', sub);
+    }
+    if (live.disk_pct != null || live.maxdisk != null) {
+      const sub = live.maxdisk != null
+        ? formatBytesJs(live.disk) + ' / ' + formatBytesJs(live.maxdisk)
+        : '';
+      const pct = live.disk_pct;
+      updateGauge(metrics, 'Disk', pct, pct != null ? pct + '%' : '—', sub);
+    }
+  }
+
+  function visiblePveGuestIds() {
+    const ids = [];
+    document.querySelectorAll('[data-select-guest]').forEach((btn) => {
+      const id = btn.getAttribute('data-select-guest') || '';
+      if (id.startsWith('lxc:') || id.startsWith('qemu:')) ids.push(id);
+    });
+    if (
+      selectedGuestId &&
+      (selectedGuestId.startsWith('lxc:') || selectedGuestId.startsWith('qemu:')) &&
+      ids.indexOf(selectedGuestId) < 0
+    ) {
+      ids.push(selectedGuestId);
+    }
+    return ids;
+  }
+
+  async function loadGuestLive(guestId) {
+    if (!guestId || !(guestId.startsWith('lxc:') || guestId.startsWith('qemu:'))) return;
+    const res = await fetch('/api/guests/' + encodeURIComponent(guestId) + '/status');
+    if (!res.ok) throw new Error(await parseError(res));
+    const live = await res.json();
+    applyGuestLive(guestId, live);
+    return live;
+  }
+
+  async function refreshLiveGuestStatus(ids) {
+    const list = (ids && ids.length) ? ids : visiblePveGuestIds();
+    if (!list.length) return;
+    const res = await fetch('/api/guests/live-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: list }),
+    });
+    if (!res.ok) throw new Error(await parseError(res));
+    const data = await res.json();
+    (data.guests || []).forEach((live) => {
+      if (live && live.guest_id && live.ok !== false && !live.error) {
+        applyGuestLive(live.guest_id, live);
+      }
+    });
+    if (
+      selectedGuestId &&
+      (selectedGuestId.startsWith('lxc:') || selectedGuestId.startsWith('qemu:'))
+    ) {
+      loadGuestSparks(selectedGuestId);
+    } else if (selectedNodeName) {
+      loadNodeLive(selectedNodeName);
+    }
+  }
+
+  window.hlopsLiveRefresh = async function () {
+    const btn = document.getElementById('btn-reload');
+    if (btn) btn.disabled = true;
+    try {
+      await refreshLiveGuestStatus();
+      showToast('Status aktualisiert');
+    } catch (e) {
+      showToast(String(e.message || e), true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  };
 
   function rollbackConfirmText(guestName, snapName, kind, running) {
     const isLxc = kind === 'lxc';
@@ -2364,11 +2653,16 @@
       return res.json();
     };
 
-    const [rrdRes, storageRes, snapRes] = await Promise.allSettled([
+    const [rrdRes, storageRes, snapRes, statusRes] = await Promise.allSettled([
       fetchJson('/api/guests/' + enc + '/rrd?timeframe=hour'),
       fetchJson('/api/guests/' + enc + '/storage'),
       fetchJson('/api/guests/' + enc + '/snapshots'),
+      fetchJson('/api/guests/' + enc + '/status'),
     ]);
+
+    if (statusRes.status === 'fulfilled') {
+      applyGuestLive(guestId, statusRes.value);
+    }
 
     if (metrics) {
       if (rrdRes.status === 'fulfilled') {
@@ -2507,9 +2801,9 @@
     if (rrdRes.status === 'fulfilled') {
       const rrd = rrdRes.value || {};
       if (charts) {
-        paintChart(charts, 'cpu', rrd.cpu || []);
-        paintChart(charts, 'mem', rrd.mem || []);
-        paintChart(charts, 'net', rrd.net || []);
+        paintChart(charts, 'cpu', rrd.cpu || [], rrd.time || []);
+        paintChart(charts, 'mem', rrd.mem || [], rrd.time || []);
+        paintChart(charts, 'net', rrd.net || [], rrd.time || []);
       }
     } else if (!(rrdRes.reason && rrdRes.reason.name === 'AbortError')) {
       if (charts) {

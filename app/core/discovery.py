@@ -1423,6 +1423,113 @@ class DiscoveryEngine:
         stores.sort(key=lambda s: str(s["storage"]).lower())
         return {"node": node, "storage": stores}
 
+    def _guest_live_from_pve(
+        self,
+        guest_id: str,
+        kind: str,
+        node: str,
+        vmid: int,
+        status_raw: dict[str, Any],
+        cfg: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Normalize ``status/current`` (+ optional config) for rail + card.
+
+        Does not invent CPU/RAM/disk: percentages exist only when PVE sent
+        the underlying fields. ``uptime`` comes from ``status/current``.
+        """
+        meta = self._guest_resource_meta(status_raw)
+        if kind == "lxc" and isinstance(cfg, dict):
+            self._apply_lxc_config_meta(meta, cfg)
+        elif kind == "qemu" and isinstance(cfg, dict) and not meta.get("tags_list"):
+            cfg_tags = cfg.get("tags")
+            if cfg_tags:
+                tags_list = self._parse_proxmox_tags(cfg_tags)
+                meta["tags"] = (
+                    cfg_tags if isinstance(cfg_tags, str) else ";".join(tags_list)
+                )
+                meta["tags_list"] = tags_list
+        guest_status = str(status_raw.get("status") or "").strip().lower()
+        return {
+            "guest_id": guest_id,
+            "kind": kind,
+            "node": node,
+            "vmid": vmid,
+            "status": guest_status or "unknown",
+            "uptime": meta.get("uptime"),
+            "cpu": meta.get("cpu"),
+            "cpu_pct": meta.get("cpu_pct"),
+            "cpus": meta.get("cpus"),
+            "mem": meta.get("mem"),
+            "maxmem": meta.get("maxmem"),
+            "mem_pct": meta.get("mem_pct"),
+            "disk": meta.get("disk"),
+            "maxdisk": meta.get("maxdisk"),
+            "disk_pct": meta.get("disk_pct"),
+            "lock": meta.get("lock") or "",
+            "unprivileged": meta.get("unprivileged"),
+            "name": resource_guest_name(status_raw, cfg=cfg) or "",
+        }
+
+    async def _read_guest_live(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        guest_id: str,
+        kind: str,
+        node: str,
+        vmid: int,
+    ) -> dict[str, Any]:
+        status_raw = await self._proxmox_get(
+            client,
+            f"/nodes/{quote(node)}/{kind}/{vmid}/status/current",
+            headers,
+        )
+        if not isinstance(status_raw, dict):
+            raise RuntimeError("Ungültige Antwort von Proxmox /status/current.")
+        kind_enum = EntityKind.LXC if kind == "lxc" else EntityKind.QEMU
+        cfg, _http = await self._fetch_guest_config(
+            client, headers, node, kind_enum, vmid
+        )
+        return self._guest_live_from_pve(
+            guest_id,
+            kind,
+            node,
+            vmid,
+            status_raw,
+            cfg if isinstance(cfg, dict) else None,
+        )
+
+    async def fetch_guest_status(self, guest_id: str) -> dict[str, Any]:
+        """Live ``GET /nodes/{node}/{lxc|qemu}/{vmid}/status/current`` + config."""
+        kind, node, vmid = self._guest_id_parts(guest_id)
+        client, headers = await self._proxmox_authed_client(node=node)
+        try:
+            return await self._read_guest_live(
+                client, headers, guest_id, kind, node, vmid
+            )
+        finally:
+            await client.aclose()
+
+    async def fetch_guests_status(self, guest_ids: list[str]) -> list[dict[str, Any]]:
+        """Live power/metrics for several PVE guests (no full Discovery)."""
+
+        async def one(gid: str) -> dict[str, Any]:
+            try:
+                live = await self.fetch_guest_status(gid)
+                live["ok"] = True
+                return live
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "guest_id": gid,
+                    "error": str(exc) or type(exc).__name__,
+                }
+
+        ids = [str(g).strip() for g in guest_ids if str(g).strip()]
+        if not ids:
+            return []
+        return list(await asyncio.gather(*[one(gid) for gid in ids]))
+
     async def fetch_guest_storage(self, guest_id: str) -> dict[str, Any]:
         """Disk usage + volume/mount assignment for an LXC or QEMU guest.
 
@@ -2042,6 +2149,10 @@ class DiscoveryEngine:
             "shutdown": "heruntergefahren",
             "reboot": "neu gestartet",
         }
+        kind_label = "LXC" if kind == "lxc" else "VM"
+        already_msg = ""
+        upid: Any = None
+        live: dict[str, Any] | None = None
         client, headers = await self._proxmox_authed_client(node=node)
         try:
             try:
@@ -2072,28 +2183,41 @@ class DiscoveryEngine:
                     ) from exc
                 low = detail.lower()
                 if "already running" in low:
+                    already_msg = f"{kind_label} {vmid} läuft bereits."
+                elif "not running" in low or "isn't running" in low:
+                    already_msg = f"{kind_label} {vmid} ist nicht gestartet."
+                else:
                     raise RuntimeError(
-                        f"{'LXC' if kind == 'lxc' else 'VM'} {vmid} läuft bereits."
+                        f"Proxmox Power-{action} fehlgeschlagen "
+                        f"(HTTP {exc.response.status_code})"
+                        + (f": {detail}" if detail else ".")
                     ) from exc
-                if "not running" in low or "isn't running" in low:
-                    raise RuntimeError(
-                        f"{'LXC' if kind == 'lxc' else 'VM'} {vmid} ist nicht gestartet."
-                    ) from exc
-                raise RuntimeError(
-                    f"Proxmox Power-{action} fehlgeschlagen "
-                    f"(HTTP {exc.response.status_code})"
-                    + (f": {detail}" if detail else ".")
-                ) from exc
+            try:
+                live = await self._read_guest_live(
+                    client, headers, guest_id, kind, node, vmid
+                )
+            except Exception:
+                logger.debug(
+                    "Live-Status nach Power %s für %s fehlgeschlagen",
+                    action,
+                    guest_id,
+                    exc_info=True,
+                )
         finally:
             await client.aclose()
 
-        kind_label = "LXC" if kind == "lxc" else "VM"
+        if already_msg:
+            message = already_msg
+        else:
+            message = f"{kind_label} {vmid} wird {labels[action]}…"
         return {
             "ok": True,
+            "already": bool(already_msg),
             "guest_id": guest_id,
             "action": action,
             "upid": upid,
-            "message": f"{kind_label} {vmid} wird {labels[action]}…",
+            "message": message,
+            "live": live,
         }
 
     @staticmethod

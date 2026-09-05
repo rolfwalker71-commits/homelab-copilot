@@ -199,6 +199,10 @@
     });
 
     document.getElementById('btn-reload')?.addEventListener('click', () => {
+      if (typeof window.hlopsLiveRefresh === 'function') {
+        window.hlopsLiveRefresh();
+        return;
+      }
       location.reload();
     });
   </script>
