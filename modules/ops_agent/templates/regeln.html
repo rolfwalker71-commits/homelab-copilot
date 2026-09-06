@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% from "_icons.html" import ico %}
+{% set active_view = active_view|default('regeln') %}
+{% block title %}Regeln — Agent — {{ app_name }}{% endblock %}
+
+{% block content %}
+{% include "_styles.html" %}
+{% include "_subnav.html" %}
+
+<section class="mb-5 animate-in">
+  <p class="eyebrow">Planung · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug break-words">Regeln</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)] leading-snug">
+    Interview und Bestätigungs-Policy. Dieselbe Speicherung wie zuvor unter „Regeln ändern“.
+    Welche Hosts er anfasst, stellst du unter
+    <a class="underline" href="/ops/hosts">Hosts</a> ein.
+  </p>
+</section>
+
+<article id="ops-interview" class="surface-tinted p-4 sm:p-5 mb-5 animate-in">
+  <h2 class="font-display text-lg font-bold leading-snug break-words">Was soll der Agent mit dir klären?</h2>
+  <p class="mt-1 text-sm text-[var(--muted)] leading-snug">
+    Einmal festlegen — danach plant und startet er selbst. Vorausgewählt ist der sichere Standard.
+    DistUpgrade, Wipe, Power-Cycle und Restore-auf-Prod bleiben harte Stops.
+    Welche Hosts er anfasst, stellst du in der
+    <a class="underline" href="/ops/hosts">Host-Liste</a> ein.
+  </p>
+  <form id="ops-policy-form" class="mt-4 grid gap-4">
+    <fieldset>
+      <legend class="text-sm font-semibold">Was willst du bestätigt haben?</legend>
+      <label class="flex items-start gap-2 text-sm min-h-12 mt-2">
+        <input type="checkbox" id="pol-kernel" class="mt-1 h-4 w-4" checked />
+        <span>Kernel- / Docker-Engine-Patches</span>
+      </label>
+      <label class="flex items-start gap-2 text-sm min-h-12">
+        <input type="checkbox" id="pol-firstbak" class="mt-1 h-4 w-4" checked />
+        <span>Erstes Backup-Fenster auf einem neuen Gast</span>
+      </label>
+      <label class="flex items-start gap-2 text-sm min-h-12">
+        <input type="checkbox" id="pol-prod" class="mt-1 h-4 w-4" />
+        <span>Alles auf Produktions-Hosts (Tags prod / production)</span>
+      </label>
+      <label class="flex items-start gap-2 text-sm min-h-12">
+        <input type="checkbox" id="pol-nothing" class="mt-1 h-4 w-4" />
+        <span>Nichts — voll autonom (außer harte Stops)</span>
+      </label>
+    </fieldset>
+    <div class="flex flex-wrap gap-2">
+      <button type="submit" class="btn btn-primary min-h-12">Speichern und selbst arbeiten lassen</button>
+    </div>
+    <p id="ops-policy-msg" class="text-sm text-[var(--muted)]" role="status"></p>
+  </form>
+</article>
+{% endblock %}
+
+{% block scripts %}
+{% include "_scripts.html" %}
+{% endblock %}

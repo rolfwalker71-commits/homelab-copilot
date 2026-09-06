@@ -70,10 +70,88 @@ def _make_templates() -> Jinja2Templates:
     return templates
 
 
+def _store_from_app_state(app: FastAPI | None = None) -> PatcherStore | None:
+    """The store PatcherModule.on_startup already opened (app.state)."""
+    if app is not None:
+        found = getattr(app.state, "patcher_store", None)
+        if found is not None:
+            return found
+    try:
+        from app.main import app as fastapi_app
+
+        found = getattr(fastapi_app.state, "patcher_store", None)
+        if found is not None:
+            return found
+    except Exception:
+        pass
+    return None
+
+
+def _sync_store_aliases(store: PatcherStore) -> None:
+    """Same DB handle on homelab_modules.patcher and patcher.module."""
+    for name in ("homelab_modules.patcher", "patcher.module"):
+        mod = sys.modules.get(name)
+        if mod is None or getattr(mod, "_store", None) is store:
+            continue
+        try:
+            mod._store = store
+        except Exception:
+            pass
+
+
+def _bind_store(store: PatcherStore) -> PatcherStore:
+    global _store
+    _store = store
+    _sync_store_aliases(store)
+    return store
+
+
+def _resolve_store(app: FastAPI | None = None) -> PatcherStore | None:
+    if _store is not None:
+        return _store
+    found = _store_from_app_state(app)
+    if found is not None:
+        return _bind_store(found)
+    return None
+
+
 def _get_store() -> PatcherStore:
-    if _store is None:
+    store = _resolve_store()
+    if store is None:
         raise HTTPException(status_code=503, detail="Patcher-Store nicht bereit.")
-    return _store
+    return store
+
+
+async def _ensure_store(app: FastAPI | None = None) -> PatcherStore:
+    """Open DATA_DIR/patcher.db the same way PatcherModule.on_startup does.
+
+    Works for `from patcher.module import …` even when the registry loaded
+    this file as ``homelab_modules.patcher`` (split sys.modules entry).
+    """
+    store = _resolve_store(app)
+    if store is not None:
+        return store
+    try:
+        ps = get_patcher_settings()
+        store = PatcherStore(ps.db_path)
+        await store.connect()
+    except Exception as exc:
+        logger.exception("Patcher-Store konnte nicht geöffnet werden")
+        raise HTTPException(
+            status_code=503, detail="Patcher-Store nicht bereit."
+        ) from exc
+    _bind_store(store)
+    target_app = app
+    if target_app is None:
+        try:
+            from app.main import app as fastapi_app
+
+            target_app = fastapi_app
+        except Exception:
+            target_app = None
+    if target_app is not None and getattr(target_app.state, "patcher_store", None) is None:
+        target_app.state.patcher_store = store
+    return store
 
 
 def _get_engine() -> WaveEngine:
@@ -331,7 +409,7 @@ def _compact_image_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 async def _scan_and_persist_images(target, snapshot) -> dict[str, Any]:
     """Scan Docker images on a host and persist the last result (daily / card)."""
-    store = _store
+    store = _resolve_store()
     if store is None:
         return {"ok": False, "count": 0, "error": "Store nicht bereit"}
     scan_id = await store.create_image_scan(
@@ -798,9 +876,11 @@ async def _run_scan_all(
     trigger: str,
     do_summarize: bool = False,
     already_begun: bool = False,
+    app: FastAPI | None = None,
 ) -> dict[str, Any]:
-    store = _store
-    if store is None:
+    try:
+        store = await _ensure_store(app)
+    except HTTPException:
         SCAN_ALL.running = False
         SCAN_ALL.error = "Patcher-Store nicht bereit."
         SCAN_ALL.message = "Scan nicht gestartet — Patcher nicht bereit."
@@ -1443,7 +1523,11 @@ async def api_scan_all(
     snap = _snapshot(request)
     if wait:
         return await _run_scan_all(
-            snapshot=snap, trigger="manual", do_summarize=False, already_begun=True
+            snapshot=snap,
+            trigger="manual",
+            do_summarize=False,
+            already_begun=True,
+            app=request.app,
         )
     background.add_task(
         _run_scan_all,
@@ -1451,6 +1535,7 @@ async def api_scan_all(
         trigger="manual",
         do_summarize=False,
         already_begun=True,
+        app=request.app,
     )
     return {"ok": True, "started": True, **SCAN_ALL.to_dict()}
 
@@ -1942,8 +2027,7 @@ class PatcherModule:
     async def on_startup(self, app: FastAPI) -> None:
         global _store, _daily_task, _engine
         ps = get_patcher_settings()
-        _store = PatcherStore(ps.db_path)
-        await _store.connect()
+        _store = await _ensure_store(app)
         app.state.patcher_store = _store
 
         def _snap() -> Any:
@@ -2023,7 +2107,7 @@ class PatcherModule:
                 snap = store.snapshot
                 logger.info("Patcher Daily-Scan startet…")
                 await _run_scan_all(
-                    snapshot=snap, trigger="daily", do_summarize=False
+                    snapshot=snap, trigger="daily", do_summarize=False, app=app
                 )
 
             await daily_scan_loop(

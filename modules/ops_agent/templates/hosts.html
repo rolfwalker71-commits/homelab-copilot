@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "_icons.html" import ico %}
+{% set active_view = active_view|default('hosts') %}
+{% block title %}Hosts — Agent — {{ app_name }}{% endblock %}
+
+{% block content %}
+{% include "_styles.html" %}
+{% include "_subnav.html" %}
+
+<section class="mb-5 animate-in">
+  <p class="eyebrow">Planung · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug break-words">Hosts</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)] leading-snug">
+    Welche Hosts der Agent anfassen darf. Haken gelten für autonome Wellen nach Scan.
+    Lage, Log und Regeln liegen auf den anderen Agent-Seiten.
+  </p>
+</section>
+
+<article id="ops-scope" class="surface-tinted p-4 sm:p-5 mb-5 animate-in">
+  <h2 class="font-display text-lg font-bold leading-snug break-words">Welche Hosts soll der Agent anfassen?</h2>
+  <p class="mt-1 text-sm text-[var(--muted)] leading-snug">
+    Haken speichern sich sofort. Getrennt: Patchen und Image-Updates. Leer = keine autonome Welle dieser Art.
+    Neue oder weggefallene Gäste fragt der Agent einzeln nach — nichts wird stillschweigend ergänzt.
+  </p>
+  <div id="ops-scope-list" class="ops-scope-list mt-4" role="list"></div>
+  <div class="mt-4 flex flex-wrap gap-2">
+    <button type="button" id="btn-ops-scope" class="btn btn-ghost min-h-12">Auswahl speichern</button>
+  </div>
+  <p id="ops-scope-msg" class="mt-2 text-sm text-[var(--muted)]" role="status"></p>
+</article>
+{% endblock %}
+
+{% block scripts %}
+{% include "_scripts.html" %}
+{% endblock %}

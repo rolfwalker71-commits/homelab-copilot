@@ -104,6 +104,57 @@ class WindowIdPayload(BaseModel):
     window_id: int = Field(..., ge=1)
 
 
+def _patcher_modules() -> list[Any]:
+    """Registry instance first, then the package import — they should be one."""
+    seen: list[Any] = []
+    for name in ("homelab_modules.patcher", "patcher.module"):
+        mod = sys.modules.get(name)
+        if mod is not None and mod not in seen:
+            seen.append(mod)
+    if not seen:
+        import patcher.module as pm
+
+        seen.append(pm)
+    return seen
+
+
+async def _open_patcher_store(app: FastAPI) -> Any:
+    """Same store `/modules/patcher` opened in PatcherModule.on_startup."""
+    store = getattr(app.state, "patcher_store", None)
+    if store is None:
+        last_exc: Exception | None = None
+        for mod in _patcher_modules():
+            ensure = getattr(mod, "_ensure_store", None)
+            if ensure is None:
+                continue
+            try:
+                store = await ensure(app)
+                break
+            except Exception as exc:
+                last_exc = exc
+                store = None
+        if store is None and last_exc is not None:
+            raise HTTPException(
+                status_code=503, detail="Patcher-Store nicht bereit."
+            ) from last_exc
+    if store is None:
+        raise HTTPException(status_code=503, detail="Patcher-Store nicht bereit.")
+    app.state.patcher_store = store
+    for mod in _patcher_modules():
+        bind = getattr(mod, "_bind_store", None)
+        if bind is not None:
+            try:
+                bind(store)
+                continue
+            except Exception:
+                pass
+        try:
+            mod._store = store
+        except Exception:
+            pass
+    return store
+
+
 def _scan_status() -> dict[str, Any]:
     try:
         from patcher.scheduler import SCAN_ALL
@@ -253,10 +304,10 @@ async def api_scan_status() -> dict[str, Any]:
 async def api_scan_now(request: Request) -> dict[str, Any]:
     """Start existing patcher scan-all (includes image scan), then ops plan."""
     global _scan_task
-    from patcher.module import _get_store, _run_scan_all
     from patcher.scheduler import SCAN_ALL, begin_scan_all
 
-    _get_store()
+    pm = _patcher_modules()[0]
+    await _open_patcher_store(request.app)
     begun = await begin_scan_all(trigger="manual")
     if begun is None:
         raise HTTPException(status_code=409, detail="Scan läuft bereits.")
@@ -269,8 +320,12 @@ async def api_scan_now(request: Request) -> dict[str, Any]:
 
     async def _run() -> None:
         try:
-            await _run_scan_all(
-                snapshot=snap, trigger="manual", do_summarize=False, already_begun=True
+            await pm._run_scan_all(
+                snapshot=snap,
+                trigger="manual",
+                do_summarize=False,
+                already_begun=True,
+                app=request.app,
             )
         except Exception as exc:
             logger.exception("ops scan-now failed")
@@ -305,7 +360,7 @@ async def api_refresh_brief() -> dict[str, Any]:
 
 class OpsAgentModule:
     name = "ops_agent"
-    version = "0.6.0"
+    version = "0.7.0"
     description = (
         "Plant Patch- und Backup-Fenster selbst, prüft Plausibilität, "
         "verschiebt bei Überlauf und startet über die bestehenden Engines."
@@ -352,9 +407,8 @@ class OpsAgentModule:
         async def _hosts(*_a: Any, **_k: Any) -> list[Any]:
             try:
                 from patcher.agent import hosts_from_store as real_hosts
-                from patcher.module import _get_store as _pstore
 
-                pstore = _pstore()
+                pstore = await _open_patcher_store(app)
                 snap = _snap()
                 if pstore is None or snap is None:
                     return []
@@ -423,10 +477,14 @@ class OpsAgentModule:
 
         async def _reboot(target_id: str) -> dict[str, Any] | None:
             from patcher.apply import reboot_host
-            from patcher.module import _get_store as patch_store
             from patcher.targets import resolve_target
 
-            store = patch_store()
+            store = getattr(app.state, "patcher_store", None)
+            if store is None:
+                try:
+                    store = await _open_patcher_store(app)
+                except Exception:
+                    return None
             if store is None:
                 return None
             try:
@@ -442,11 +500,15 @@ class OpsAgentModule:
                 parse_image_prune_output,
             )
             from patcher.config import get_patcher_settings
-            from patcher.module import _get_store as patch_store
             from patcher.sshutil import ssh_run
             from patcher.targets import resolve_target
 
-            store = patch_store()
+            store = getattr(app.state, "patcher_store", None)
+            if store is None:
+                try:
+                    store = await _open_patcher_store(app)
+                except Exception:
+                    return None
             if store is None:
                 return None
             try:
@@ -506,18 +568,46 @@ class OpsAgentModule:
         templates = _make_templates()
         settings = get_settings()
 
+        def _page_ctx(active_view: str) -> dict[str, Any]:
+            return {
+                "app_name": settings.app_name,
+                "app_version": settings.app_version,
+                "now": format_de(now_berlin()),
+                "module_version": self.version,
+                "policy_defaults": default_policy().to_dict(),
+                "active_view": active_view,
+            }
+
         @app.get("/ops", response_class=HTMLResponse)
         async def ops_board_page(request: Request) -> HTMLResponse:
             return templates.TemplateResponse(
                 request,
                 "board.html",
-                {
-                    "app_name": settings.app_name,
-                    "app_version": settings.app_version,
-                    "now": format_de(now_berlin()),
-                    "module_version": self.version,
-                    "policy_defaults": default_policy().to_dict(),
-                },
+                _page_ctx("lage"),
+            )
+
+        @app.get("/ops/hosts", response_class=HTMLResponse)
+        async def ops_hosts_page(request: Request) -> HTMLResponse:
+            return templates.TemplateResponse(
+                request,
+                "hosts.html",
+                _page_ctx("hosts"),
+            )
+
+        @app.get("/ops/log", response_class=HTMLResponse)
+        async def ops_log_page(request: Request) -> HTMLResponse:
+            return templates.TemplateResponse(
+                request,
+                "log.html",
+                _page_ctx("log"),
+            )
+
+        @app.get("/ops/regeln", response_class=HTMLResponse)
+        async def ops_regeln_page(request: Request) -> HTMLResponse:
+            return templates.TemplateResponse(
+                request,
+                "regeln.html",
+                _page_ctx("regeln"),
             )
 
         _loop_task = asyncio.create_task(run_ops_loop(_engine), name="ops-agent-loop")

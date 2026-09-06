@@ -142,8 +142,21 @@ def _load_module_file(path: Path) -> Any | None:
     spec = importlib.util.spec_from_file_location(mod_name, module_py)
     if spec is None or spec.loader is None:
         return None
+    # Registry loads as homelab_modules.<name>, but other code does
+    # `from patcher.module import …`. Keep one instance so `_store` set in
+    # on_startup is the same object Scan jetzt / scan-all use.
+    pkg_mod = f"{path.name}.module"
+    existing = sys.modules.get(pkg_mod)
+    if existing is not None:
+        sys.modules[mod_name] = existing
+        return getattr(existing, "MODULE", None) or getattr(existing, "module", None)
+
     mod = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = mod
+    sys.modules[pkg_mod] = mod
+    pkg = sys.modules.get(path.name)
+    if pkg is not None:
+        setattr(pkg, "module", mod)
     spec.loader.exec_module(mod)
     return getattr(mod, "MODULE", None) or getattr(mod, "module", None)
 

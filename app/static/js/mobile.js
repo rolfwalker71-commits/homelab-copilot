@@ -433,7 +433,12 @@
     root.innerHTML =
       '<article class="m-card"><h2 class="m-card-title">Nächste Fenster</h2>' +
       '<p class="m-card-meta">' + esc(scopeLine) + '</p>' +
-      '<p class="m-card-meta"><a href="/ops">Agent-Board · Host-Auswahl</a></p></article>' +
+      '<p class="m-card-meta">' +
+      '<a href="/ops">Lage</a> · ' +
+      '<a href="/ops/hosts">Hosts</a> · ' +
+      '<a href="/ops/log">Log</a> · ' +
+      '<a href="/ops/regeln">Regeln</a>' +
+      "</p></article>" +
       nextHtml +
       waitHtml;
     root.querySelectorAll("[data-m-ops-confirm]").forEach((btn) => {

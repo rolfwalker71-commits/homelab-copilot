@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% from "_icons.html" import ico %}
+{% set active_view = active_view|default('log') %}
+{% block title %}Log — Agent — {{ app_name }}{% endblock %}
+
+{% block content %}
+{% include "_styles.html" %}
+{% include "_subnav.html" %}
+
+<section class="mb-5 animate-in">
+  <p class="eyebrow">Planung · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug break-words">Log</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)] leading-snug">
+    Tätigkeitslog und Lektionen zum Nachlesen — gleiche Daten wie zuvor auf der Agent-Seite.
+  </p>
+</section>
+
+<article class="surface-tinted p-4 sm:p-5 mt-5 mb-5 animate-in">
+  <details id="ops-activity" class="ops-next-group ops-lessons-group" open>
+    <summary class="ops-next-summary">
+      <span class="ops-next-summary-inner">
+        <span class="ops-next-chevron" aria-hidden="true"></span>
+        <span class="ops-next-summary-text" id="ops-activity-title">Tätigkeitslog</span>
+      </span>
+    </summary>
+    <p class="mt-2 text-sm text-[var(--muted)] leading-snug">
+      Was der Agent getan hat — überlebt Neustarts, neueste zuerst. Zum Nachlesen am Abend oder mittags.
+    </p>
+    <div id="ops-activity-list" class="mt-3 space-y-2"></div>
+  </details>
+</article>
+
+<article class="surface-tinted p-4 sm:p-5 mt-5 mb-5 animate-in">
+  <details id="ops-lessons" class="ops-next-group ops-lessons-group" open>
+    <summary class="ops-next-summary">
+      <span class="ops-next-summary-inner">
+        <span class="ops-next-chevron" aria-hidden="true"></span>
+        <span class="ops-next-summary-text" id="ops-lessons-title">Lektionen</span>
+      </span>
+    </summary>
+    <div id="ops-lessons-list" class="mt-3 space-y-2"></div>
+  </details>
+</article>
+{% endblock %}
+
+{% block scripts %}
+{% include "_scripts.html" %}
+{% endblock %}

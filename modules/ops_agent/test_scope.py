@@ -244,11 +244,25 @@ class OverlayTicksTests(unittest.TestCase):
         self.assertTrue(out[0]["patch"])
 
 
+def _ops_ui_text() -> str:
+    tdir = Path(__file__).resolve().parent.joinpath("templates")
+    names = (
+        "board.html",
+        "hosts.html",
+        "log.html",
+        "regeln.html",
+        "_scripts.html",
+        "_styles.html",
+        "_subnav.html",
+    )
+    parts = [(tdir / n).read_text(encoding="utf-8") for n in names]
+    parts.append(Path(__file__).resolve().parent.joinpath("module.py").read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
+
 class BoardUiContractTests(unittest.TestCase):
     def test_board_auto_saves_and_protects_dirty_ticks(self) -> None:
-        html = Path(__file__).resolve().parent.joinpath("templates/board.html").read_text(
-            encoding="utf-8"
-        )
+        html = _ops_ui_text()
         self.assertIn("scopeDirty", html)
         self.assertIn("overlayDirtyTicks", html)
         self.assertIn("flushScopeSave", html)
@@ -298,8 +312,33 @@ class BoardUiContractTests(unittest.TestCase):
         self.assertIn("/brief", html)
         self.assertIn("fällt auf", html)
         self.assertNotIn("Übernommen aus dem bestehenden Backup-Zeitplan", html)
-        policy_block = html.split("ops-policy-form")[-1]
-        self.assertNotIn("patch_scope_ids", policy_block.split("ops-enabled")[0])
+        regeln = Path(__file__).resolve().parent.joinpath("templates/regeln.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("ops-policy-form", regeln)
+        self.assertNotIn("patch_scope_ids", regeln)
+        self.assertIn('href="/ops/hosts"', html)
+        self.assertIn('href="/ops/log"', html)
+        self.assertIn('href="/ops/regeln"', html)
+        self.assertIn("@app.get(\"/ops/hosts\"", html)
+        self.assertIn("@app.get(\"/ops/log\"", html)
+        self.assertIn("@app.get(\"/ops/regeln\"", html)
+        self.assertIn("redirectLegacyOpsHash", html)
+        self.assertIn("hasScopeMatrix", html)
+        self.assertIn("_open_patcher_store", html)
+
+    def test_lage_has_no_host_matrix(self) -> None:
+        lage = Path(__file__).resolve().parent.joinpath("templates/board.html").read_text(
+            encoding="utf-8"
+        )
+        hosts = Path(__file__).resolve().parent.joinpath("templates/hosts.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("ops-scope-list", lage)
+        self.assertNotIn("Welche Hosts soll der Agent anfassen?", lage)
+        self.assertIn("/ops/hosts", lage)
+        self.assertIn("ops-scope-list", hosts)
+        self.assertIn("Haken speichern sich sofort", hosts)
 
     def test_scan_all_runs_patch_then_images(self) -> None:
         src = Path(__file__).resolve().parents[1].joinpath("patcher/module.py").read_text(
@@ -312,6 +351,7 @@ class BoardUiContractTests(unittest.TestCase):
         self.assertIn("_scan_one_target_sync", body)
         self.assertIn("_scan_and_persist_images", body)
         self.assertIn("_maybe_plan_after_scan", body)
+        self.assertIn("await _ensure_store(app)", body)
 
 
 class _Ent:

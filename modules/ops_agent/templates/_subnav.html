@@ -1,0 +1,29 @@
+{# Ops-Agent — secondary nav #}
+{% from "_icons.html" import ico %}
+<nav class="module-subnav mb-4 flex flex-wrap items-center gap-2 animate-in" aria-label="Agent-Bereiche">
+  <a href="/ops"
+     class="btn btn-sm {% if active_view == 'lage' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'lage' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('info', 15) }}</span>
+    Lage
+  </a>
+  <a href="/ops/hosts"
+     class="btn btn-sm {% if active_view == 'hosts' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'hosts' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('host', 15) }}</span>
+    Hosts
+  </a>
+  <a href="/ops/log"
+     class="btn btn-sm {% if active_view == 'log' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'log' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('logs', 15) }}</span>
+    Log
+  </a>
+  <a href="/ops/regeln"
+     class="btn btn-sm {% if active_view == 'regeln' %}btn-primary{% else %}btn-ghost{% endif %}"
+     {% if active_view == 'regeln' %}aria-current="page"{% endif %}>
+    <span class="nav-ico">{{ ico('setup', 15) }}</span>
+    Regeln
+  </a>
+  <a href="/" class="btn btn-ghost btn-sm">← Topologie</a>
+</nav>
