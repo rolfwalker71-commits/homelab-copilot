@@ -14,7 +14,8 @@ from typing import Any, Callable, Awaitable
 from app.config import Settings, get_settings
 from app.core.docker_control import DockerControlError, validate_docker_name
 from app.core.locale import format_de, iso_utc, now_berlin
-from app.core.models import TopologySnapshot
+from app.core.models import EntityStatus, TopologySnapshot
+from app.core.tree import build_topology_tree
 
 from backup_verifier.config import BackupSettings, get_backup_settings
 from backup_verifier.destinations import (
@@ -1015,29 +1016,119 @@ done
         )
 
 
+_REASON_PREFIX = "Kein Compose-Label — Topologie gruppiert nur nach Container-Name"
+_REASON_NO_PARENT = "Kein Host (parent_id fehlt) — Backup per SSH nicht möglich"
+
+
+def _stack_parent_id(item: dict[str, Any]) -> str:
+    for row in item.get("containers") or []:
+        pid = row.get("parent_id")
+        if pid:
+            return str(pid)
+    return ""
+
+
+def _count_singles(tree: dict[str, Any]) -> int:
+    n = len(tree.get("orphan_singles") or [])
+    for node in tree.get("nodes") or []:
+        for row in node.get("guests") or []:
+            n += len(row.get("docker_singles") or [])
+    for row in tree.get("linux_hosts") or []:
+        n += len(row.get("docker_singles") or [])
+    return n
+
+
+def _unscanned_guests(snapshot: TopologySnapshot) -> list[str]:
+    """Guests the Docker SSH scan skips (not running or no IP)."""
+    names: list[str] = []
+    for g in snapshot.guests:
+        if g.status == EntityStatus.RUNNING and g.ip_addresses:
+            continue
+        names.append((g.hostname or g.name or g.id or "").strip() or g.id)
+    return names
+
+
+def describe_backup_stacks(
+    snapshot: TopologySnapshot | None,
+) -> dict[str, Any]:
+    """Same stack grouping as topology; only compose+host is backup-eligible.
+
+    Prefix-Stacks, Orphans ohne Host und Einzelcontainer werden nicht
+    still verworfen — sie stehen in ``excluded`` bzw. ``notes``.
+    """
+    if snapshot is None:
+        return {"stacks": [], "excluded": [], "notes": []}
+
+    tree = build_topology_tree(snapshot)
+    stacks: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+
+    def consider(item: dict[str, Any]) -> None:
+        parent_id = _stack_parent_id(item)
+        source = str(item.get("source") or "")
+        project = str(item.get("compose_project") or "")
+        name = str(item.get("name") or project or "")
+        count = int(item.get("count") or len(item.get("containers") or []))
+        guest = resolve_guest(snapshot, parent_id) if parent_id else {
+            "guest_name": "",
+            "guest_ip": None,
+        }
+        guest_name = str(guest.get("guest_name") or parent_id or "ohne Host")
+        row = {
+            "parent_id": parent_id,
+            "stack": project or name,
+            "guest_name": guest_name,
+            "guest_ip": guest.get("guest_ip"),
+            "containers": count,
+            "source": source or None,
+        }
+        if source == "compose" and project and parent_id:
+            stacks.append(row)
+            return
+        if source == "prefix":
+            reason, code = _REASON_PREFIX, "prefix"
+        elif not parent_id:
+            reason, code = _REASON_NO_PARENT, "no_parent"
+        else:
+            reason, code = _REASON_PREFIX, "not_compose"
+        excluded.append({**row, "reason": reason, "reason_code": code})
+
+    for node in tree.get("nodes") or []:
+        for guest_row in node.get("guests") or []:
+            for item in guest_row.get("docker_stacks") or []:
+                consider(item)
+    for host_row in tree.get("linux_hosts") or []:
+        for item in host_row.get("docker_stacks") or []:
+            consider(item)
+    for item in tree.get("orphan_stacks") or []:
+        consider(item)
+
+    notes: list[str] = []
+    skipped = _unscanned_guests(snapshot)
+    if skipped:
+        shown = ", ".join(skipped[:8])
+        extra = " u. a." if len(skipped) > 8 else ""
+        notes.append(
+            f"{len(skipped)} Host(s) nicht gescannt ({shown}{extra}) — "
+            "gestoppt, unbekannt oder ohne IP. Deren Docker-Stacks fehlen "
+            "in der Topologie und hier."
+        )
+    n_singles = _count_singles(tree)
+    if n_singles:
+        notes.append(
+            f"{n_singles} Einzelcontainer ohne Compose-Projekt — "
+            "keine Backup-Einheit (Sicherung ist der ganze Compose-Stack)."
+        )
+
+    stacks.sort(key=lambda x: (str(x["guest_name"]).lower(), str(x["stack"]).lower()))
+    excluded.sort(
+        key=lambda x: (str(x["guest_name"]).lower(), str(x["stack"]).lower())
+    )
+    return {"stacks": stacks, "excluded": excluded, "notes": notes}
+
+
 async def list_backup_stacks(
     snapshot: TopologySnapshot | None,
 ) -> list[dict[str, Any]]:
-    """Compose projects from topology for UI selectors."""
-    if snapshot is None:
-        return []
-    seen: dict[str, dict[str, Any]] = {}
-    for c in snapshot.containers:
-        labels = c.labels or {}
-        project = labels.get("com.docker.compose.project") or (c.meta or {}).get(
-            "compose_project"
-        )
-        if not project or not c.parent_id:
-            continue
-        key = f"{c.parent_id}::{project}"
-        if key not in seen:
-            guest = resolve_guest(snapshot, c.parent_id)
-            seen[key] = {
-                "parent_id": c.parent_id,
-                "stack": project,
-                "guest_name": guest["guest_name"] or c.parent_id,
-                "guest_ip": guest["guest_ip"],
-                "containers": 0,
-            }
-        seen[key]["containers"] += 1
-    return sorted(seen.values(), key=lambda x: (x["guest_name"], x["stack"]))
+    """Compose projects from topology for UI selectors (backup-eligible only)."""
+    return describe_backup_stacks(snapshot)["stacks"]

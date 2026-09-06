@@ -7,6 +7,10 @@ from typing import Any
 
 from app.core.locale import BERLIN, now_berlin
 from backup_verifier.scheduler import cron_clock_hm, schedule_clock_hm
+from ops_agent.backup_coverage import (
+    host_needs_backup_nag,
+    schedule_covers_host,
+)
 from ops_agent.planner import (
     KIND_BACKUP,
     KIND_PATCH,
@@ -155,6 +159,7 @@ def build_day_ledger(
     prompts: list[dict[str, Any]] | None = None,
     pending: list[Any] | None = None,
     skip_backup_ids: set[str] | None = None,
+    backup_stacks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Today's planned vs actual: backups, patches, images."""
     now = now or now_berlin()
@@ -184,6 +189,7 @@ def build_day_ledger(
         hosts=hosts,
         prompts=prompts,
         skip_backup=skip_backup,
+        backup_stacks=list(backup_stacks or []),
     )
     patches, images = _patch_image_rows(
         now=now,
@@ -212,6 +218,7 @@ def _backup_rows(
     hosts: list[dict[str, Any]],
     prompts: list[dict[str, Any]],
     skip_backup: set[str],
+    backup_stacks: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     covered: set[tuple[str, str]] = set()
     out: list[dict[str, Any]] = []
@@ -282,7 +289,21 @@ def _backup_rows(
         if str(prompt.get("kind") or "") != "no_backup":
             continue
         tid = str(prompt.get("target_id") or "").strip()
-        if not tid or any(c[0] == tid.lower() for c in covered):
+        if not tid:
+            continue
+        host = {
+            "id": tid,
+            "name": str(prompt.get("target_name") or tid),
+            "kind": "lxc",
+        }
+        if any(schedule_covers_host(s, host) for s in schedules):
+            continue
+        if any(c[0] == tid.lower() for c in covered):
+            continue
+        if backup_stacks and not host_needs_backup_nag(host, backup_stacks, schedules):
+            continue
+        if not backup_stacks:
+            # Ohne Stack-Liste: kein Nag nur wegen eines LXC-Namens.
             continue
         name = str(prompt.get("target_name") or tid)
         out.append(
@@ -302,19 +323,35 @@ def _backup_rows(
             continue
         if any(c[0] == tid.lower() for c in covered):
             continue
+        if any(schedule_covers_host(s, host) for s in schedules):
+            continue
         kind = str(host.get("kind") or "")
-        if kind not in ("lxc", "qemu", "lxc-ct", "vm"):
+        if kind not in ("lxc", "qemu", "lxc-ct", "vm", "manual", "host"):
             continue
         if host.get("gone"):
             continue
+        if not host_needs_backup_nag(host, backup_stacks, schedules):
+            continue
         name = str(host.get("name") or host.get("target_name") or tid)
+        missing = [
+            str(s.get("stack") or s.get("compose_project") or "")
+            for s in backup_stacks
+            if str(s.get("parent_id") or "") == tid
+            or str(s.get("guest_name") or "").strip().lower()
+            == str(name).strip().lower()
+        ]
+        stack_hint = next((m for m in missing if m), "")
+        reason = f"{name} hat keinen Backup-Plan. So gewollt?"
+        if stack_hint:
+            reason = f"{name} hat keinen Backup-Plan für {stack_hint}. So gewollt?"
         out.append(
             _row(
                 kind="backup",
                 target_id=tid,
                 target_name=name,
+                stack=stack_hint,
                 status=STATUS_NO_PLAN,
-                reason=f"{name} hat keinen Backup-Plan.",
+                reason=reason,
             )
         )
     return out

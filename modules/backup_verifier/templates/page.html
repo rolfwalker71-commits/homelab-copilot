@@ -1,6 +1,117 @@
 {% extends "base.html" %}
 {% block title %}Backup Verifier — {{ app_name }}{% endblock %}
 
+{% block head %}
+<style>
+  /* Native <select> popups clip against overflow/transform on the card. */
+  .backup-run-card {
+    overflow: visible;
+    transform: none;
+    animation: none;
+  }
+  .stack-picker {
+    position: relative;
+  }
+  .stack-picker-native {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .stack-picker-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+  }
+  .stack-picker-btn-text {
+    min-width: 0;
+    flex: 1 1 auto;
+    font-size: 1rem;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+  .stack-picker-chevron {
+    flex: 0 0 auto;
+    width: 0.7rem;
+    height: 0.7rem;
+    border-right: 0.12rem solid currentColor;
+    border-bottom: 0.12rem solid currentColor;
+    transform: rotate(45deg) translate(-0.1rem, -0.15rem);
+    opacity: 0.65;
+  }
+  .stack-picker-btn[aria-expanded="true"] .stack-picker-chevron {
+    transform: rotate(225deg) translate(-0.05rem, -0.05rem);
+  }
+  .stack-picker-menu {
+    position: absolute;
+    z-index: 40;
+    left: 0;
+    right: 0;
+    top: calc(100% + 0.35rem);
+    margin: 0;
+    padding: 0.35rem;
+    list-style: none;
+    max-height: min(20rem, 55vh);
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--outline, var(--border));
+    border-radius: var(--radius-ctrl, 0.75rem);
+    background: var(--card, var(--background));
+    box-shadow: 0 0.75rem 1.75rem color-mix(in srgb, #000 28%, transparent);
+  }
+  .stack-picker-menu[hidden] {
+    display: none;
+  }
+  .stack-picker-opt {
+    display: block;
+    width: 100%;
+    min-height: 2.75rem;
+    padding: 0.55rem 0.75rem;
+    border: 0;
+    border-radius: 0.65rem;
+    background: var(--card, var(--background));
+    color: var(--on-surface, var(--text));
+    font: inherit;
+    font-size: 1rem;
+    line-height: 1.35;
+    text-align: left;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+  .stack-picker-opt[aria-selected="true"] {
+    background: var(--muted);
+    color: var(--on-surface, var(--text));
+  }
+  .stack-picker-opt:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 1px;
+  }
+  .stack-picker-opt.is-disabled {
+    cursor: default;
+    color: var(--muted);
+    background: transparent;
+  }
+  .stack-picker-opt-reason {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 0.8125rem;
+    line-height: 1.35;
+    color: var(--muted);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .stack-picker-opt:not(.is-disabled):hover {
+      background: var(--muted);
+    }
+  }
+</style>
+{% endblock %}
+
 {% block content %}
 <section class="mb-6 animate-in">
   <p class="eyebrow">Modul · v{{ module_version }}</p>
@@ -21,17 +132,26 @@
 
 <div id="setup-banner" class="mb-6 hidden animate-in setup-banner text-sm" role="status"></div>
 
-<article class="surface p-4 sm:p-5 animate-in">
+<article class="surface p-4 sm:p-5 backup-run-card">
   <h2 class="font-display text-lg font-bold">Backup starten</h2>
   <p class="mt-1 text-sm text-[var(--muted)]">
     Preflight zeigt genau, was gesichert wird — danach bestätigen und starten.
   </p>
   <form id="run-form" class="mt-4 space-y-3" novalidate>
-    <div>
-      <label class="label" for="stack-select">Compose-Stack</label>
-      <select id="stack-select" class="field" required>
+    <div class="stack-picker" id="stack-picker">
+      <label class="label" id="stack-select-label" for="stack-select-btn">Compose-Stack</label>
+      <select id="stack-select" class="stack-picker-native" required tabindex="-1" aria-hidden="true">
         <option value="">Laden…</option>
       </select>
+      <button type="button" id="stack-select-btn" class="field stack-picker-btn"
+        aria-haspopup="listbox" aria-expanded="false" aria-controls="stack-select-list"
+        aria-labelledby="stack-select-label stack-select-btn-text">
+        <span id="stack-select-btn-text" class="stack-picker-btn-text">Laden…</span>
+        <span class="stack-picker-chevron" aria-hidden="true"></span>
+      </button>
+      <ul id="stack-select-list" class="stack-picker-menu" role="listbox"
+        aria-labelledby="stack-select-label" hidden></ul>
+      <p id="stack-select-note" class="mt-1.5 text-sm text-[var(--muted)]" hidden></p>
     </div>
     <div>
       <p class="label" id="engine-label">Engine</p>
@@ -627,16 +747,142 @@
     }
   }
 
+  function stackOptionLabel(s) {
+    return (s.guest_name || s.parent_id || 'ohne Host') + ' · ' + s.stack + ' (' + s.containers + ')';
+  }
+
+  function syncStackPickerButton() {
+    const sel = document.getElementById('stack-select');
+    const text = document.getElementById('stack-select-btn-text');
+    if (!sel || !text) return;
+    const opt = sel.selectedOptions && sel.selectedOptions[0];
+    text.textContent = (opt && opt.textContent) ? opt.textContent : 'Stack wählen…';
+    document.querySelectorAll('#stack-select-list [role="option"]').forEach((el) => {
+      el.setAttribute('aria-selected', el.dataset.value === sel.value ? 'true' : 'false');
+    });
+  }
+
+  function setStackPickerOpen(open) {
+    const btn = document.getElementById('stack-select-btn');
+    const menu = document.getElementById('stack-select-list');
+    if (!btn || !menu) return;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    menu.hidden = !open;
+    if (open) {
+      const selected = menu.querySelector('[aria-selected="true"]') || menu.querySelector('[role="option"]:not(.is-disabled)');
+      if (selected) {
+        selected.focus();
+        selected.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  }
+
+  function chooseStackValue(val) {
+    const sel = document.getElementById('stack-select');
+    if (!sel || !val) return;
+    sel.value = val;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    syncStackPickerButton();
+    setStackPickerOpen(false);
+    document.getElementById('stack-select-btn')?.focus();
+  }
+
+  function renderStackPickerMenu(eligible, excluded) {
+    const menu = document.getElementById('stack-select-list');
+    if (!menu) return;
+    const rows = [];
+    eligible.forEach((s) => {
+      const val = encodeURIComponent(s.parent_id) + '|' + encodeURIComponent(s.stack);
+      rows.push(
+        '<li><button type="button" role="option" class="stack-picker-opt" data-value="' +
+        esc(val) + '" aria-selected="false">' + esc(stackOptionLabel(s)) + '</button></li>'
+      );
+    });
+    excluded.forEach((s) => {
+      rows.push(
+        '<li><div role="option" class="stack-picker-opt is-disabled" aria-disabled="true" aria-selected="false">' +
+        esc(stackOptionLabel(s)) +
+        '<span class="stack-picker-opt-reason">' + esc(s.reason || 'Nicht sicherbar') + '</span></div></li>'
+      );
+    });
+    menu.innerHTML = rows.join('') || '<li><div class="stack-picker-opt is-disabled">Kein Compose-Stack gefunden</div></li>';
+  }
+
+  function renderStackPickerNote(data) {
+    const note = document.getElementById('stack-select-note');
+    if (!note) return;
+    const eligible = data.stacks || [];
+    const excluded = data.excluded || [];
+    const extras = data.notes || [];
+    const parts = [eligible.length + ' wählbare Compose-Stacks'];
+    if (excluded.length) {
+      parts.push(excluded.length + ' nicht sicherbar (siehe ausgegraute Einträge)');
+    }
+    extras.forEach((n) => parts.push(n));
+    note.hidden = false;
+    note.textContent = parts.join(' · ');
+  }
+
+  function bindStackPicker() {
+    const btn = document.getElementById('stack-select-btn');
+    const menu = document.getElementById('stack-select-list');
+    const root = document.getElementById('stack-picker');
+    if (!btn || !menu || btn.dataset.bound) return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', () => {
+      setStackPickerOpen(menu.hidden);
+    });
+    menu.addEventListener('click', (e) => {
+      const opt = e.target.closest('[data-value]');
+      if (!opt || opt.classList.contains('is-disabled')) return;
+      chooseStackValue(opt.dataset.value);
+    });
+    menu.addEventListener('keydown', (e) => {
+      const opts = [...menu.querySelectorAll('[role="option"]:not(.is-disabled)')];
+      const i = opts.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        (opts[Math.min(opts.length - 1, i + 1)] || opts[0])?.focus();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        (opts[Math.max(0, i - 1)] || opts[0])?.focus();
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        opts[0]?.focus();
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        opts[opts.length - 1]?.focus();
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        const cur = document.activeElement;
+        if (cur && cur.dataset && cur.dataset.value) chooseStackValue(cur.dataset.value);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        setStackPickerOpen(false);
+        btn.focus();
+      }
+    });
+    document.addEventListener('click', (e) => {
+      if (!menu.hidden && root && !root.contains(e.target)) setStackPickerOpen(false);
+    });
+  }
+
   async function loadStacks() {
     const res = await fetch(API + '/stacks');
     const data = await res.json();
     stacks = data.stacks || [];
+    const excluded = data.excluded || [];
     const opts = stacks.map((s) => {
       const val = encodeURIComponent(s.parent_id) + '|' + encodeURIComponent(s.stack);
-      return `<option value="${val}">${s.guest_name} · ${s.stack} (${s.containers})</option>`;
+      return '<option value="' + esc(val) + '">' + esc(stackOptionLabel(s)) + '</option>';
     }).join('');
     const empty = '<option value="">Kein Compose-Stack gefunden</option>';
-    document.getElementById('stack-select').innerHTML = opts || empty;
+    const sel = document.getElementById('stack-select');
+    if (sel) sel.innerHTML = opts || empty;
+    renderStackPickerMenu(stacks, excluded);
+    renderStackPickerNote(data);
+    bindStackPicker();
+    syncStackPickerButton();
   }
 
   function parseStackVal(val) {
@@ -782,7 +1028,10 @@
       const sel = document.getElementById('stack-select');
       if (sel && job.parent_id && job.project) {
         const want = encodeURIComponent(job.parent_id) + '|' + encodeURIComponent(job.project);
-        if ([...sel.options].some((o) => o.value === want)) sel.value = want;
+        if ([...sel.options].some((o) => o.value === want)) {
+          sel.value = want;
+          syncStackPickerButton();
+        }
       }
       backupBusy = true;
       setBackupEnabled(false);

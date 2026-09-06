@@ -34,6 +34,7 @@ router = APIRouter()
 _store: OpsStore | None = None
 _engine: OpsEngine | None = None
 _loop_task: asyncio.Task[None] | None = None
+_scan_task: asyncio.Task[Any] | None = None
 
 
 def _make_templates() -> Jinja2Templates:
@@ -103,9 +104,20 @@ class WindowIdPayload(BaseModel):
     window_id: int = Field(..., ge=1)
 
 
+def _scan_status() -> dict[str, Any]:
+    try:
+        from patcher.scheduler import SCAN_ALL
+
+        return SCAN_ALL.to_dict()
+    except Exception:
+        return {"running": False, "message": ""}
+
+
 @router.get("/board")
 async def api_board() -> dict[str, Any]:
-    return await _get_engine().board()
+    data = await _get_engine().board()
+    data["scan"] = _scan_status()
+    return data
 
 
 @router.post("/policy")
@@ -232,9 +244,15 @@ async def api_start_accepted() -> dict[str, Any]:
         raise _http(exc) from exc
 
 
+@router.get("/scan-status")
+async def api_scan_status() -> dict[str, Any]:
+    return {"ok": True, **_scan_status()}
+
+
 @router.post("/scan-now")
 async def api_scan_now(request: Request) -> dict[str, Any]:
     """Start existing patcher scan-all (includes image scan), then ops plan."""
+    global _scan_task
     from patcher.module import _run_scan_all
     from patcher.scheduler import SCAN_ALL, begin_scan_all
 
@@ -247,16 +265,33 @@ async def api_scan_now(request: Request) -> dict[str, Any]:
     topo = getattr(request.app.state, "topology_store", None)
     if topo is not None:
         snap = getattr(topo, "snapshot", None)
-    asyncio.create_task(
-        _run_scan_all(
-            snapshot=snap, trigger="manual", do_summarize=False, already_begun=True
-        ),
-        name="ops-scan-now",
-    )
+
+    async def _run() -> None:
+        try:
+            await _run_scan_all(
+                snapshot=snap, trigger="manual", do_summarize=False, already_begun=True
+            )
+        except Exception as exc:
+            logger.exception("ops scan-now failed")
+            SCAN_ALL.error = str(exc)
+            SCAN_ALL.message = f"Scan fehlgeschlagen: {exc}"
+            SCAN_ALL.running = False
+            try:
+                await engine._log_activity(
+                    "scan",
+                    result="fail",
+                    kind="patch",
+                    detail=f"Scan fehlgeschlagen: {exc}",
+                    via_agent=False,
+                )
+            except Exception:
+                pass
+
+    _scan_task = asyncio.create_task(_run(), name="ops-scan-now")
     return {
         "ok": True,
         "started": True,
-        "message": "Patch- und Image-Scan gestartet — danach plant der Agent die Fenster.",
+        "message": "Scan läuft… Patch- und Image-Prüfung aller Hosts.",
         **SCAN_ALL.to_dict(),
     }
 

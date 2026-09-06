@@ -164,6 +164,12 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         return row
 
     async def test_missing_backup_prompt_and_kein_backup_sticks(self) -> None:
+        async def _mail_stack(_snap: object) -> list[dict]:
+            return [
+                {"parent_id": "lxc:pve:1", "stack": "paperless", "guest_name": "mail"}
+            ]
+
+        self.engine._list_backup_stacks = _mail_stack
         await self.store.seed_known_hosts(
             [{"id": "lxc:pve:1", "name": "mail", "kind": "lxc"}]
         )
@@ -182,6 +188,51 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
             [{"id": "lxc:pve:1", "name": "mail", "kind": "lxc"}]
         )
         self.assertEqual(await self.store.list_scope_prompts(status="waiting"), [])
+
+    async def test_no_prompt_without_compose_stack(self) -> None:
+        await self.engine._prompt_missing_backups(
+            [
+                {"id": "qemu:haos", "name": "haos", "kind": "qemu"},
+                {"id": "lxc:adguard", "name": "adguard", "kind": "lxc"},
+            ]
+        )
+        self.assertEqual(await self.store.list_scope_prompts(status="waiting"), [])
+
+    async def test_rustdesk_schedule_dismisses_no_backup_prompt(self) -> None:
+        async def _stacks(_snap: object) -> list[dict]:
+            return [
+                {
+                    "parent_id": "lxc:pve01:116",
+                    "stack": "rustdesk",
+                    "guest_name": "rustdesk",
+                }
+            ]
+
+        store = _SchedStore(
+            [
+                {
+                    "id": 9,
+                    "parent_id": "lxc:pve01:116",
+                    "stack": "rustdesk",
+                    "guest_name": "rustdesk",
+                    "enabled": True,
+                    "cron_expr": "0 3 * * *",
+                }
+            ]
+        )
+        self.engine._list_backup_stacks = _stacks
+        self.engine._get_backup_store = lambda: store
+        await self.store.insert_scope_prompt(
+            target_id="lxc:pve01:116",
+            target_name="rustdesk",
+            kind="no_backup",
+            reason="rustdesk hat keinen Backup-Plan. So gewollt?",
+        )
+        await self.engine._prompt_missing_backups(
+            [{"id": "lxc:pve01:116", "name": "rustdesk", "kind": "lxc"}]
+        )
+        waiting = await self.store.list_scope_prompts(status="waiting")
+        self.assertFalse(any(p.get("target_id") == "lxc:pve01:116" for p in waiting))
 
     async def test_chain_starts_one_and_shifts_rest(self) -> None:
         a = await self._win(kind=KIND_BACKUP, target_id="lxc:a", hm="20:00", stack="one")
@@ -408,6 +459,12 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
             target_name="alt",
             detail="alt hat keinen Backup-Plan. So gewollt?",
         )
+        async def _mail_stack(_snap: object) -> list[dict]:
+            return [
+                {"parent_id": "lxc:pve:1", "stack": "paperless", "guest_name": "mail"}
+            ]
+
+        self.engine._list_backup_stacks = _mail_stack
         await self.engine._prompt_missing_backups(
             [{"id": "lxc:pve:1", "name": "mail", "kind": "lxc"}]
         )
@@ -742,6 +799,12 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(int(fresh["schedule_id"]), 12)
 
     async def test_no_backup_yes_does_not_invent_schedules(self) -> None:
+        async def _mail_stack(_snap: object) -> list[dict]:
+            return [
+                {"parent_id": "lxc:pve:1", "stack": "portaineragent", "guest_name": "mail"}
+            ]
+
+        self.engine._list_backup_stacks = _mail_stack
         await self.store.seed_known_hosts(
             [{"id": "lxc:pve:1", "name": "mail", "kind": "lxc"}]
         )

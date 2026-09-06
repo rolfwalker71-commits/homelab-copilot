@@ -17,7 +17,7 @@
 
 <div id="setup-banner" class="mb-6 hidden animate-in setup-banner text-sm" role="status"></div>
 
-<article class="surface p-4 sm:p-5 animate-in">
+<article class="surface p-4 sm:p-5 backup-run-card" style="overflow:visible;transform:none;animation:none">
   <h2 id="sched-form-title" class="font-display text-lg font-bold">Zeitplan anlegen</h2>
   <p class="mt-1 text-sm text-[var(--muted)]">
     Automatische Stack-Backups über Presets oder eigenen Cron-Ausdruck. Die App startet sie selbst.
@@ -365,6 +365,7 @@
       <li class="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-2 ${rowCls}">
         <span>${stackHostHtml(s)} · <code>${esc(s.cron_expr)}</code> · ${s.enabled ? 'aktiv' : 'aus'}
           · ${s.engine === 'restic' ? 'restic' : 'tar'}
+          ${s.parent_id ? `<br><span class="text-[var(--muted)]">Host ${esc(s.parent_id)}</span>` : ''}
           ${s.next_run ? `<br><span class="text-[var(--muted)]">Nächster Lauf: ${esc(s.next_run)}</span>` : ''}
           ${s.last_fired_at ? `<br><span class="text-[var(--muted)]">Zuletzt gestartet: ${esc(s.last_fired_at)}</span>` : ''}
           ${overlap ? '<br><span class="chip chip-paused mt-1">Gleicher Start — kann sich überschneiden</span>' : ''}

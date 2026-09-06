@@ -26,7 +26,12 @@ from app.core.docker_control import DockerControlError
 from app.core.locale import format_bytes, format_de, iso_utc, now_berlin
 from app.core.topology import TopologyStore
 
-from backup_verifier.backup import BackupError, list_backup_stacks, run_backup
+from backup_verifier.backup import (
+    BackupError,
+    describe_backup_stacks,
+    list_backup_stacks,
+    run_backup,
+)
 from backup_verifier import browser as browse_mod
 from backup_verifier.config import get_backup_settings
 from backup_verifier import cron as cron_mod
@@ -852,7 +857,7 @@ async def browse_download(
 
 @router.get("/stacks")
 async def stacks(request: Request) -> dict[str, Any]:
-    return {"stacks": await list_backup_stacks(_snapshot(request))}
+    return describe_backup_stacks(_snapshot(request))
 
 
 @router.get("/preflight")

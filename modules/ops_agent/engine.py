@@ -97,6 +97,10 @@ from ops_agent.activity import (
     serialize_activity,
 )
 from ops_agent.actor import actor_fields, agent_phrase, by_agent
+from ops_agent.backup_coverage import (
+    host_needs_backup_nag,
+    schedule_covers_host,
+)
 from ops_agent.ledger import build_day_ledger
 from ops_agent.capacity import (
     collect_dests,
@@ -1691,19 +1695,37 @@ class OpsEngine:
             return None
 
     def _guest_kinds(self) -> frozenset[str]:
-        return frozenset({"lxc", "qemu", "manual"})
+        return frozenset({"lxc", "qemu", "manual", "host"})
+
+    async def _backupable_stacks(self) -> list[dict[str, Any]]:
+        snap = self._get_snapshot()
+        try:
+            return list(await self._list_backup_stacks(snap) or [])
+        except Exception:
+            return []
+
+    async def _active_backup_schedules(self) -> list[dict[str, Any]]:
+        bstore = self._get_backup_store()
+        if bstore is None:
+            return []
+        try:
+            return [r for r in await bstore.list_schedules() if r.get("enabled", True)]
+        except Exception:
+            return []
 
     async def _covered_backup_ids(self) -> set[str]:
         covered: set[str] = set()
-        bstore = self._get_backup_store()
-        if bstore is not None:
-            try:
-                for row in await bstore.list_schedules():
-                    pid = str(row.get("parent_id") or "")
-                    if pid:
-                        covered.add(pid)
-            except Exception:
-                pass
+        live = await self._live_hosts()
+        schedules = await self._active_backup_schedules()
+        for host in live:
+            if any(schedule_covers_host(s, host) for s in schedules):
+                tid = str(host.get("id") or host.get("target_id") or "")
+                if tid:
+                    covered.add(tid)
+        for row in schedules:
+            pid = str(row.get("parent_id") or "")
+            if pid:
+                covered.add(pid)
         for w in await self.store.list_windows(
             statuses=[STATUS_ACCEPTED, STATUS_WAITING, STATUS_RUNNING]
         ):
@@ -1721,6 +1743,8 @@ class OpsEngine:
         }
         gone = await self.gone_ids()
         await self._dismiss_vanished_no_backup_prompts(live_ids)
+        stacks = await self._backupable_stacks()
+        schedules = await self._active_backup_schedules()
         covered = await self._covered_backup_ids()
         for host in live:
             kind = str(host.get("kind") or "")
@@ -1730,12 +1754,15 @@ class OpsEngine:
             if not is_live_backup_target(tid, live_ids=live_ids, gone_ids=gone):
                 continue
             waiting = await self.store.find_waiting_prompt(tid)
-            if tid in covered:
+            needs = host_needs_backup_nag(host, stacks, schedules)
+            if tid in covered or not needs:
                 if waiting and waiting.get("kind") == "no_backup":
-                    await self.store.dismiss_scope_prompt(
-                        int(waiting["id"]),
-                        reason="Backup-Zeitplan ist auf der Backup-Seite angelegt.",
+                    reason = (
+                        "Backup-Zeitplan ist auf der Backup-Seite angelegt."
+                        if tid in covered or any(schedule_covers_host(s, host) for s in schedules)
+                        else "Kein sicherbarer Compose-Stack — Backup-Frage entfällt."
                     )
+                    await self.store.dismiss_scope_prompt(int(waiting["id"]), reason=reason)
                 continue
             if await self._backup_skip_decided(tid):
                 continue
@@ -1762,11 +1789,15 @@ class OpsEngine:
             rows = await bstore.list_schedules()
         except Exception:
             return []
+        host = {"id": target_id, "target_id": target_id, "name": target_id}
+        for known in await self.store.list_known_hosts():
+            if str(known.get("target_id") or "") == target_id:
+                host["name"] = str(known.get("target_name") or target_id)
+                break
         return [
             r
             for r in rows
-            if str(r.get("parent_id") or "") == target_id
-            and str(r.get("stack") or "")
+            if str(r.get("stack") or "") and schedule_covers_host(r, host)
         ]
 
     async def _log_unplanned_backup(self, target_id: str, target_name: str) -> None:
@@ -3259,6 +3290,11 @@ class OpsEngine:
             for h in await self.store.list_known_hosts()
             if h.get("skip_backup")
         }
+        backup_stacks: list[dict[str, Any]] = []
+        try:
+            backup_stacks = await self._backupable_stacks()
+        except Exception:
+            backup_stacks = []
         ledger = build_day_ledger(
             now=now,
             schedules=schedules,
@@ -3270,6 +3306,7 @@ class OpsEngine:
             prompts=matrix["prompts"],
             pending=pending,
             skip_backup_ids=skip_backup,
+            backup_stacks=backup_stacks,
         )
         shifted: list[dict[str, Any]] = [
             {

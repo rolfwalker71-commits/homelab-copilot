@@ -146,6 +146,7 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
   </label>
   <p id="ops-msg" class="text-sm text-[var(--muted)] leading-snug" role="status"></p>
 </div>
+<p id="ops-scan-banner" class="mb-4 hidden text-sm leading-snug break-words" role="status" aria-live="polite"></p>
 
 <article id="ops-brief-card" class="surface-tinted p-4 sm:p-5 mb-5 animate-in">
   <div class="flex flex-wrap items-start justify-between gap-2">
@@ -718,10 +719,23 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
     }
     html += '</li>';
     html += '<li class="ops-tl-block"><p class="ops-tl-kicker">Läuft</p>';
-    if (!running.length) {
+    const scan = data.scan || {};
+    const scanRow = scan.running
+      ? timelineRow('Läuft', {
+          target_name: 'Patch- und Image-Scan',
+          stack: '',
+          start_de: scan.message || 'Scan läuft…',
+          duration_label: scan.total ? ((scan.current_index || 0) + '/' + scan.total) : '',
+          reason: scan.current_target ? ('aktuell ' + scan.current_target) : '',
+        }, 'Scan')
+      : '';
+    if (!running.length && !scanRow) {
       html += '<p class="text-sm text-[var(--muted)] leading-snug">—</p>';
     } else {
-      html += '<ol class="ops-timeline">' + running.map((w) => timelineRow('Läuft', w, w.bucket_label || '')).join('') + '</ol>';
+      html += '<ol class="ops-timeline">' +
+        scanRow +
+        running.map((w) => timelineRow('Läuft', w, w.bucket_label || '')).join('') +
+      '</ol>';
     }
     html += '</li>';
     html += '<li class="ops-tl-block"><p class="ops-tl-kicker">Als Nächstes</p>';
@@ -744,6 +758,7 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
     renderLedger(data.ledger || {});
     renderWaiting(data);
     renderTimeline(data);
+    applyScanUi(data.scan || null);
     const interview = $('ops-interview');
     if (interview && data.policy && !data.policy.answered) {
       interview.hidden = false;
@@ -916,36 +931,78 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
   async function sleep(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
+  function applyScanUi(scan) {
+    const btn = $('btn-ops-scan');
+    const msg = $('ops-msg');
+    const banner = $('ops-scan-banner');
+    const running = !!(scan && scan.running);
+    const text = (scan && (scan.message || scan.error)) || '';
+    if (btn) {
+      btn.disabled = running;
+      btn.textContent = running ? 'Scan läuft…' : 'Scan jetzt';
+    }
+    if (banner) {
+      if (running || (scan && scan.error)) {
+        banner.classList.remove('hidden');
+        banner.textContent = running
+          ? ('Scan läuft… ' + (text || 'Patch- und Image-Prüfung.'))
+          : String(scan.error || text);
+      } else if (text && scan && scan.finished_at) {
+        banner.classList.remove('hidden');
+        banner.textContent = text;
+      } else {
+        banner.classList.add('hidden');
+        banner.textContent = '';
+      }
+    }
+    if (running && msg && text) msg.textContent = text;
+    const act = $('ops-activity');
+    if (running && act && !act.open) act.open = true;
+  }
+  async function readScanStatus() {
+    try {
+      const st = await api('/scan-status');
+      if (st && (st.running === true || st.running === false)) return st;
+    } catch (_) { /* Fallback Patcher */ }
+    try {
+      const res = await fetch('/api/modules/patcher/scan-all/status');
+      const st = await res.json().catch(() => ({}));
+      if (res.ok) return st;
+    } catch (_) {}
+    return null;
+  }
   async function scanNow() {
     const msg = $('ops-msg');
     const btn = $('btn-ops-scan');
-    const prev = btn ? btn.textContent : '';
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = 'Scan läuft…';
-    }
-    if (msg) msg.textContent = 'Patch- und Image-Scan startet…';
+    applyScanUi({ running: true, message: 'Scan startet…' });
+    if (msg) msg.textContent = 'Scan läuft… Patch- und Image-Prüfung aller Hosts.';
     try {
       const data = await api('/scan-now', { method: 'POST', body: '{}' });
-      if (msg) msg.textContent = data.message || 'Scan gestartet.';
+      applyScanUi(data);
+      if (msg) msg.textContent = data.message || 'Scan läuft…';
+      try { await load(); } catch (_) {}
+      let last = data;
       for (let i = 0; i < 180; i++) {
-        const st = await fetch('/api/modules/patcher/scan-all/status').then((r) => r.json()).catch(() => ({}));
-        if (st.message && msg) msg.textContent = st.message;
-        if (!st.running) break;
+        const st = await readScanStatus();
+        if (st) {
+          last = st;
+          applyScanUi(st);
+          if (st.message && msg) msg.textContent = st.message;
+          if (st.running === false) break;
+        }
         await sleep(2000);
       }
       try {
         const planned = await api('/plan', { method: 'POST', body: '{}' });
-        if (msg) msg.textContent = planned.message || 'Scan fertig — Fenster geplant.';
+        if (msg) msg.textContent = planned.message || last.message || 'Scan fertig — Fenster geplant.';
       } catch (_) { /* on_complete plant bereits */ }
       await load();
     } catch (e) {
       if (msg) msg.textContent = String(e.message || e);
+      applyScanUi({ running: false, error: String(e.message || e) });
     } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = prev || 'Scan jetzt';
-      }
+      const st = await readScanStatus();
+      applyScanUi(st || { running: false });
     }
   }
   $('btn-ops-scan')?.addEventListener('click', scanNow);

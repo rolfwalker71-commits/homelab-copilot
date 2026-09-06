@@ -63,13 +63,8 @@ class LedgerTests(unittest.TestCase):
             schedules=[],
             windows=[],
             hosts=[{"id": "lxc:immich", "name": "immich", "kind": "lxc"}],
-            prompts=[
-                {
-                    "kind": "no_backup",
-                    "target_id": "lxc:immich",
-                    "target_name": "immich",
-                    "reason": "immich hat keinen Backup-Plan. So gewollt?",
-                }
+            backup_stacks=[
+                {"parent_id": "lxc:immich", "stack": "immich", "guest_name": "immich"}
             ],
         )
         self.assertEqual(ledger["backups"][0]["status"], STATUS_NO_PLAN)
