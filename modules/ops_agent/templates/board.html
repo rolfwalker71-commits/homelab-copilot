@@ -4,17 +4,48 @@
 
 {% block content %}
 <style>
-.ops-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.75rem; }
-.ops-tl-block { margin: 0; padding: 0; }
+#ops-timeline-card,
+#ops-soll-ist,
+#ops-waiting {
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+#ops-timeline,
+.ops-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.ops-tl-block {
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  max-width: 100%;
+}
 .ops-tl-kicker {
   font-size: 0.75rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--muted); margin: 0 0 0.35rem;
 }
 .ops-tl-row {
-  display: grid; grid-template-columns: 5.5rem minmax(0, 1fr) auto;
-  gap: 0.5rem 0.75rem; align-items: start;
-  padding: 0.7rem 0.9rem; border-radius: 1.75rem;
+  display: grid;
+  grid-template-columns: minmax(0, 5.5rem) minmax(0, 1fr);
+  gap: 0.5rem 0.75rem;
+  align-items: start;
+  padding: 0.7rem 0.9rem;
+  border-radius: 1.75rem;
   background: var(--surface-container-high, var(--card));
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 html[data-chrome="desktop"] .ops-tl-row {
   border-radius: var(--radius); border: 1px solid var(--outline);
@@ -27,18 +58,31 @@ html[data-chrome="desktop"] .ops-tl-row {
 html[data-chrome="desktop"] .ops-tl-row.is-run {
   border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, var(--card));
 }
-.ops-tl-phase { font-weight: 650; line-height: 1.3; }
+.ops-tl-phase {
+  font-weight: 650;
+  line-height: 1.3;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ops-tl-body { min-width: 0; max-width: 100%; }
 .ops-tl-title { margin: 0; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; }
 .ops-tl-meta { margin: 0.15rem 0 0; font-size: 0.875rem; color: var(--muted); line-height: 1.35; overflow-wrap: anywhere; }
 .ops-tl-mark { font-weight: 700; font-size: 1.1rem; line-height: 1; }
-.ops-ledger-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+#ops-timeline .ops-next-group,
+#ops-timeline .ops-next-list,
+#ops-timeline .ops-next-row {
+  max-width: 100%;
+  min-width: 0;
+}
+.ops-ledger-table { width: 100%; max-width: 100%; border-collapse: collapse; font-size: 0.875rem; table-layout: fixed; }
 .ops-ledger-table th, .ops-ledger-table td {
   text-align: left; vertical-align: top; padding: 0.45rem 0.4rem;
   border-bottom: 1px solid color-mix(in srgb, var(--outline, var(--border)) 55%, transparent);
+  overflow-wrap: anywhere;
 }
 .ops-ledger-table th { font-weight: 650; color: var(--muted); }
-.ops-ledger-wrap { overflow-x: auto; }
-.ops-ledger-group { margin-top: 0.85rem; }
+.ops-ledger-wrap { overflow-x: auto; max-width: 100%; min-width: 0; }
+.ops-ledger-group { margin-top: 0.85rem; min-width: 0; max-width: 100%; }
 .ops-ledger-group:first-child { margin-top: 0; }
 </style>
 
@@ -583,7 +627,7 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
     return (
       '<li class="ops-tl-row' + (run ? ' is-run' : '') + '">' +
         '<p class="ops-tl-phase">' + esc(phase) + '</p>' +
-        '<div>' +
+        '<div class="ops-tl-body">' +
           '<p class="ops-tl-title">' + esc(title) + (mark ? ' <span class="ops-tl-mark" aria-hidden="true">' + mark + '</span>' : '') + '</p>' +
           (meta ? '<p class="ops-tl-meta">' + esc(meta) + '</p>' : '') +
           (w.reason && phase !== 'Als Nächstes' ? '<p class="ops-tl-meta">' + esc(w.reason) + '</p>' : '') +
