@@ -15,7 +15,6 @@ from ops_agent.planner import (
     KIND_BACKUP,
     KIND_DRILL,
     KIND_PATCH,
-    REASON_BACKUP_OVERRUN,
     SOURCE_AGENT,
     SOURCE_DRILL,
     SOURCE_INGESTED,
@@ -222,7 +221,9 @@ class StartAcceptedNowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(int(shift["window_id"]), int(later["id"]))
         self.assertEqual(shift["old_start_hm"], "18:00")
         self.assertNotEqual(shift["new_start_hm"], "18:00")
-        self.assertIn(REASON_BACKUP_OVERRUN.split("—")[0].strip(), shift["reason"])
+        self.assertTrue(
+            "Anschluss" in shift["reason"] or "läuft über" in shift["reason"]
+        )
         self.assertIn(VIA_AGENT, shift["reason"])
         moved = await self.store.get_window(int(later["id"]))
         assert moved is not None

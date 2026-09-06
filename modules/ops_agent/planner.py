@@ -57,7 +57,7 @@ REASON_OUT_OF_FOCUS = "Liegt außerhalb der Host-Auswahl."
 REASON_HOST_GONE = "Host ist weggefallen — warte auf deine Entscheidung."
 REASON_DRILL_BLOCK = "Restore-Drill um 05:00 — nicht in dieses Fenster legen."
 REASON_SCAN_BLOCK = "Täglicher Scan um 04:00 — nicht in dieses Fenster legen."
-REASON_BACKUP_CHAIN = "durch Agent: Anschluss an voriges Backup"
+REASON_BACKUP_CHAIN = "durch Agent: Anschluss an vorigen Auftrag"
 REASON_DEST_FULL = "Ziel voll — Backup übersprungen durch Agent"
 REASON_HOST_OFFLINE_CHAIN = "Host offline — Kette geht weiter, später erneut."
 REASON_HUNG = "Auftrag hängt — bitte prüfen. Agent killt nichts."
@@ -330,17 +330,19 @@ def next_free_slot(
     quiet_end: str = DEFAULT_QUIET_END,
     horizon_min: int = MINUTES_PER_DAY * 3,
     require_quiet: bool = True,
+    grid_min: int = 10,
 ) -> int:
     cursor = int(start_min)
-    if cursor % 10:
-        cursor += 10 - (cursor % 10)
+    step = max(1, int(grid_min))
+    if step > 1 and cursor % step:
+        cursor += step - (cursor % step)
     limit = start_min + horizon_min
     while cursor <= limit:
         blocked = is_forbidden_clock(
             cursor, scan_hour=scan_hour, drill_hour=drill_hour
         )
         if blocked:
-            cursor += DEFAULT_INTERVAL
+            cursor += step
             continue
         if require_quiet and not in_quiet_hours(
             cursor, quiet_start=quiet_start, quiet_end=quiet_end
@@ -363,7 +365,7 @@ def next_free_slot(
         )
         if why is None:
             return cursor
-        cursor += DEFAULT_INTERVAL
+        cursor += step
     raise RuntimeError("Kein freier Slot in den nächsten 72 Stunden.")
 
 

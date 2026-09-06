@@ -20,6 +20,7 @@ from ops_agent.planner import (
     STATUS_WAITING,
     detect_overrun_shift,
     ingest_schedule_windows,
+    next_free_slot,
     occupied_from_windows,
     propose_windows,
     Need,
@@ -232,6 +233,7 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(w.source, "ingested")
         self.assertEqual(w.status, STATUS_ACCEPTED)
         self.assertEqual(w.schedule_id, 7)
+        self.assertEqual(w.engine, "restic")
         self.assertIn("Zeitplan", w.reason)
         occ = occupied_from_windows(windows)
         self.assertTrue(occ[0].global_backup)
@@ -388,6 +390,31 @@ class ScopeFilterTests(unittest.TestCase):
         )
         self.assertEqual(skipped, [])
         self.assertEqual(len(planned), 1)
+
+
+class ImmediateSlotTests(unittest.TestCase):
+    def test_grid_one_keeps_current_minute(self) -> None:
+        slot = next_free_slot(
+            target_id="lxc:a",
+            kind=KIND_BACKUP,
+            duration_min=10,
+            occupied=[],
+            start_min=18 * 60 + 2,
+            require_quiet=False,
+            grid_min=1,
+        )
+        self.assertEqual(slot, 18 * 60 + 2)
+
+    def test_default_grid_snaps_to_ten(self) -> None:
+        slot = next_free_slot(
+            target_id="lxc:a",
+            kind=KIND_BACKUP,
+            duration_min=10,
+            occupied=[],
+            start_min=18 * 60 + 2,
+            require_quiet=False,
+        )
+        self.assertEqual(slot, 18 * 60 + 10)
 
 
 if __name__ == "__main__":

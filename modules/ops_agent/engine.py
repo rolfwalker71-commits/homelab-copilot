@@ -11,7 +11,7 @@ from typing import Any, Awaitable, Callable
 from app.core.locale import BERLIN, format_de, iso_utc, now_berlin
 from app.core.snapshots import guest_can_snapshot
 from backup_verifier.cron import preset_to_cron
-from backup_verifier.planner import classify_stacks, format_hhmm, parse_hhmm
+from backup_verifier.planner import format_hhmm, parse_hhmm
 from backup_verifier.scheduler import minute_key, next_run_after, schedule_clock_hm
 from ops_agent.config import get_ops_settings
 from ops_agent.planner import (
@@ -131,6 +131,28 @@ SmartFn = Callable[[], Awaitable[list[dict[str, Any]]]]
 
 COPILOT_DATA_ID = "copilot:data"
 COPILOT_STACK_HINTS = ("homelab-copilot", "hlops-data", "copilot-data")
+
+
+def _schedule_method_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Engine + retention from a saved Backup-page schedule. Timing is not included.
+
+    restic stays restic. Keep/full-every values are passed through as stored
+    (0 is valid for keep_weekly). Defaults apply only when a field is missing.
+    """
+    raw = str(row.get("engine") or "").strip().lower()
+    engine = "restic" if raw == "restic" else "tar"
+
+    def _retain_int(key: str, default: int) -> int:
+        if key not in row or row[key] is None or row[key] == "":
+            return default
+        return int(row[key])
+
+    return {
+        "engine": engine,
+        "restic_full_every_days": _retain_int("restic_full_every_days", 7),
+        "restic_keep_last": _retain_int("restic_keep_last", 14),
+        "restic_keep_weekly": _retain_int("restic_keep_weekly", 8),
+    }
 
 
 @dataclass
@@ -463,7 +485,13 @@ class OpsEngine:
             await self.store.save_policy(policy)
             await self.store.set_skip_backup(tid, skip=not bool(backup))
             if backup:
-                await self._plan_backup_for_host(tid, str(row.get("target_name") or tid))
+                planned = await self._plan_backup_for_host(
+                    tid, str(row.get("target_name") or tid)
+                )
+                if not planned:
+                    await self._log_unplanned_backup(
+                        tid, str(row.get("target_name") or tid)
+                    )
             await self.store.answer_scope_prompt(
                 prompt_id, patch=want_patch, image=want_image, backup=bool(backup)
             )
@@ -473,19 +501,15 @@ class OpsEngine:
                 if tid == COPILOT_DATA_ID:
                     planned = await self._plan_copilot_data_if_possible()
                     if not planned:
-                        await self._log_activity(
-                            ACTION_WARN,
-                            result=RESULT_WAIT,
-                            kind=KIND_BACKUP,
-                            target_id=tid,
-                            target_name="Copilot /data",
-                            detail=REASON_COPILOT_DATA
-                            + " Kein bestehender Copilot-Backup-Job — nichts erfunden.",
-                        )
+                        await self._log_unplanned_backup(tid, "Copilot /data")
                 else:
-                    await self._plan_backup_for_host(
+                    planned = await self._plan_backup_for_host(
                         tid, str(row.get("target_name") or tid)
                     )
+                    if not planned:
+                        await self._log_unplanned_backup(
+                            tid, str(row.get("target_name") or tid)
+                        )
             await self.store.answer_scope_prompt(prompt_id, backup=bool(backup))
         elif kind == "disappeared":
             if drop:
@@ -585,10 +609,15 @@ class OpsEngine:
                 if hm:
                     item["start_hm"] = f"{hm[0]:02d}:{hm[1]:02d}"
             if snap is not None:
-                from backup_verifier.inventory import resolve_guest
+                try:
+                    from backup_verifier.inventory import resolve_guest
 
-                info = resolve_guest(snap, str(row.get("parent_id") or ""))
-                item["guest_name"] = info.get("guest_name") or item.get("guest_name") or ""
+                    info = resolve_guest(snap, str(row.get("parent_id") or ""))
+                    item["guest_name"] = (
+                        info.get("guest_name") or item.get("guest_name") or ""
+                    )
+                except Exception:
+                    pass
             enriched.append(item)
         from backup_verifier.config import get_backup_settings
 
@@ -642,19 +671,9 @@ class OpsEngine:
         return upserted
 
     async def _collect_needs(self, policy: ConfirmPolicy) -> list[Need]:
+        """Patch needs only. Backup windows come from ingest of saved schedules."""
         snap = self._get_snapshot()
         needs: list[Need] = []
-        known: set[str] = set()
-        scheduled_parents: set[str] = set()
-        bstore = self._get_backup_store()
-        schedules: list[dict[str, Any]] = []
-        if bstore is not None:
-            schedules = await bstore.list_schedules()
-            for row in schedules:
-                pid = str(row.get("parent_id") or "")
-                if pid:
-                    known.add(pid)
-                    scheduled_parents.add(pid)
         try:
             from patcher.agent import hosts_from_store as _hosts
 
@@ -671,7 +690,6 @@ class OpsEngine:
                 )
                 gone = await self.gone_ids()
                 for host in hosts:
-                    known.add(host.target_id)
                     for item in group_host_work(host):
                         if not in_job_scope(
                             policy,
@@ -700,38 +718,8 @@ class OpsEngine:
         except Exception:
             logger.exception("Pending patches für Agent nicht lesbar")
 
-        if snap is not None and bstore is not None:
-            try:
-                discovered = await self._list_backup_stacks(snap)
-                split = classify_stacks(discovered, schedules)
-                for row in split["missing"]:
-                    parent_id = str(row.get("parent_id") or "")
-                    stack = str(row.get("stack") or "")
-                    if not parent_id or not stack:
-                        continue
-                    tags: list[str] = []
-                    if self._get_inventory_tags is not None:
-                        try:
-                            tags = list(await self._get_inventory_tags(parent_id))
-                        except Exception:
-                            tags = []
-                    needs.append(
-                        Need(
-                            kind=KIND_BACKUP,
-                            target_id=parent_id,
-                            target_name=str(row.get("guest_name") or parent_id),
-                            stack=stack,
-                            bucket=KIND_BACKUP,
-                            duration_min=DURATION_BACKUP,
-                            tags=tags,
-                            known_host=parent_id in known,
-                            has_existing_schedule=False,
-                            engine=str(row.get("engine") or "tar"),
-                            source=SOURCE_AGENT,
-                        )
-                    )
-            except Exception:
-                logger.exception("Backup-Lücken für Agent nicht lesbar")
+        # Backups come only from saved Backup-page schedules (ingest), never
+        # from compose discovery. Missing stacks stay a prompt, not a Need.
         return needs
 
     async def _host_maps(self) -> tuple[dict[str, bool], dict[str, bool], set[str], set[str]]:
@@ -840,13 +828,6 @@ class OpsEngine:
                     "Wartet auf dich",
                     f"{row.get('target_name') or row.get('target_id')}: {row.get('reason') or 'Bestätigung'}",
                 )
-            if (
-                settings.enabled
-                and win.kind == KIND_BACKUP
-                and win.status == STATUS_ACCEPTED
-                and auto_apply
-            ):
-                await self._ensure_backup_schedule(created[-1], now)
         for win in skipped:
             await self.store.delete_skipped_for(
                 kind=win.kind, target_id=win.target_id, stack=win.stack
@@ -939,49 +920,28 @@ class OpsEngine:
     async def _ensure_backup_schedule(
         self, window: dict[str, Any], now: datetime
     ) -> None:
+        """Attach an existing Backup-page schedule. Never invent a new one."""
+        if window.get("schedule_id"):
+            return
         bstore = self._get_backup_store()
         if bstore is None:
-            return
-        if window.get("schedule_id"):
             return
         parent_id = str(window.get("target_id") or "")
         stack = str(window.get("stack") or "")
         if not parent_id or not stack:
             return
         existing = await bstore.find_schedules_for_stack(parent_id, stack)
-        hm = str(window.get("start_hm") or "20:00")
-        try:
-            expr = preset_to_cron("daily", hm)
-        except Exception:
-            logger.exception("Cron für Agent-Backup nicht gebaut")
+        if not existing:
             return
-        if existing:
-            sid = int(existing[0]["id"])
-            await bstore.upsert_schedule(
-                schedule_id=sid,
-                stack=stack,
-                parent_id=parent_id,
-                cron_expr=expr,
-                preset="daily",
-                enabled=True,
-                note="ops-agent",
-                engine=str(window.get("engine") or existing[0].get("engine") or "tar"),
-                restic_full_every_days=int(existing[0].get("restic_full_every_days") or 7),
-                restic_keep_last=int(existing[0].get("restic_keep_last") or 14),
-                restic_keep_weekly=int(existing[0].get("restic_keep_weekly") or 8),
-            )
-        else:
-            sid = await bstore.upsert_schedule(
-                schedule_id=None,
-                stack=stack,
-                parent_id=parent_id,
-                cron_expr=expr,
-                preset="daily",
-                enabled=True,
-                note="ops-agent",
-                engine=str(window.get("engine") or "tar"),
-            )
-        await self.store.update_window(int(window["id"]), schedule_id=sid)
+        restic = [
+            r
+            for r in existing
+            if str(r.get("engine") or "").strip().lower() == "restic"
+        ]
+        chosen = restic[0] if restic else existing[0]
+        await self.store.update_window(
+            int(window["id"]), schedule_id=int(chosen["id"])
+        )
 
     async def watch_and_shift(
         self, *, now: datetime | None = None, force: bool = False
@@ -1100,6 +1060,7 @@ class OpsEngine:
             expr = preset_to_cron(str(row.get("preset") or "daily"), start_hm)
         except Exception:
             expr = preset_to_cron("daily", start_hm)
+        method = _schedule_method_fields(row)
         await bstore.upsert_schedule(
             schedule_id=schedule_id,
             stack=str(row.get("stack") or ""),
@@ -1107,11 +1068,8 @@ class OpsEngine:
             cron_expr=expr,
             preset=str(row.get("preset") or "daily"),
             enabled=bool(row.get("enabled", True)),
-            note=str(row.get("note") or "ops-agent"),
-            engine=str(row.get("engine") or "tar"),
-            restic_full_every_days=int(row.get("restic_full_every_days") or 7),
-            restic_keep_last=int(row.get("restic_keep_last") or 14),
-            restic_keep_weekly=int(row.get("restic_keep_weekly") or 8),
+            note=str(row.get("note") or ""),
+            **method,
         )
 
     async def start_due(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
@@ -1134,7 +1092,7 @@ class OpsEngine:
             if tid in running:
                 continue
             if kind == KIND_BACKUP:
-                if self._any_backup_running():
+                if await self._any_backup_running():
                     continue
                 skip = await self._backup_skip_reason(
                     row, online=online, disk=disk, running=running
@@ -1434,7 +1392,7 @@ class OpsEngine:
             return None
 
     async def sync_jobs(self) -> None:
-        finished_backup = False
+        finished_any = False
         windows = await self.store.list_windows(statuses=[STATUS_RUNNING, STATUS_ACCEPTED])
         backup_jobs = {str(getattr(j, "id", "")): j for j in self._list_backup_jobs()}
         # Also look at finished jobs still in registry
@@ -1485,7 +1443,7 @@ class OpsEngine:
                         row=row,
                         detail="Backup erfolgreich",
                     )
-                    finished_backup = True
+                    finished_any = True
                 elif st == "failed":
                     await self.store.update_window(
                         int(row["id"]),
@@ -1499,7 +1457,7 @@ class OpsEngine:
                         row=row,
                         detail=str(getattr(job, "error", "") or "Backup fehlgeschlagen."),
                     )
-                    finished_backup = True
+                    finished_any = True
             elif kind == KIND_PATCH:
                 job = next((j for j in patch_all if str(j.id) == job_id), None)
                 if job is None:
@@ -1520,6 +1478,7 @@ class OpsEngine:
                     await self._maybe_reboot_after_apply(row, job)
                     if self._is_image_window(row):
                         await self._maybe_prune_after_image(row)
+                    finished_any = True
                 elif st == "failed":
                     await self._fail_patch_window(
                         row,
@@ -1534,7 +1493,8 @@ class OpsEngine:
                         row=row,
                         detail=str(getattr(job, "error", "") or "Patch fehlgeschlagen."),
                     )
-        if finished_backup:
+                    finished_any = True
+        if finished_any:
             await self._advance_backup_chain()
             await self._maybe_refresh_brief()
         await self._flag_hung_jobs()
@@ -1686,12 +1646,19 @@ class OpsEngine:
             if kind not in self._guest_kinds():
                 continue
             tid = str(host.get("id") or host.get("target_id") or "")
-            if not tid or tid in covered:
+            if not tid:
+                continue
+            waiting = await self.store.find_waiting_prompt(tid)
+            if tid in covered:
+                if waiting and waiting.get("kind") == "no_backup":
+                    await self.store.dismiss_scope_prompt(
+                        int(waiting["id"]),
+                        reason="Backup-Zeitplan ist auf der Backup-Seite angelegt.",
+                    )
                 continue
             rec = known.get(tid) or {}
             if rec.get("skip_backup") is not None:
                 continue
-            waiting = await self.store.find_waiting_prompt(tid)
             if waiting:
                 continue
             name = str(host.get("name") or tid)
@@ -1707,80 +1674,46 @@ class OpsEngine:
                     f"{name} hat keinen Backup-Plan.",
                 )
 
-    async def _plan_backup_for_host(self, target_id: str, target_name: str) -> list[dict[str, Any]]:
-        snap = self._get_snapshot()
-        stacks: list[dict[str, Any]] = []
-        if snap is not None:
-            try:
-                discovered = await self._list_backup_stacks(snap)
-                stacks = [
-                    r
-                    for r in discovered
-                    if str(r.get("parent_id") or "") == target_id
-                    and str(r.get("stack") or "")
-                ]
-            except Exception:
-                stacks = []
-        created: list[dict[str, Any]] = []
-        now = now_berlin()
-        settings = await self.settings()
-        existing = await self.store.list_windows(
-            statuses=[STATUS_ACCEPTED, STATUS_WAITING, STATUS_RUNNING]
+    async def _schedules_for_host(self, target_id: str) -> list[dict[str, Any]]:
+        bstore = self._get_backup_store()
+        if bstore is None:
+            return []
+        try:
+            rows = await bstore.list_schedules()
+        except Exception:
+            return []
+        return [
+            r
+            for r in rows
+            if str(r.get("parent_id") or "") == target_id
+            and str(r.get("stack") or "")
+        ]
+
+    async def _log_unplanned_backup(self, target_id: str, target_name: str) -> None:
+        await self._log_activity(
+            ACTION_WARN,
+            result=RESULT_WAIT,
+            kind=KIND_BACKUP,
+            target_id=target_id,
+            target_name=target_name,
+            detail=(
+                f"{target_name} hat keinen Backup-Zeitplan. "
+                "Bitte auf der Backup-Seite festlegen (Stack und tar/restic) — "
+                "der Agent erfindet keine Stacks."
+            ),
         )
-        occupied = self._occupied_from_rows(existing, now)
-        cursor = abs_minutes(snap_10_minutes(now + timedelta(minutes=9)), day_start(now))
-        for item in stacks:
-            stack = str(item.get("stack") or "")
-            open_w = await self.store.find_open_for_target(
-                kind=KIND_BACKUP, target_id=target_id, stack=stack
-            )
-            if open_w:
-                continue
-            try:
-                start_min = next_free_slot(
-                    target_id=target_id,
-                    kind=KIND_BACKUP,
-                    duration_min=DURATION_BACKUP,
-                    occupied=occupied,
-                    start_min=cursor,
-                    quiet_start=settings.quiet_start,
-                    quiet_end=settings.quiet_end,
-                    require_quiet=False,
-                )
-            except RuntimeError:
-                continue
-            row = {
-                "kind": KIND_BACKUP,
-                "target_id": target_id,
-                "target_name": target_name or str(item.get("guest_name") or target_id),
-                "stack": stack,
-                "bucket": KIND_BACKUP,
-                "start_iso": iso_utc(dt_from_abs(now, start_min)),
-                "start_hm": format_hhmm(clock_of(start_min)),
-                "duration_min": DURATION_BACKUP,
-                "status": STATUS_ACCEPTED,
-                "source": SOURCE_AGENT,
-                "engine": str(item.get("engine") or "tar"),
-                "reason": by_agent("Backup-Fenster nach deiner Bestätigung geplant."),
-            }
-            wid = await self.store.insert_window(row)
-            fresh = await self.store.get_window(wid)
-            if fresh:
-                await self._ensure_backup_schedule(fresh, now)
-                created.append(fresh)
-                occupied.append(
-                    Occupied(
-                        target_id=target_id,
-                        kind=KIND_BACKUP,
-                        start_min=start_min,
-                        duration_min=DURATION_BACKUP,
-                        global_backup=True,
-                        label=stack,
-                    )
-                )
-                cursor = start_min + DURATION_BACKUP
-        await self._pack_backup_chain(now=now)
-        return created
+
+    async def _plan_backup_for_host(self, target_id: str, target_name: str) -> list[dict[str, Any]]:
+        """Only enqueue windows for stacks already saved on the Backup page."""
+        if not await self._schedules_for_host(target_id):
+            return []
+        upserted = await self.ingest()
+        return [
+            w
+            for w in upserted
+            if str(w.get("kind") or "") == KIND_BACKUP
+            and str(w.get("target_id") or "") == target_id
+        ]
 
     def _job_age_seconds(self, job: Any) -> float:
         created = float(getattr(job, "created_at", 0) or 0)
@@ -1797,21 +1730,18 @@ class OpsEngine:
                 return float(get_patcher_settings().patcher_apply_timeout)
             except Exception:
                 return 2 * 3600.0
-        return 3 * 3600.0
+        return 30 * 60.0
 
     def _job_is_hung(self, job: Any) -> bool:
         kind = str(getattr(job, "kind", "") or "")
         limit = self._hung_limit_seconds(kind if kind in ("apply", "image-apply") else "backup")
         return self._job_age_seconds(job) > limit
 
-    def _any_backup_running(self) -> bool:
-        for job in self._list_backup_jobs():
-            kind = str(getattr(job, "kind", "") or "backup")
-            if kind not in (KIND_BACKUP, ""):
-                continue
-            if self._job_is_hung(job):
-                continue
-            return True
+    async def _any_backup_running(self) -> bool:
+        """True if a backup *window* is still running. Orphan jobs do not block the chain."""
+        for w in await self.store.list_windows(statuses=[STATUS_RUNNING]):
+            if str(w.get("kind") or "") == KIND_BACKUP:
+                return True
         return False
 
     async def _backup_skip_reason(
@@ -1873,9 +1803,8 @@ class OpsEngine:
         _ = tid
 
     def _chain_cursor(self, now: datetime) -> int:
-        return abs_minutes(
-            snap_10_minutes(now + timedelta(minutes=10)), day_start(now)
-        )
+        """Next job starts now — no 10-minute wait after a finished predecessor."""
+        return abs_minutes(now, day_start(now))
 
     async def _pack_backup_chain(
         self, *, now: datetime, start_min: int | None = None
@@ -1884,7 +1813,9 @@ class OpsEngine:
         rows = [
             w
             for w in await self.store.list_windows(statuses=[STATUS_ACCEPTED])
-            if str(w.get("kind") or "") == KIND_BACKUP
+            if str(w.get("kind") or "") in (KIND_BACKUP, KIND_PATCH)
+            and not is_hard_stop(str(w.get("kind") or ""))
+            and not is_hard_stop(str(w.get("bucket") or ""))
         ]
         rows.sort(key=self._accepted_start_order)
         if not rows:
@@ -1901,21 +1832,25 @@ class OpsEngine:
         cursor = start_min
         pack = rows
         if cursor is None:
-            cursor = self._row_abs(rows[0], origin) + int(rows[0].get("duration_min") or DURATION_BACKUP)
+            cursor = self._row_abs(rows[0], origin) + int(
+                rows[0].get("duration_min") or DURATION_BACKUP
+            )
             pack = rows[1:]
         shifts: list[dict[str, Any]] = []
         for row in pack:
+            kind = str(row.get("kind") or KIND_BACKUP)
             dur = int(row.get("duration_min") or DURATION_BACKUP)
             try:
                 new_min = next_free_slot(
                     target_id=str(row.get("target_id") or ""),
-                    kind=KIND_BACKUP,
+                    kind=kind,
                     duration_min=dur,
                     occupied=occupied,
                     start_min=cursor,
                     quiet_start=settings.quiet_start,
                     quiet_end=settings.quiet_end,
                     require_quiet=False,
+                    grid_min=1,
                 )
             except RuntimeError:
                 continue
@@ -1950,7 +1885,7 @@ class OpsEngine:
                     "old_start_hm": old_hm,
                     "new_start_hm": new_hm,
                     "reason": REASON_BACKUP_CHAIN,
-                    "kind": KIND_BACKUP,
+                    "kind": kind,
                     "target_name": row.get("target_name"),
                 }
                 shifts.append(rec)
@@ -1959,40 +1894,57 @@ class OpsEngine:
             occupied.append(
                 Occupied(
                     target_id=str(row.get("target_id") or ""),
-                    kind=KIND_BACKUP,
+                    kind=kind,
                     start_min=new_min,
                     duration_min=dur,
-                    global_backup=True,
+                    global_backup=kind in (KIND_BACKUP, KIND_DRILL),
                 )
             )
             cursor = new_min + dur
-            if cursor % 10:
-                cursor += 10 - (cursor % 10)
         return shifts
 
     async def _advance_backup_chain(self) -> None:
-        if self._any_backup_running():
-            return
         now = now_berlin()
+        await self._pack_backup_chain(now=now, start_min=self._chain_cursor(now))
         online, disk, running, _ = await self._host_maps()
+        settings = await self.settings()
+        patch_busy = any(
+            str(getattr(j, "kind", "") or "") in ("apply", "image-apply")
+            for j in self._list_patch_jobs()
+        )
         rows = [
             w
             for w in await self.store.list_windows(statuses=[STATUS_ACCEPTED])
-            if str(w.get("kind") or "") == KIND_BACKUP and not w.get("needs_confirm")
+            if str(w.get("kind") or "") in (KIND_BACKUP, KIND_PATCH)
+            and not w.get("needs_confirm")
+            and not is_hard_stop(str(w.get("kind") or ""))
+            and not is_hard_stop(str(w.get("bucket") or ""))
         ]
         rows.sort(key=self._accepted_start_order)
         for row in rows:
-            skip = await self._backup_skip_reason(
-                row, online=online, disk=disk, running=running
-            )
-            if skip:
-                await self._apply_backup_skip(row, skip, now=now)
-                continue
+            kind = str(row.get("kind") or "")
+            tid = str(row.get("target_id") or "")
+            if kind == KIND_BACKUP:
+                if await self._any_backup_running():
+                    continue
+                skip = await self._backup_skip_reason(
+                    row, online=online, disk=disk, running=running
+                )
+                if skip:
+                    await self._apply_backup_skip(row, skip, now=now)
+                    continue
+            elif kind == KIND_PATCH:
+                if settings.patch_halted or patch_busy:
+                    continue
+                if tid in running:
+                    continue
             try:
                 await self.start_now(int(row["id"]), replan=False)
-            except RuntimeError:
+            except Exception:
                 continue
-            await self._pack_backup_chain(now=now, start_min=self._chain_cursor(now))
+            await self._pack_backup_chain(
+                now=now_berlin(), start_min=self._chain_cursor(now_berlin())
+            )
             return
         await self._pack_backup_chain(now=now, start_min=self._chain_cursor(now))
 
@@ -2546,10 +2498,6 @@ class OpsEngine:
             return
         if await self._copilot_already_planned():
             return
-        stack = await self._copilot_backup_stack()
-        if stack:
-            await self._plan_copilot_data_if_possible()
-            return
         waiting = await self.store.find_waiting_prompt(COPILOT_DATA_ID)
         if waiting:
             return
@@ -2577,12 +2525,22 @@ class OpsEngine:
             await self._notify_waiting("Wartet auf dich", REASON_COPILOT_DATA)
 
     async def _plan_copilot_data_if_possible(self) -> list[dict[str, Any]]:
-        stack = await self._copilot_backup_stack()
-        if not stack:
+        bstore = self._get_backup_store()
+        if bstore is None:
             return []
-        tid = str(stack.get("parent_id") or COPILOT_DATA_ID)
-        name = str(stack.get("guest_name") or "Copilot /data")
-        return await self._plan_backup_for_host(tid, name)
+        try:
+            for row in await bstore.list_schedules():
+                stack = str(row.get("stack") or "").lower()
+                pid = str(row.get("parent_id") or "")
+                if pid == COPILOT_DATA_ID or any(
+                    h in stack for h in COPILOT_STACK_HINTS
+                ):
+                    tid = pid or COPILOT_DATA_ID
+                    name = str(row.get("guest_name") or "Copilot /data")
+                    return await self._plan_backup_for_host(tid, name)
+        except Exception:
+            return []
+        return []
 
     async def refresh_evening_brief(self, *, force: bool = False) -> dict[str, Any]:
         now = now_berlin()
@@ -2692,7 +2650,7 @@ class OpsEngine:
             raise RuntimeError("Disk ist kritisch — Start blockiert.")
         if tid in running:
             raise RuntimeError("Auf diesem Ziel läuft bereits ein Auftrag.")
-        if kind == KIND_BACKUP and self._any_backup_running():
+        if kind == KIND_BACKUP and await self._any_backup_running():
             raise RuntimeError("Ein Backup läuft bereits — der Agent startet das nächste im Anschluss.")
         if kind == KIND_PATCH:
             if not in_job_scope(
@@ -2770,7 +2728,7 @@ class OpsEngine:
         patch_started = False
         settings = await self.settings()
         online, disk, running, _no_snap = await self._host_maps()
-        backup_started = self._any_backup_running()
+        backup_started = await self._any_backup_running()
         if any(
             str(getattr(j, "kind", "") or "") in ("apply", "image-apply")
             for j in self._list_patch_jobs()
@@ -2939,11 +2897,29 @@ class OpsEngine:
         row = await self.store.get_window(window_id)
         if not row:
             raise RuntimeError("Fenster nicht gefunden.")
+        was_running = str(row.get("status") or "") == STATUS_RUNNING
+        reason = (
+            by_agent("Von dir beendet — Kette geht weiter.")
+            if was_running
+            else "Abgelehnt."
+        )
         await self.store.update_window(
             window_id,
             status=STATUS_SKIPPED,
-            reason="Abgelehnt.",
+            needs_confirm=False,
+            reason=reason,
         )
+        await self._log_activity(
+            ACTION_SKIPPED,
+            result=RESULT_SKIP,
+            row=row,
+            detail=reason,
+        )
+        if was_running:
+            try:
+                await self._advance_backup_chain()
+            except Exception:
+                logger.exception("Kette nach Loslassen nicht fortgesetzt")
         result = await self.store.get_window(window_id)
         assert result is not None
         return result

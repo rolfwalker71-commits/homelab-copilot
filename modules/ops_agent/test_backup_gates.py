@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from app.core.locale import BERLIN, iso_utc
-from ops_agent.engine import OpsEngine
+from ops_agent.engine import OpsEngine, _schedule_method_fields
 from ops_agent.activity import ACTION_REBOOT, ACTION_SKIPPED, ACTION_WARN
 from ops_agent.capacity import estimate_bytes_from_runs
 from ops_agent.planner import (
@@ -23,6 +23,7 @@ from ops_agent.planner import (
     REASON_REBOOT_DONE,
     REASON_REBOOT_WAIT,
     SOURCE_AGENT,
+    SOURCE_INGESTED,
     STATUS_ACCEPTED,
     STATUS_DONE,
     STATUS_RUNNING,
@@ -62,7 +63,15 @@ class _Snap:
         status = "running" if online else "stopped"
         meta = {"disk_pct": disk} if disk is not None else {}
         self.guests = [
-            _Ent(id="lxc:pve:1", kind="lxc", name="mail", status=status, node="pve", meta=meta),
+            _Ent(
+                id="lxc:pve:1",
+                kind="lxc",
+                name="mail",
+                hostname="mail",
+                status=status,
+                node="pve",
+                meta=meta,
+            ),
         ]
         self.hosts = []
 
@@ -78,6 +87,7 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         await self.store.connect()
         self.bak_jobs: list[_BakJob] = []
         self.started_backup: list[str] = []
+        self.started_patch: list[str] = []
         self.notices: list[tuple[str, str]] = []
         self.reboots: list[str] = []
         self.dest: dict = {}
@@ -99,8 +109,10 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
             self.bak_jobs.append(_BakJob(jid, tid, created_at=_now().timestamp()))
             return jid
 
-        async def _start_patch(_row: dict) -> tuple[bool, str, str | None]:
-            return True, "", "p-1"
+        async def _start_patch(row: dict) -> tuple[bool, str, str | None]:
+            tid = str(row.get("target_id") or "")
+            self.started_patch.append(tid)
+            return True, "", f"p-{len(self.started_patch)}"
 
         async def _notify(title: str, body: str) -> None:
             self.notices.append((title, body))
@@ -183,6 +195,50 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         assert first is not None
         self.assertEqual(first["status"], STATUS_RUNNING)
 
+    async def test_finish_starts_next_immediately(self) -> None:
+        first = await self._win(
+            kind=KIND_BACKUP,
+            target_id="lxc:a",
+            hm="18:00",
+            stack="one",
+            status=STATUS_RUNNING,
+            job_id="done1",
+        )
+        nxt = await self._win(kind=KIND_BACKUP, target_id="lxc:b", hm="20:00", stack="two")
+        self.bak_jobs.append(_BakJob("done1", "lxc:a", status="success", project="one"))
+        await self.engine.sync_jobs()
+        self.assertEqual(self.started_backup, ["lxc:b"])
+        later = await self.store.get_window(int(nxt["id"]))
+        assert later is not None
+        self.assertEqual(later["status"], STATUS_RUNNING)
+        self.assertNotEqual(later["start_hm"], "20:00")
+        done = await self.store.get_window(int(first["id"]))
+        assert done is not None
+        self.assertEqual(done["status"], STATUS_DONE)
+
+    async def test_finish_starts_next_patch_without_ten_minute_gap(self) -> None:
+        policy = await self.store.get_policy()
+        policy.patch_scope_ids = ["lxc:p"]
+        await self.store.save_policy(policy)
+        await self._win(
+            kind=KIND_BACKUP,
+            target_id="lxc:a",
+            hm="18:00",
+            stack="one",
+            status=STATUS_RUNNING,
+            job_id="done1",
+        )
+        patch = await self._win(
+            kind=KIND_PATCH, target_id="lxc:p", hm="21:00", bucket="security"
+        )
+        self.bak_jobs.append(_BakJob("done1", "lxc:a", status="success", project="one"))
+        await self.engine.sync_jobs()
+        self.assertEqual(self.started_patch, ["lxc:p"])
+        moved = await self.store.get_window(int(patch["id"]))
+        assert moved is not None
+        self.assertEqual(moved["status"], STATUS_RUNNING)
+        self.assertNotEqual(moved["start_hm"], "21:00")
+
     async def test_capacity_skips_and_shifts_chain(self) -> None:
         self.snap = _Snap(disk=96)
         self.engine = self._engine()
@@ -216,6 +272,27 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         waiting = await self.store.list_windows(statuses=[STATUS_WAITING])
         self.assertTrue(any(w.get("bucket") == "offline" for w in waiting))
         self.assertTrue(any("fällt auf" in (t + b) for t, b in self.notices))
+
+    async def test_release_running_window_unblocks_chain(self) -> None:
+        stuck = await self._win(
+            kind=KIND_BACKUP,
+            target_id="lxc:a",
+            hm="18:00",
+            stack="portaineragent",
+            status=STATUS_RUNNING,
+            job_id="stuck",
+        )
+        nxt = await self._win(kind=KIND_BACKUP, target_id="lxc:b", hm="20:00", stack="two")
+        self.bak_jobs.append(
+            _BakJob("stuck", "lxc:a", status="running", project="portaineragent")
+        )
+        released = await self.engine.decline_window(int(stuck["id"]))
+        self.assertEqual(released["status"], STATUS_SKIPPED)
+        self.assertIn("beendet", released["reason"])
+        self.assertEqual(self.started_backup, ["lxc:b"])
+        later = await self.store.get_window(int(nxt["id"]))
+        assert later is not None
+        self.assertEqual(later["status"], STATUS_RUNNING)
 
     async def test_hung_backup_goes_to_waiting(self) -> None:
         row = await self._win(
@@ -323,6 +400,317 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("offline", brief["text"].lower())
         self.assertIn("Backup", brief["text"])
         self.assertIn("fällt auf", brief["text"])
+
+    async def test_collect_needs_ignores_discovered_stacks_without_schedule(self) -> None:
+        async def _stacks(_snap: object) -> list[dict]:
+            return [
+                {
+                    "parent_id": "lxc:pve:1",
+                    "stack": "portaineragent",
+                    "guest_name": "mail",
+                    "engine": "tar",
+                }
+            ]
+
+        self.engine._list_backup_stacks = _stacks
+        self.engine._get_backup_store = lambda: _SchedStore([])
+        policy = await self.engine.policy()
+        needs = await self.engine._collect_needs(policy)
+        self.assertFalse(any(n.kind == KIND_BACKUP for n in needs))
+
+    async def test_propose_does_not_invent_backup_for_discovered_stacks(self) -> None:
+        async def _stacks(_snap: object) -> list[dict]:
+            return [
+                {
+                    "parent_id": "lxc:pve:1",
+                    "stack": "portaineragent",
+                    "guest_name": "mail",
+                    "engine": "tar",
+                }
+            ]
+
+        store = _SchedStore([])
+        self.engine._list_backup_stacks = _stacks
+        self.engine._get_backup_store = lambda: store
+        result = await self.engine.propose()
+        created = result.get("created") or []
+        self.assertFalse(
+            any(str(w.get("stack") or "") == "portaineragent" for w in created)
+        )
+        windows = await self.store.list_windows()
+        self.assertFalse(
+            any(str(w.get("stack") or "") == "portaineragent" for w in windows)
+        )
+        self.assertEqual(store.upserts, [])
+
+    async def test_plan_backup_for_host_does_not_invent_discovered_stacks(self) -> None:
+        async def _stacks(_snap: object) -> list[dict]:
+            return [
+                {
+                    "parent_id": "lxc:pve:1",
+                    "stack": "portaineragent",
+                    "guest_name": "mail",
+                }
+            ]
+
+        self.engine._list_backup_stacks = _stacks
+        self.engine._get_backup_store = lambda: _SchedStore([])
+        created = await self.engine._plan_backup_for_host("lxc:pve:1", "mail")
+        self.assertEqual(created, [])
+        windows = await self.store.list_windows()
+        self.assertEqual(
+            [w for w in windows if str(w.get("kind") or "") == KIND_BACKUP], []
+        )
+
+    async def test_ingest_keeps_restic_engine(self) -> None:
+        store = _SchedStore(
+            [
+                {
+                    "id": 3,
+                    "parent_id": "lxc:pve:1",
+                    "stack": "paperless",
+                    "guest_name": "mail",
+                    "enabled": True,
+                    "cron_expr": "0 3 * * *",
+                    "engine": "restic",
+                    "restic_full_every_days": 3,
+                    "restic_keep_last": 21,
+                    "restic_keep_weekly": 4,
+                }
+            ]
+        )
+        self.engine._get_backup_store = lambda: store
+        rows = await self.engine.ingest(now=_now())
+        bak = [r for r in rows if r.get("kind") == KIND_BACKUP]
+        self.assertEqual(len(bak), 1)
+        self.assertEqual(bak[0]["engine"], "restic")
+        self.assertEqual(bak[0]["stack"], "paperless")
+        self.assertEqual(bak[0]["source"], "ingested")
+        self.assertEqual(bak[0]["schedule_id"], 3)
+
+    async def test_plan_backup_for_host_uses_existing_restic_schedule(self) -> None:
+        store = _SchedStore(
+            [
+                {
+                    "id": 5,
+                    "parent_id": "lxc:pve:1",
+                    "stack": "paperless",
+                    "guest_name": "mail",
+                    "enabled": True,
+                    "cron_expr": "0 20 * * *",
+                    "engine": "restic",
+                }
+            ]
+        )
+        self.engine._get_backup_store = lambda: store
+        created = await self.engine._plan_backup_for_host("lxc:pve:1", "mail")
+        self.assertTrue(created)
+        self.assertEqual(created[0]["engine"], "restic")
+        self.assertEqual(created[0]["stack"], "paperless")
+        self.assertEqual(created[0]["schedule_id"], 5)
+        self.assertEqual(store.upserts, [])
+
+    async def test_ensure_backup_schedule_does_not_create(self) -> None:
+        store = _SchedStore([])
+        self.engine._get_backup_store = lambda: store
+        win = await self._win(
+            kind=KIND_BACKUP, target_id="lxc:pve:1", hm="20:00", stack="portaineragent"
+        )
+        await self.engine._ensure_backup_schedule(win, _now())
+        self.assertEqual(store.upserts, [])
+        fresh = await self.store.get_window(int(win["id"]))
+        assert fresh is not None
+        self.assertFalse(fresh.get("schedule_id"))
+
+    async def test_ensure_backup_schedule_prefers_existing_restic(self) -> None:
+        store = _SchedStore(
+            [
+                {
+                    "id": 11,
+                    "parent_id": "lxc:pve:1",
+                    "stack": "paperless",
+                    "engine": "tar",
+                },
+                {
+                    "id": 12,
+                    "parent_id": "lxc:pve:1",
+                    "stack": "paperless",
+                    "engine": "restic",
+                    "restic_keep_last": 21,
+                },
+            ]
+        )
+        self.engine._get_backup_store = lambda: store
+        win = await self._win(
+            kind=KIND_BACKUP, target_id="lxc:pve:1", hm="20:00", stack="paperless"
+        )
+        await self.engine._ensure_backup_schedule(win, _now())
+        self.assertEqual(store.upserts, [])
+        fresh = await self.store.get_window(int(win["id"]))
+        assert fresh is not None
+        self.assertEqual(int(fresh["schedule_id"]), 12)
+
+    async def test_no_backup_yes_does_not_invent_schedules(self) -> None:
+        await self.store.seed_known_hosts(
+            [{"id": "lxc:pve:1", "name": "mail", "kind": "lxc"}]
+        )
+        await self.engine._prompt_missing_backups(
+            [{"id": "lxc:pve:1", "name": "mail", "kind": "lxc"}]
+        )
+        prompts = await self.store.list_scope_prompts(status="waiting")
+        self.assertEqual(len(prompts), 1)
+
+        async def _stacks(_snap: object) -> list[dict]:
+            return [
+                {
+                    "parent_id": "lxc:pve:1",
+                    "stack": "portaineragent",
+                    "guest_name": "mail",
+                }
+            ]
+
+        store = _SchedStore([])
+        self.engine._list_backup_stacks = _stacks
+        self.engine._get_backup_store = lambda: store
+        await self.engine.answer_host_prompt(int(prompts[0]["id"]), backup=True)
+        self.assertEqual(store.upserts, [])
+        windows = await self.store.list_windows()
+        self.assertFalse(
+            any(str(w.get("stack") or "") == "portaineragent" for w in windows)
+        )
+
+    async def test_shift_restic_window_keeps_engine_and_retention(self) -> None:
+        store = _SchedStore(
+            [
+                {
+                    "id": 9,
+                    "parent_id": "lxc:b",
+                    "stack": "paperless",
+                    "guest_name": "mail",
+                    "enabled": True,
+                    "preset": "daily",
+                    "cron_expr": "20 21 * * *",
+                    "note": "paperless restic",
+                    "engine": "restic",
+                    "restic_full_every_days": 3,
+                    "restic_keep_last": 21,
+                    "restic_keep_weekly": 4,
+                }
+            ]
+        )
+        self.engine._get_backup_store = lambda: store
+        await self._win(kind=KIND_BACKUP, target_id="lxc:a", hm="20:00", stack="one")
+        later = await self._win(
+            kind=KIND_BACKUP,
+            target_id="lxc:b",
+            hm="21:20",
+            stack="paperless",
+            schedule_id=9,
+            engine="restic",
+        )
+        result = await self.engine.start_accepted_now()
+        self.assertEqual(self.started_backup, ["lxc:a"])
+        moved = await self.store.get_window(int(later["id"]))
+        assert moved is not None
+        self.assertEqual(moved["reason"], REASON_BACKUP_CHAIN)
+        self.assertNotEqual(moved["start_hm"], "21:20")
+        self.assertEqual(moved.get("engine") or "restic", "restic")
+        self.assertTrue(store.upserts)
+        last = store.upserts[-1]
+        self.assertEqual(int(last["schedule_id"]), 9)
+        self.assertEqual(last["engine"], "restic")
+        self.assertEqual(last["restic_full_every_days"], 3)
+        self.assertEqual(last["restic_keep_last"], 21)
+        self.assertEqual(last["restic_keep_weekly"], 4)
+        self.assertTrue(result["shifted"])
+
+    async def test_rewrite_schedule_time_passes_through_restic_retention(self) -> None:
+        store = _SchedStore(
+            [
+                {
+                    "id": 4,
+                    "parent_id": "lxc:pve:1",
+                    "stack": "paperless",
+                    "preset": "daily",
+                    "enabled": True,
+                    "note": "keep-me",
+                    "engine": "restic",
+                    "restic_full_every_days": 2,
+                    "restic_keep_last": 30,
+                    "restic_keep_weekly": 0,
+                }
+            ]
+        )
+        self.engine._get_backup_store = lambda: store
+        await self.engine._rewrite_schedule_time(4, "22:40")
+        self.assertEqual(len(store.upserts), 1)
+        last = store.upserts[0]
+        self.assertEqual(last["engine"], "restic")
+        self.assertEqual(last["restic_full_every_days"], 2)
+        self.assertEqual(last["restic_keep_last"], 30)
+        self.assertEqual(last["restic_keep_weekly"], 0)
+        self.assertEqual(last["note"], "keep-me")
+        self.assertIn("22", last["cron_expr"])
+        self.assertIn("40", last["cron_expr"])
+
+
+class _SchedStore:
+    def __init__(self, schedules: list[dict] | None = None) -> None:
+        self.schedules = [dict(s) for s in (schedules or [])]
+        self.upserts: list[dict] = []
+
+    async def list_schedules(self) -> list[dict]:
+        return [dict(s) for s in self.schedules]
+
+    async def get_schedule(self, schedule_id: int) -> dict | None:
+        for row in self.schedules:
+            if int(row.get("id") or 0) == int(schedule_id):
+                return dict(row)
+        return None
+
+    async def find_schedules_for_stack(self, parent_id: str, stack: str) -> list[dict]:
+        return [
+            dict(s)
+            for s in self.schedules
+            if str(s.get("parent_id") or "") == parent_id
+            and str(s.get("stack") or "") == stack
+        ]
+
+    async def upsert_schedule(self, **kwargs: object) -> int:
+        self.upserts.append(dict(kwargs))
+        sid = kwargs.get("schedule_id")
+        if sid is not None:
+            for row in self.schedules:
+                if int(row.get("id") or 0) == int(sid):  # type: ignore[arg-type]
+                    row.update({k: v for k, v in kwargs.items() if k != "schedule_id"})
+                    return int(sid)  # type: ignore[arg-type]
+        new_id = max((int(s.get("id") or 0) for s in self.schedules), default=0) + 1
+        row = {"id": new_id, **kwargs}
+        self.schedules.append(row)
+        return new_id
+
+    async def list_runs_for_stack(self, parent_id: str, stack: str, limit: int = 8):
+        return []
+
+
+class ScheduleMethodFieldTests(unittest.TestCase):
+    def test_restic_zero_keep_weekly_is_kept(self) -> None:
+        fields = _schedule_method_fields(
+            {
+                "engine": "restic",
+                "restic_full_every_days": 3,
+                "restic_keep_last": 21,
+                "restic_keep_weekly": 0,
+            }
+        )
+        self.assertEqual(fields["engine"], "restic")
+        self.assertEqual(fields["restic_full_every_days"], 3)
+        self.assertEqual(fields["restic_keep_last"], 21)
+        self.assertEqual(fields["restic_keep_weekly"], 0)
+
+    def test_missing_engine_stays_tar_not_invented_restic(self) -> None:
+        fields = _schedule_method_fields({"restic_keep_last": 14})
+        self.assertEqual(fields["engine"], "tar")
 
 
 class _RunStore:

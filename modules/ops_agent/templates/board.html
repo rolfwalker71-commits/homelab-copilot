@@ -8,7 +8,10 @@
   <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug break-words">Agent</h1>
   <p class="mt-2 max-w-3xl text-[var(--muted)] leading-snug">
     Plant Patch- und Backup-Fenster selbst (10-Minuten-Raster, Europe/Berlin).
-    Bestehende Zeitpläne bleiben und erscheinen hier. DistUpgrade, Wipe und Restore-auf-Prod macht er nie.
+    Welche Stacks und ob tar oder restic, steht auf der
+    <a class="underline" href="/modules/backup_verifier">Backup-Seite</a> —
+    der Agent startet nur, was dort geplant ist.
+    DistUpgrade, Wipe und Restore-auf-Prod macht er nie.
   </p>
   <p id="ops-quiet" class="mt-1 max-w-3xl text-sm text-[var(--muted)] leading-snug"></p>
 </section>
@@ -287,7 +290,7 @@
       return (
         '<article class="entity-card p-3" data-scope-prompt="' + esc(p.id) + '">' +
           '<p class="font-medium leading-snug break-words">Neuer Host/Gast ' + esc(name) + '</p>' +
-          '<p class="mt-1 text-sm leading-snug break-words">Automatisch zu Patching? zu Image-Update? Backup? Bis du antwortest, bleibt er draußen.</p>' +
+          '<p class="mt-1 text-sm leading-snug break-words">Automatisch zu Patching? zu Image-Update? Backup-Intent merken? Stacks und tar/restic planst du auf der Backup-Seite.</p>' +
           '<div class="mt-2 grid gap-1">' +
             '<label class="flex items-center gap-2 text-sm min-h-12">' +
               '<input type="checkbox" data-prompt-patch class="h-4 w-4" /> <span>Patchen ja</span></label>' +
@@ -306,10 +309,10 @@
       return (
         '<article class="entity-card p-3" data-scope-prompt="' + esc(p.id) + '">' +
           '<p class="font-medium leading-snug break-words">' + esc(name) + ' hat keinen Backup-Plan. So gewollt?</p>' +
-          '<p class="mt-1 text-sm leading-snug break-words">Kein Backup merkt sich der Agent — er fragt nicht bei jedem Tick erneut.</p>' +
+          '<p class="mt-1 text-sm leading-snug break-words">Welche Stacks und ob tar oder restic, legst du auf der <a class="underline" href="/modules/backup_verifier">Backup-Seite</a> fest. Der Agent startet nur, was dort geplant ist — er erfindet keine Stacks. Kein Backup merkt sich der Agent.</p>' +
           '<div class="mt-2 flex flex-wrap gap-2">' +
             '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-prompt-no-bak="' + esc(p.id) + '">Kein Backup</button>' +
-            '<button type="button" class="btn btn-primary btn-xs min-h-12" data-prompt-yes-bak="' + esc(p.id) + '">Backup einplanen</button>' +
+            '<a class="btn btn-primary btn-xs min-h-12" href="/modules/backup_verifier">Backup einplanen</a>' +
           '</div>' +
         '</article>'
       );
@@ -597,7 +600,10 @@
         if (w.lesson) st = (st ? st + ' · ' : '') + 'Lektion';
         const reason = [w.reason || '', w.lesson && w.lesson.why_de ? w.lesson.why_de : '']
           .filter(Boolean).join(' ');
-        return card(title, meta + (st ? ' · ' + st : ''), reason, '');
+        const actions = (key === 'running' && w.id && String(w.id).indexOf('live:') !== 0)
+          ? '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-decline="' + esc(w.id) + '">Loslassen</button>'
+          : '';
+        return card(title, meta + (st ? ' · ' + st : ''), reason, actions);
       }).join('');
     });
     bindActions();
