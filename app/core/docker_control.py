@@ -15,6 +15,22 @@ from typing import Any, Literal
 import asyncssh
 
 from app.config import Settings
+from app.core.compose_apply import (
+    absolute_compose_path,
+    cmd_compose_ls_json,
+    cmd_find_common_compose_files,
+    compose_ls_match,
+    compose_skip_reason_de,
+    compose_spec_from_inspects,
+    compose_stack_argv,
+    compose_stack_shell,
+    docker_create_argv_from_inspect,
+    extra_networks_from_inspect,
+    inspect_container_image,
+    inspect_container_name,
+    normalize_guest_path,
+    parse_compose_ls_json,
+)
 from app.core.image_digest import (
     cmd_compose_project_labels,
     cmd_remote_manifest_inspect,
@@ -585,41 +601,17 @@ def _normalize_abs_path(path: str) -> str:
 
 
 def _compose_meta_from_inspects(inspects: list[dict[str, Any]]) -> dict[str, Any]:
-    working_dir: str | None = None
+    spec = compose_spec_from_inspects(inspects)
+    working_dir = spec["working_dir"]
     config_files: list[str] = []
-    for info in inspects:
-        labels = (info.get("Config") or {}).get("Labels") or {}
-        wd = labels.get("com.docker.compose.project.working_dir")
-        if wd and not working_dir:
-            working_dir = wd.rstrip("/")
-        cf = labels.get("com.docker.compose.project.config_files")
-        if cf:
-            for part in re.split(r"[,:]", cf):
-                part = part.strip()
-                if not part:
-                    continue
-                try:
-                    norm = _normalize_abs_path(part)
-                except DockerControlError:
-                    continue
-                if norm not in config_files:
-                    config_files.append(norm)
-    candidates = list(config_files)
-    if working_dir:
-        try:
-            wd_norm = _normalize_abs_path(working_dir)
-        except DockerControlError:
-            wd_norm = None
-        if wd_norm:
-            working_dir = wd_norm
-            for name in _COMPOSE_BASENAMES:
-                p = f"{wd_norm}/{name}"
-                if p not in candidates:
-                    candidates.append(p)
+    for item in spec["config_files"]:
+        abs_path = absolute_compose_path(working_dir, item)
+        if abs_path and abs_path not in config_files:
+            config_files.append(abs_path)
     return {
         "working_dir": working_dir,
         "config_files": config_files,
-        "candidates": candidates,
+        "candidates": list(spec["candidates"]),
     }
 
 
@@ -723,6 +715,8 @@ async def _resolve_existing_compose_paths(
     ip: str | None,
     candidates: list[str],
     config_files: list[str],
+    port: int | None = None,
+    username: str | None = None,
 ) -> list[str]:
     existing: list[str] = []
     # Prefer label-declared files first.
@@ -730,14 +724,21 @@ async def _resolve_existing_compose_paths(
         p for p in candidates if p not in config_files
     ]
     for path in ordered:
-        if await _remote_or_local_readable(settings, ip, path):
+        if await _remote_or_local_readable(
+            settings, ip, path, port=port, username=username
+        ):
             if path not in existing:
                 existing.append(path)
     return existing
 
 
 async def _remote_or_local_readable(
-    settings: Settings, ip: str | None, path: str
+    settings: Settings,
+    ip: str | None,
+    path: str,
+    *,
+    port: int | None = None,
+    username: str | None = None,
 ) -> bool:
     check = f"test -r {shlex.quote(path)} && test -f {shlex.quote(path)}"
     if ip is None:
@@ -748,7 +749,7 @@ async def _remote_or_local_readable(
         )
         code = await proc.wait()
         return code == 0
-    _, _, code = await _ssh_run(settings, ip, check)
+    _, _, code = await _ssh_run(settings, ip, check, port=port, username=username)
     return code == 0
 
 
@@ -769,11 +770,18 @@ async def fetch_compose_file(
             status_code=404,
         )
     meta = _compose_meta_from_inspects(inspects)
+    _ip, port, user = (
+        resolve_parent_ssh(settings, snapshot, parent_id)
+        if ip
+        else (None, settings.docker_ssh_port, settings.docker_ssh_user)
+    )
     existing = await _resolve_existing_compose_paths(
         settings,
         ip=ip,
         candidates=meta["candidates"],
         config_files=meta["config_files"],
+        port=port,
+        username=user,
     )
     if not existing:
         raise DockerControlError(
@@ -796,11 +804,6 @@ async def fetch_compose_file(
             status_code=404,
         )
 
-    _ip, port, user = (
-        resolve_parent_ssh(settings, snapshot, parent_id)
-        if ip
-        else (None, settings.docker_ssh_port, settings.docker_ssh_user)
-    )
     content = await _read_text_file(
         settings, ip, target, port=port, username=user
     )
@@ -1323,6 +1326,252 @@ def _compose_name_to_project(
     return mapping
 
 
+async def _guest_path_exists(
+    settings: Settings,
+    ip: str,
+    path: str,
+    *,
+    port: int | None,
+    username: str | None,
+) -> bool:
+    return await _remote_or_local_readable(
+        settings, ip, path, port=port, username=username
+    )
+
+
+async def _resolve_stack_compose_on_guest(
+    settings: Settings,
+    *,
+    ip: str,
+    project: str,
+    inspects: list[dict[str, Any]],
+    port: int | None,
+    username: str | None,
+    emit: Callable[[str], Awaitable[None] | None],
+    run_quiet: Callable[[str], Awaitable[tuple[str, str, int]]],
+) -> dict[str, Any]:
+    """Find compose files on the Docker guest. Empty config_files → skip compose."""
+    spec = compose_spec_from_inspects(inspects, project=project)
+    working_dir = spec["working_dir"]
+
+    async def _exists(path: str) -> bool:
+        return await _guest_path_exists(
+            settings, ip, path, port=port, username=username
+        )
+
+    existing_labeled: list[str] = []
+    for item in spec["config_files"]:
+        abs_path = absolute_compose_path(working_dir, item)
+        if abs_path and await _exists(abs_path):
+            existing_labeled.append(item)
+
+    if existing_labeled:
+        wd = working_dir
+        if not wd:
+            first = absolute_compose_path(None, existing_labeled[0]) or absolute_compose_path(
+                working_dir, existing_labeled[0]
+            )
+            wd = first.rsplit("/", 1)[0] if first else None
+        return {
+            "working_dir": wd,
+            "config_files": existing_labeled,
+            "source": "labels",
+        }
+
+    if working_dir:
+        found: list[str] = []
+        for name in _COMPOSE_BASENAMES:
+            if await _exists(f"{working_dir}/{name}"):
+                found.append(name)
+        if found:
+            return {
+                "working_dir": working_dir,
+                "config_files": found,
+                "source": "working_dir",
+            }
+
+    await emit(
+        f"Working-Dir fehlt oder Dateien nicht lesbar für „{project}“ — "
+        f"prüfe /opt/{project}, /home/*/docker/{project} und docker compose ls."
+    )
+
+    stdout, _stderr, code = await run_quiet(cmd_find_common_compose_files(project))
+    if code == 0:
+        by_dir: dict[str, list[str]] = {}
+        for line in stdout.splitlines():
+            norm = normalize_guest_path(line.strip())
+            if not norm:
+                continue
+            directory, name = norm.rsplit("/", 1)
+            if name not in by_dir.setdefault(directory, []):
+                by_dir[directory].append(name)
+        prefer = f"/opt/{project}"
+        if prefer in by_dir:
+            return {
+                "working_dir": prefer,
+                "config_files": by_dir[prefer],
+                "source": "common_path",
+            }
+        if by_dir:
+            directory = next(iter(by_dir))
+            return {
+                "working_dir": directory,
+                "config_files": by_dir[directory],
+                "source": "common_path",
+            }
+
+    stdout, _stderr, code = await run_quiet(cmd_compose_ls_json())
+    if code == 0:
+        wd, files = compose_ls_match(parse_compose_ls_json(stdout), project)
+        existing: list[str] = []
+        for item in files:
+            abs_path = absolute_compose_path(wd, item)
+            if abs_path and await _exists(abs_path):
+                existing.append(item)
+        if existing:
+            if not wd:
+                first = absolute_compose_path(wd, existing[0])
+                wd = first.rsplit("/", 1)[0] if first else None
+            return {
+                "working_dir": wd,
+                "config_files": existing,
+                "source": "compose_ls",
+            }
+
+    return {"working_dir": None, "config_files": [], "source": "none"}
+
+
+def _compose_apply_shell(
+    *,
+    project: str,
+    working_dir: str | None,
+    config_files: list[str],
+    extra: list[str],
+) -> str:
+    argv = compose_stack_argv(
+        project=project, config_files=config_files, extra=extra
+    )
+    return compose_stack_shell(working_dir=working_dir, argv=argv)
+
+
+async def _pull_and_recreate_without_compose(
+    *,
+    inspects: list[dict[str, Any]],
+    restart: bool,
+    run: Callable[..., Awaitable[tuple[str, str, int]]],
+    emit: Callable[[str], Awaitable[None] | None],
+) -> None:
+    """docker pull each image; recreate containers when restart is requested."""
+    if not inspects:
+        raise DockerControlError(
+            "Keine Container für das Compose-Projekt gefunden — "
+            "weder Compose-Datei noch inspect-Daten.",
+            status_code=404,
+        )
+
+    images: list[str] = []
+    for info in inspects:
+        image = inspect_container_image(info)
+        if image and image not in images and not image.startswith("sha256:"):
+            images.append(image)
+    if not images:
+        raise DockerControlError(
+            "Keine Image-Tags zum Ziehen (nur sha256-IDs) — "
+            "ohne Compose-Datei nicht aktualisierbar.",
+            status_code=502,
+        )
+
+    for image in images:
+        await emit(f"Hole Image {image} (ohne docker compose)…")
+        stdout, stderr, code = await run(
+            f"docker pull -- {shlex.quote(image)}", stream=True
+        )
+        if code != 0:
+            raise DockerControlError(
+                f"docker pull {image} fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                status_code=502,
+            )
+
+    if not restart:
+        return
+
+    for info in inspects:
+        await _recreate_container_from_inspect(info, run=run, emit=emit)
+
+
+async def _recreate_container_from_inspect(
+    info: dict[str, Any],
+    *,
+    run: Callable[..., Awaitable[tuple[str, str, int]]],
+    emit: Callable[[str], Awaitable[None] | None],
+) -> None:
+    name = inspect_container_name(info)
+    image = inspect_container_image(info)
+    if not name or not _SAFE_NAME.match(name):
+        raise DockerControlError(
+            f"Container-Name ungültig für Recreate: {name!r}.",
+            status_code=400,
+        )
+    if not image or image.startswith("sha256:"):
+        raise DockerControlError(
+            f"Kein Image-Tag für „{name}“ — Recreate nicht möglich.",
+            status_code=502,
+        )
+    old = f"{name}.hlops-old"
+    create_cmd = " ".join(
+        shlex.quote(part) for part in docker_create_argv_from_inspect(info)
+    )
+    await emit(f"Erzeuge Container „{name}“ neu (ohne Compose-Datei).")
+    await run(f"docker rm -f -- {shlex.quote(old)}")
+    stdout, stderr, code = await run(
+        f"docker stop -- {shlex.quote(name)}", stream=True
+    )
+    if code != 0:
+        raise DockerControlError(
+            f"Stop „{name}“ fehlgeschlagen: {(stderr or stdout or '').strip()[:200]}",
+            status_code=502,
+        )
+    stdout, stderr, code = await run(
+        f"docker rename {shlex.quote(name)} {shlex.quote(old)}"
+    )
+    if code != 0:
+        await run(f"docker start -- {shlex.quote(name)}")
+        raise DockerControlError(
+            f"Rename „{name}“ fehlgeschlagen: {(stderr or stdout or '').strip()[:200]}",
+            status_code=502,
+        )
+
+    stdout, stderr, code = await run(create_cmd, stream=True)
+    if code != 0:
+        await run(f"docker rename {shlex.quote(old)} {shlex.quote(name)}")
+        await run(f"docker start -- {shlex.quote(name)}")
+        raise DockerControlError(
+            f"Recreate „{name}“ fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+            status_code=502,
+        )
+
+    for net in extra_networks_from_inspect(info):
+        if not _SAFE_NAME.match(net):
+            continue
+        await run(
+            f"docker network connect {shlex.quote(net)} {shlex.quote(name)}"
+        )
+
+    stdout, stderr, code = await run(
+        f"docker start -- {shlex.quote(name)}", stream=True
+    )
+    if code != 0:
+        await run(f"docker rm -f -- {shlex.quote(name)}")
+        await run(f"docker rename {shlex.quote(old)} {shlex.quote(name)}")
+        await run(f"docker start -- {shlex.quote(name)}")
+        raise DockerControlError(
+            f"Start nach Recreate „{name}“ fehlgeschlagen: "
+            f"{(stderr or stdout or '').strip()[:200]}",
+            status_code=502,
+        )
+    await run(f"docker rm -- {shlex.quote(old)}")
+
+
 async def apply_image_updates(
     settings: Settings,
     *,
@@ -1527,32 +1776,71 @@ async def apply_image_updates(
         previous_ids: set[str] = set()
         if prune and restart:
             previous_ids = await _collect_ids(cmd_project_image_ids(stack))
-        cmd = f"docker compose -p {shlex.quote(stack)} pull"
-        stdout, stderr, code = await _run(cmd, stream=True)
-        logs.append((stdout or stderr or "").strip()[:4000])
-        if code != 0:
-            raise DockerControlError(
-                f"docker compose pull fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
-                status_code=502,
+        inspects = await _remote_inspect_project(
+            settings, ip, stack, port=port, username=user
+        )
+        resolved = await _resolve_stack_compose_on_guest(
+            settings,
+            ip=ip,
+            project=stack,
+            inspects=inspects,
+            port=port,
+            username=user,
+            emit=_emit,
+            run_quiet=_run_quiet,
+        )
+        compose_files = list(resolved.get("config_files") or [])
+        compose_cwd = resolved.get("working_dir")
+
+        if compose_files:
+            file_note = ", ".join(compose_files)
+            cwd_note = compose_cwd or "ohne Working-Dir"
+            await _emit(
+                f"Compose-Projekt „{stack}“: {cwd_note}, Dateien: {file_note}."
             )
-        if restart:
-            rcmd = (
-                f"docker compose -p {shlex.quote(stack)} up -d --force-recreate"
+            cmd = _compose_apply_shell(
+                project=stack,
+                working_dir=compose_cwd,
+                config_files=compose_files,
+                extra=["pull"],
             )
-            stdout, stderr, code = await _run(rcmd, stream=True)
-            logs.append((stdout or stderr or "").strip()[:2000])
+            stdout, stderr, code = await _run(cmd, stream=True)
+            logs.append((stdout or stderr or "").strip()[:4000])
             if code != 0:
                 raise DockerControlError(
-                    f"Stack-Neustart fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                    f"docker compose pull fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
                     status_code=502,
                 )
-            if prune:
-                prune_results.append(
-                    await _cleanup_unused_images(
-                        previous_ids=previous_ids,
-                        current_ids_cmd=cmd_project_image_ids(stack),
-                    )
+            if restart:
+                rcmd = _compose_apply_shell(
+                    project=stack,
+                    working_dir=compose_cwd,
+                    config_files=compose_files,
+                    extra=["up", "-d", "--force-recreate"],
                 )
+                stdout, stderr, code = await _run(rcmd, stream=True)
+                logs.append((stdout or stderr or "").strip()[:2000])
+                if code != 0:
+                    raise DockerControlError(
+                        f"Stack-Neustart fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                        status_code=502,
+                    )
+        else:
+            await _emit(compose_skip_reason_de())
+            await _pull_and_recreate_without_compose(
+                inspects=inspects,
+                restart=restart,
+                run=_run,
+                emit=_emit,
+            )
+
+        if restart and prune:
+            prune_results.append(
+                await _cleanup_unused_images(
+                    previous_ids=previous_ids,
+                    current_ids_cmd=cmd_project_image_ids(stack),
+                )
+            )
 
     if names_to_upgrade:
         previous_ids = set()
