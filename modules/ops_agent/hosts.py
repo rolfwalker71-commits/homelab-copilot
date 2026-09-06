@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
+
+# Synthetic backup target — never a real inventory host (do not show as weggefallen).
+COPILOT_DATA_ID = "copilot:data"
 
 
 def _kind_value(ent: Any) -> str:
@@ -175,3 +178,36 @@ def split_inventory_changes(
     disappeared = present - live - pending
     returned = gone & live
     return appeared, disappeared, returned
+
+
+def is_synthetic_copilot_data(target_id: str) -> bool:
+    return str(target_id or "").strip() == COPILOT_DATA_ID
+
+
+def exclude_synthetic_ids(ids: Iterable[str]) -> set[str]:
+    return {str(x).strip() for x in ids if str(x).strip() and not is_synthetic_copilot_data(str(x))}
+
+
+def is_live_backup_target(
+    target_id: str,
+    *,
+    live_ids: set[str],
+    gone_ids: set[str] | None = None,
+) -> bool:
+    """True if this id is a present inventory host that may need a backup nag."""
+    tid = str(target_id or "").strip()
+    if not tid or is_synthetic_copilot_data(tid):
+        return False
+    gone = {str(x).strip() for x in (gone_ids or set()) if str(x).strip()}
+    if tid in gone:
+        return False
+    return tid in {str(x).strip() for x in live_ids if str(x).strip()}
+
+
+def host_row_id(row: dict[str, Any]) -> str:
+    return str(row.get("id") or row.get("target_id") or "").strip()
+
+
+def belongs_in_host_matrix(row: dict[str, Any]) -> bool:
+    """Ghost Copilot-/data rows stay off the host list (dedicated prompt only)."""
+    return not is_synthetic_copilot_data(host_row_id(row))

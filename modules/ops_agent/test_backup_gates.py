@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 from app.core.locale import BERLIN, iso_utc
 from ops_agent.engine import OpsEngine, _schedule_method_fields
 from ops_agent.activity import ACTION_REBOOT, ACTION_SKIPPED, ACTION_WARN
+from ops_agent.hosts import COPILOT_DATA_ID
 from ops_agent.capacity import estimate_bytes_from_runs
 from ops_agent.planner import (
     KIND_BACKUP,
@@ -376,11 +377,101 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(w.get("bucket") == "capacity" for w in waiting))
         self.assertTrue(any(r.get("action") == ACTION_WARN for r in await self.store.list_activity()))
 
-    async def test_copilot_data_prompt_without_job_type(self) -> None:
+    async def test_copilot_data_without_stack_does_not_inject_host(self) -> None:
         await self.engine._prompt_copilot_data()
         prompts = await self.store.list_scope_prompts(status="waiting")
-        self.assertTrue(any(p.get("target_id") == "copilot:data" for p in prompts))
+        self.assertFalse(any(p.get("target_id") == COPILOT_DATA_ID for p in prompts))
+        known = await self.store.list_known_hosts()
+        self.assertFalse(any(h.get("target_id") == COPILOT_DATA_ID for h in known))
+        matrix = await self.engine.scope_matrix()
+        self.assertFalse(any(h.get("id") == COPILOT_DATA_ID for h in matrix["hosts"]))
+
+    async def test_vanished_host_drops_missing_backup_and_kurzlage(self) -> None:
+        await self.store.seed_known_hosts(
+            [{"id": "lxc:pve:1", "name": "mail", "kind": "lxc"}]
+        )
+        await self.store.upsert_known_host(
+            target_id="lxc:old", target_name="alt", kind="lxc", gone=True
+        )
+        await self.store.insert_scope_prompt(
+            target_id="lxc:old",
+            target_name="alt",
+            kind="no_backup",
+            reason="alt hat keinen Backup-Plan. So gewollt?",
+        )
+        await self.store.insert_activity(
+            action=ACTION_WARN,
+            result="wait",
+            kind=KIND_BACKUP,
+            target_id="lxc:old",
+            target_name="alt",
+            detail="alt hat keinen Backup-Plan. So gewollt?",
+        )
+        await self.engine._prompt_missing_backups(
+            [{"id": "lxc:pve:1", "name": "mail", "kind": "lxc"}]
+        )
+        waiting = await self.store.list_scope_prompts(status="waiting")
+        self.assertFalse(any(p.get("target_id") == "lxc:old" for p in waiting))
+        self.assertTrue(any(p.get("target_id") == "lxc:pve:1" for p in waiting))
+        old = next(h for h in await self.store.list_known_hosts() if h["target_id"] == "lxc:old")
+        self.assertIsNone(old.get("skip_backup"))
+        brief = await self.engine.refresh_evening_brief(force=True)
+        self.assertNotIn("alt hat keinen Backup-Plan", brief["text"])
+        self.assertNotIn("Copilot /data", brief["text"])
+
+    async def test_leftover_copilot_host_is_removed_not_nagged(self) -> None:
+        await self.store.upsert_known_host(
+            target_id=COPILOT_DATA_ID,
+            target_name="Copilot /data",
+            kind="copilot",
+            gone=True,
+        )
+        await self.store.insert_scope_prompt(
+            target_id=COPILOT_DATA_ID,
+            target_name="Copilot /data",
+            kind="no_backup",
+            reason="Copilot /data hat keinen Backup-Plan. So gewollt?",
+        )
+        await self.store.insert_activity(
+            action=ACTION_WARN,
+            result="wait",
+            kind=KIND_BACKUP,
+            target_id=COPILOT_DATA_ID,
+            target_name="Copilot /data",
+            detail=(
+                "Copilot /data hat keinen Backup-Plan. So gewollt? "
+                "Kein bestehender Copilot-Backup-Job — nichts erfunden durch Agent."
+            ),
+        )
+        await self.engine.reconcile_hosts()
+        known = await self.store.list_known_hosts()
+        self.assertFalse(any(h.get("target_id") == COPILOT_DATA_ID for h in known))
+        matrix = await self.engine.scope_matrix()
+        self.assertFalse(any(h.get("id") == COPILOT_DATA_ID for h in matrix["hosts"]))
+        waiting = await self.store.list_scope_prompts(status="waiting")
+        self.assertFalse(any(p.get("target_id") == COPILOT_DATA_ID for p in waiting))
+        brief = await self.engine.refresh_evening_brief(force=True)
+        self.assertNotIn("Copilot /data", brief["text"])
+
+    async def test_copilot_stack_prompts_without_fake_host(self) -> None:
+        async def _stacks(_snap: object) -> list[dict]:
+            return [
+                {
+                    "parent_id": "lxc:pve:1",
+                    "stack": "homelab-copilot",
+                    "guest_name": "copilot",
+                }
+            ]
+
+        self.engine._list_backup_stacks = _stacks
+        await self.engine._prompt_copilot_data()
+        prompts = await self.store.list_scope_prompts(status="waiting")
+        self.assertTrue(any(p.get("target_id") == COPILOT_DATA_ID for p in prompts))
         self.assertIn("Copilot /data", prompts[0]["reason"])
+        known = await self.store.list_known_hosts()
+        self.assertFalse(any(h.get("target_id") == COPILOT_DATA_ID for h in known))
+        matrix = await self.engine.scope_matrix()
+        self.assertFalse(any(h.get("id") == COPILOT_DATA_ID for h in matrix["hosts"]))
 
     async def test_evening_brief_from_log(self) -> None:
         await self.store.insert_activity(
@@ -719,6 +810,41 @@ class _RunStore:
 
     async def list_schedules(self):
         return []
+
+
+class EveningBriefFilterTests(unittest.TestCase):
+    def test_missing_backup_warn_for_vanished_is_dropped(self) -> None:
+        from ops_agent.activity import ACTION_APPLY, ACTION_WARN, build_evening_brief
+        from app.core.locale import iso_utc
+
+        now = _now()
+        iso = iso_utc(now)
+        text = build_evening_brief(
+            [
+                {
+                    "action": ACTION_APPLY,
+                    "kind": KIND_BACKUP,
+                    "result": "ok",
+                    "target_name": "mail",
+                    "created_at_iso": iso,
+                },
+                {
+                    "action": ACTION_WARN,
+                    "kind": KIND_BACKUP,
+                    "result": "wait",
+                    "target_id": "lxc:old",
+                    "target_name": "alt",
+                    "detail": "alt hat keinen Backup-Plan. So gewollt?",
+                    "created_at_iso": iso,
+                },
+            ],
+            now=now,
+            gone_ids={"lxc:old"},
+            live_ids={"lxc:pve:1"},
+        )
+        self.assertIn("Backup", text)
+        self.assertNotIn("alt hat keinen Backup-Plan", text)
+        self.assertNotIn("Warnung", text)
 
 
 class CapacityHelperTests(unittest.TestCase):

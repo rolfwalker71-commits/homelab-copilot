@@ -374,6 +374,27 @@ class ScopeFilterTests(unittest.TestCase):
         self.assertEqual(planned, [])
         self.assertEqual(skipped[0].reason, REASON_HOST_GONE)
 
+    def test_gone_host_backup_not_planned(self) -> None:
+        needs = [
+            Need(
+                kind=KIND_BACKUP,
+                target_id="lxc:gone",
+                target_name="gone",
+                stack="paperless",
+                duration_min=10,
+                has_existing_schedule=True,
+            )
+        ]
+        planned, skipped = propose_windows(
+            needs,
+            [],
+            now=_now(),
+            policy=default_policy(),
+            gone_ids={"lxc:gone"},
+        )
+        self.assertEqual(planned, [])
+        self.assertEqual(skipped[0].reason, REASON_HOST_GONE)
+
     def test_backup_ignores_patch_scope(self) -> None:
         needs = [
             Need(

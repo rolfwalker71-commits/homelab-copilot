@@ -7,7 +7,14 @@ import unittest
 from pathlib import Path
 
 from ops_agent.engine import OpsEngine
-from ops_agent.hosts import collect_live_hosts, overlay_local_scope, split_inventory_changes
+from ops_agent.hosts import (
+    COPILOT_DATA_ID,
+    belongs_in_host_matrix,
+    collect_live_hosts,
+    is_live_backup_target,
+    overlay_local_scope,
+    split_inventory_changes,
+)
 from ops_agent.image_snaps import (
     ImageSnap,
     remember_after_image,
@@ -123,6 +130,27 @@ class InventoryChangeTests(unittest.TestCase):
         self.assertFalse(mail["online"])
         self.assertTrue(mail["present"])
 
+    def test_synthetic_copilot_data_stays_off_matrix(self) -> None:
+        self.assertFalse(
+            belongs_in_host_matrix(
+                {"id": COPILOT_DATA_ID, "name": "Copilot /data", "gone": True}
+            )
+        )
+        self.assertTrue(belongs_in_host_matrix({"id": "lxc:pve:1", "name": "mail"}))
+        self.assertFalse(
+            is_live_backup_target(
+                COPILOT_DATA_ID, live_ids={COPILOT_DATA_ID}, gone_ids=set()
+            )
+        )
+        self.assertFalse(
+            is_live_backup_target(
+                "lxc:old", live_ids={"lxc:stay"}, gone_ids={"lxc:old"}
+            )
+        )
+        self.assertTrue(
+            is_live_backup_target("lxc:stay", live_ids={"lxc:stay"}, gone_ids=set())
+        )
+
 
 class JobScopeTests(unittest.TestCase):
     def test_separate_lists_and_empty_means_none(self) -> None:
@@ -134,6 +162,16 @@ class JobScopeTests(unittest.TestCase):
         empty = ConfirmPolicy()
         self.assertFalse(in_job_scope(empty, kind="patch", bucket="security", target_id="lxc:1"))
         self.assertTrue(in_job_scope(empty, kind="backup", target_id="lxc:1"))
+        self.assertFalse(
+            in_job_scope(
+                empty, kind="backup", target_id="lxc:gone", gone_ids={"lxc:gone"}
+            )
+        )
+        self.assertFalse(
+            in_job_scope(
+                p, kind="patch", bucket="images", target_id="lxc:2", gone_ids={"lxc:2"}
+            )
+        )
 
 
 class InterviewKeepsScopeTests(unittest.TestCase):

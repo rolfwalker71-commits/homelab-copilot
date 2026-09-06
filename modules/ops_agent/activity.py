@@ -98,13 +98,26 @@ def filter_today(entries: list[dict[str, Any]], *, now: datetime | None = None) 
     return out
 
 
+def is_missing_backup_warn(row: dict[str, Any]) -> bool:
+    detail = str(row.get("detail") or row.get("reason") or "").strip()
+    return "keinen Backup-Plan" in detail or "Kein bestehender Copilot-Backup-Job" in detail
+
+
 def build_evening_brief(
     entries: list[dict[str, Any]],
     *,
     now: datetime | None = None,
+    gone_ids: set[str] | None = None,
+    live_ids: set[str] | None = None,
 ) -> str:
     """One German paragraph from today's log. Deterministic, no model."""
     today = filter_today(entries, now=now)
+    ignore = {str(x).strip() for x in (gone_ids or set()) if str(x).strip()}
+    live = (
+        {str(x).strip() for x in live_ids if str(x).strip()}
+        if live_ids is not None
+        else None
+    )
     if not today:
         return "Heute noch keine Agent-Tätigkeit."
 
@@ -139,7 +152,12 @@ def build_evening_brief(
     images = [r for r in patches if str(r.get("kind") or "") == "image"]
     pkgs = [r for r in patches if str(r.get("kind") or "") == "patch"]
     reboots = [r for r in today if r.get("action") == ACTION_REBOOT]
-    warns = [r for r in today if r.get("action") == ACTION_WARN]
+    warns = [
+        r
+        for r in today
+        if r.get("action") == ACTION_WARN
+        and not _ignore_brief_warn(r, ignore_ids=ignore, live_ids=live)
+    ]
     prunes = [
         r
         for r in today
@@ -200,3 +218,20 @@ def build_evening_brief(
     if not text.endswith("."):
         text += "."
     return text
+
+
+def _ignore_brief_warn(
+    row: dict[str, Any],
+    *,
+    ignore_ids: set[str],
+    live_ids: set[str] | None,
+) -> bool:
+    """Drop missing-backup nags for vanished / synthetic targets."""
+    tid = str(row.get("target_id") or "").strip()
+    if tid and tid in ignore_ids:
+        return True
+    if not is_missing_backup_warn(row):
+        return False
+    if live_ids is not None and tid and tid not in live_ids:
+        return True
+    return False

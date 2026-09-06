@@ -61,7 +61,15 @@ from ops_agent.planner import (
     propose_windows,
     Need,
 )
-from ops_agent.hosts import collect_live_hosts, split_inventory_changes
+from ops_agent.hosts import (
+    COPILOT_DATA_ID,
+    belongs_in_host_matrix,
+    collect_live_hosts,
+    exclude_synthetic_ids,
+    is_live_backup_target,
+    is_synthetic_copilot_data,
+    split_inventory_changes,
+)
 from ops_agent.activity import (
     ACTION_APPLY,
     ACTION_BACKUP_CHAIN,
@@ -129,7 +137,6 @@ PruneFn = Callable[[str], Awaitable[dict[str, Any] | None]]
 DestUsageFn = Callable[[], Awaitable[dict[str, Any]]]
 SmartFn = Callable[[], Awaitable[list[dict[str, Any]]]]
 
-COPILOT_DATA_ID = "copilot:data"
 COPILOT_STACK_HINTS = ("homelab-copilot", "hlops-data", "copilot-data")
 
 
@@ -265,11 +272,11 @@ class OpsEngine:
         return await self.store.get_policy()
 
     async def gone_ids(self) -> set[str]:
-        return {
+        return exclude_synthetic_ids(
             str(h.get("target_id") or "")
             for h in await self.store.list_known_hosts()
             if h.get("gone") and str(h.get("target_id") or "")
-        }
+        )
 
     async def _live_hosts(self) -> list[dict[str, Any]]:
         snap = self._get_snapshot()
@@ -287,28 +294,34 @@ class OpsEngine:
 
     async def reconcile_hosts(self) -> list[dict[str, Any]]:
         """Ask about new/removed guests. First empty known-set is seeded, no flood."""
+        await self._forget_synthetic_copilot_host()
         live = await self._live_hosts()
         known = await self.store.list_known_hosts()
         if not known:
             if live:
                 await self.store.seed_known_hosts(live)
+                await self._dismiss_vanished_no_backup_prompts(
+                    {str(h["id"]) for h in live}
+                )
                 await self._prompt_missing_backups(live)
                 await self._prompt_copilot_data()
             return []
         pending = await self.store.list_scope_prompts(status="waiting")
-        pending_ids = {str(p.get("target_id") or "") for p in pending if p.get("target_id")}
+        pending_ids = exclude_synthetic_ids(
+            str(p.get("target_id") or "") for p in pending if p.get("target_id")
+        )
         live_by_id = {str(h["id"]): h for h in live}
         live_ids = set(live_by_id)
-        present = {
+        present = exclude_synthetic_ids(
             str(h.get("target_id") or "")
             for h in known
             if not h.get("gone") and h.get("target_id")
-        }
-        gone = {
+        )
+        gone = exclude_synthetic_ids(
             str(h.get("target_id") or "")
             for h in known
             if h.get("gone") and h.get("target_id")
-        }
+        )
         known_by_id = {str(h.get("target_id") or ""): h for h in known}
         appeared, disappeared, returned = split_inventory_changes(
             live_ids=live_ids,
@@ -385,12 +398,15 @@ class OpsEngine:
         leftover = await self.store.list_scope_prompts(status="waiting")
         for prompt in leftover:
             tid = str(prompt.get("target_id") or "")
+            if is_synthetic_copilot_data(tid):
+                continue
             if prompt.get("kind") == "appeared" and tid and tid not in live_ids:
                 await self.store.dismiss_scope_prompt(
                     int(prompt["id"]),
                     reason="Wieder weg, bevor du entschieden hast.",
                 )
                 await self.store.mark_known_gone(tid)
+        await self._dismiss_vanished_no_backup_prompts(live_ids)
         await self._prompt_missing_backups(live)
         await self._prompt_copilot_data()
         return created
@@ -546,6 +562,8 @@ class OpsEngine:
             tid = str(k.get("target_id") or "")
             if not tid:
                 continue
+            if is_synthetic_copilot_data(tid):
+                continue
             if tid not in by_id:
                 by_id[tid] = {
                     "id": tid,
@@ -563,7 +581,10 @@ class OpsEngine:
             row["keep_preference"] = bool(k.get("keep_preference"))
         patch = {x.lower() for x in policy.patch_scope_ids}
         image = {x.lower() for x in policy.image_scope_ids}
-        hosts = sorted(by_id.values(), key=lambda r: str(r.get("name") or "").lower())
+        hosts = sorted(
+            (row for row in by_id.values() if belongs_in_host_matrix(row)),
+            key=lambda r: str(r.get("name") or "").lower(),
+        )
         for h in hosts:
             tid = str(h.get("id") or "").lower()
             h["patch"] = tid in patch
@@ -593,8 +614,12 @@ class OpsEngine:
             return []
         schedules = await bstore.list_schedules()
         snap = self._get_snapshot()
+        gone = await self.gone_ids()
         enriched: list[dict[str, Any]] = []
         for row in schedules:
+            parent = str(row.get("parent_id") or "").strip()
+            if parent and parent in gone:
+                continue
             item = dict(row)
             nxt = (
                 next_run_after(str(row.get("cron_expr") or ""), now)
@@ -1639,14 +1664,20 @@ class OpsEngine:
         return covered
 
     async def _prompt_missing_backups(self, live: list[dict[str, Any]]) -> None:
+        live_ids = {
+            str(h.get("id") or h.get("target_id") or "")
+            for h in live
+            if str(h.get("id") or h.get("target_id") or "")
+        }
+        gone = await self.gone_ids()
+        await self._dismiss_vanished_no_backup_prompts(live_ids)
         covered = await self._covered_backup_ids()
-        known = {str(h.get("target_id") or ""): h for h in await self.store.list_known_hosts()}
         for host in live:
             kind = str(host.get("kind") or "")
             if kind not in self._guest_kinds():
                 continue
             tid = str(host.get("id") or host.get("target_id") or "")
-            if not tid:
+            if not is_live_backup_target(tid, live_ids=live_ids, gone_ids=gone):
                 continue
             waiting = await self.store.find_waiting_prompt(tid)
             if tid in covered:
@@ -1656,8 +1687,7 @@ class OpsEngine:
                         reason="Backup-Zeitplan ist auf der Backup-Seite angelegt.",
                     )
                 continue
-            rec = known.get(tid) or {}
-            if rec.get("skip_backup") is not None:
+            if await self._backup_skip_decided(tid):
                 continue
             if waiting:
                 continue
@@ -1753,6 +1783,8 @@ class OpsEngine:
         running: set[str],
     ) -> str | None:
         tid = str(row.get("target_id") or "")
+        if tid in await self.gone_ids():
+            return REASON_HOST_GONE
         if tid in running:
             return "Auf diesem Ziel läuft bereits ein Auftrag."
         if disk.get(tid):
@@ -2488,25 +2520,83 @@ class OpsEngine:
             return False
         return False
 
+    async def _forget_synthetic_copilot_host(self) -> None:
+        """Drop the ghost Copilot-/data inventory row; keep a dedicated prompt if needed."""
+        for host in await self.store.list_known_hosts():
+            if is_synthetic_copilot_data(str(host.get("target_id") or "")):
+                await self.store.delete_known_host(COPILOT_DATA_ID)
+                break
+        for prompt in await self.store.list_scope_prompts(status="waiting"):
+            if not is_synthetic_copilot_data(str(prompt.get("target_id") or "")):
+                continue
+            if prompt.get("kind") in ("appeared", "disappeared"):
+                await self.store.dismiss_scope_prompt(
+                    int(prompt["id"]),
+                    reason="Copilot /data ist kein Host — Frage zurückgezogen.",
+                )
+
+    async def _backup_skip_decided(self, target_id: str) -> bool:
+        tid = str(target_id or "").strip()
+        if not tid:
+            return False
+        for host in await self.store.list_known_hosts():
+            if str(host.get("target_id") or "") == tid and host.get("skip_backup") is not None:
+                return True
+        for prompt in await self.store.list_scope_prompts(status="answered"):
+            if (
+                str(prompt.get("target_id") or "") == tid
+                and prompt.get("kind") == "no_backup"
+                and prompt.get("backup") is not None
+            ):
+                return True
+        return False
+
+    async def _dismiss_vanished_no_backup_prompts(self, live_ids: set[str]) -> None:
+        first_class = bool(await self._copilot_backup_stack())
+        planned = await self._copilot_already_planned()
+        for prompt in await self.store.list_scope_prompts(status="waiting"):
+            if prompt.get("kind") != "no_backup":
+                continue
+            tid = str(prompt.get("target_id") or "")
+            if not tid:
+                continue
+            if is_synthetic_copilot_data(tid):
+                if first_class and not planned:
+                    continue
+                await self.store.dismiss_scope_prompt(
+                    int(prompt["id"]),
+                    reason="Copilot /data ist kein Host — Frage zurückgezogen.",
+                )
+                continue
+            if tid in live_ids:
+                continue
+            await self.store.dismiss_scope_prompt(
+                int(prompt["id"]),
+                reason="Host ist weggefallen — Backup-Frage entfällt.",
+            )
+
     async def _prompt_copilot_data(self) -> None:
-        known = {
-            str(h.get("target_id") or ""): h
-            for h in await self.store.list_known_hosts()
-        }
-        rec = known.get(COPILOT_DATA_ID) or {}
-        if rec.get("skip_backup") is not None:
+        if await self._backup_skip_decided(COPILOT_DATA_ID):
             return
         if await self._copilot_already_planned():
+            waiting = await self.store.find_waiting_prompt(COPILOT_DATA_ID)
+            if waiting and waiting.get("kind") == "no_backup":
+                await self.store.dismiss_scope_prompt(
+                    int(waiting["id"]),
+                    reason="Backup-Zeitplan ist auf der Backup-Seite angelegt.",
+                )
+            return
+        if not await self._copilot_backup_stack():
+            waiting = await self.store.find_waiting_prompt(COPILOT_DATA_ID)
+            if waiting and waiting.get("kind") == "no_backup":
+                await self.store.dismiss_scope_prompt(
+                    int(waiting["id"]),
+                    reason="Copilot /data ist kein Host — Frage zurückgezogen.",
+                )
             return
         waiting = await self.store.find_waiting_prompt(COPILOT_DATA_ID)
         if waiting:
             return
-        await self.store.upsert_known_host(
-            target_id=COPILOT_DATA_ID,
-            target_name="Copilot /data",
-            kind="copilot",
-            gone=False,
-        )
         pid = await self.store.insert_scope_prompt(
             target_id=COPILOT_DATA_ID,
             target_name="Copilot /data",
@@ -2547,7 +2637,17 @@ class OpsEngine:
         day = now.date().isoformat()
         existing = await self.store.get_brief_for_day(day)
         log = await self.store.list_activity(limit=300)
-        text = build_evening_brief(log, now=now)
+        live_ids = {str(h["id"]) for h in await self._live_hosts() if h.get("id")}
+        if (
+            await self._copilot_backup_stack()
+            and not await self._copilot_already_planned()
+            and not await self._backup_skip_decided(COPILOT_DATA_ID)
+        ):
+            live_ids.add(COPILOT_DATA_ID)
+        gone = await self.gone_ids()
+        if COPILOT_DATA_ID not in live_ids:
+            gone.add(COPILOT_DATA_ID)
+        text = build_evening_brief(log, now=now, gone_ids=gone, live_ids=live_ids)
         if existing and existing.get("text") == text and not force:
             return existing
         saved = await self.store.save_brief(day=day, text=text)

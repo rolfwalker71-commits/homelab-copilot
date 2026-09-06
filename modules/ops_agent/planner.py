@@ -518,7 +518,7 @@ def propose_windows(
     cursor = preferred_start_min(live, now, quiet_start=quiet_start)
 
     for need in needs:
-        if need.target_id in gone and need.kind == KIND_PATCH:
+        if need.target_id in gone:
             skipped.append(
                 PlannedWindow(
                     kind=need.kind,

@@ -183,11 +183,11 @@ def in_job_scope(
     kind_n = str(kind or "").strip().lower()
     bucket_n = str(bucket or "").strip().lower()
     tid = str(target_id or "").strip()
-    if kind_n in ("backup", "drill", "restore"):
-        return True
     gone = {str(x).strip().lower() for x in (gone_ids or set()) if str(x).strip()}
     if tid and tid.lower() in gone:
         return False
+    if kind_n in ("backup", "drill", "restore"):
+        return True
     if bucket_n == "images" or kind_n == "image":
         return in_id_list(policy.image_scope_ids, tid)
     if kind_n == "patch":
