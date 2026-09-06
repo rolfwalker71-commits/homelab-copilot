@@ -218,6 +218,11 @@ class BoardUiContractTests(unittest.TestCase):
         self.assertIn("input[data-scope]", html)
         self.assertIn("await flushScopeSave()", html)
         self.assertIn("Haken speichern sich sofort", html)
+        self.assertIn("nextSlotOpen", html)
+        self.assertIn("renderNextList", html)
+        self.assertIn("data-slot", html)
+        self.assertIn("Jetzt starten", html)
+        self.assertNotIn("Übernommen aus dem bestehenden Backup-Zeitplan", html)
         policy_block = html.split("ops-policy-form")[-1]
         self.assertNotIn("patch_scope_ids", policy_block.split("ops-enabled")[0])
 

@@ -73,7 +73,7 @@
 <div id="ops-board" class="ops-board animate-in" aria-live="polite">
   <section class="ops-col surface p-3 sm:p-4" data-col="next">
     <h2 class="font-display text-base font-bold leading-snug">Als Nächstes</h2>
-    <div class="ops-col-body mt-3 space-y-2"></div>
+    <div class="ops-col-body ops-next-body mt-3 space-y-2"></div>
   </section>
   <section class="ops-col surface p-3 sm:p-4" data-col="running">
     <h2 class="font-display text-base font-bold leading-snug">Läuft</h2>
@@ -99,9 +99,13 @@
 {% endblock %}
 
 {% block scripts %}
+<template id="ops-ico-play">{{ ico('play', 16) }}</template>
 <script>
 (function () {
   const $ = (id) => document.getElementById(id);
+  const ICO_PLAY = ($('ops-ico-play') && $('ops-ico-play').innerHTML) || '';
+  const BERLIN_TZ = 'Europe/Berlin';
+  const nextSlotOpen = Object.create(null);
   function esc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -289,7 +293,169 @@
     return '<p class="text-sm text-[var(--muted)] leading-snug">' + esc(text) + '</p>';
   }
   function startBtn(id) {
-    return '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-start="' + esc(id) + '">Jetzt starten</button>';
+    return (
+      '<button type="button" class="ops-next-start" data-ops-start="' + esc(id) +
+        '" title="Jetzt starten" aria-label="Jetzt starten">' +
+        ICO_PLAY +
+        '<span class="ops-next-start-label">Jetzt starten</span>' +
+      '</button>'
+    );
+  }
+  function berlinParts(date) {
+    const parts = new Intl.DateTimeFormat('de-DE', {
+      timeZone: BERLIN_TZ,
+      weekday: 'short',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(date);
+    const out = {};
+    parts.forEach((p) => { out[p.type] = p.value; });
+    return out;
+  }
+  function berlinYmd(date) {
+    const p = berlinParts(date);
+    return p.year + '-' + p.month + '-' + p.day;
+  }
+  function nextYmd(ymd) {
+    const d = new Date(ymd + 'T12:00:00Z');
+    d.setUTCDate(d.getUTCDate() + 1);
+    return berlinYmd(d);
+  }
+  function windowSlot(w) {
+    let date = null;
+    if (w.start_iso) {
+      const parsed = new Date(w.start_iso);
+      if (!isNaN(parsed.getTime())) date = parsed;
+    }
+    if (date) {
+      const p = berlinParts(date);
+      let hour = Number(p.hour);
+      if (hour === 24) hour = 0;
+      const minute = Math.floor(Number(p.minute) / 10) * 10;
+      const hm = String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0');
+      const ymd = p.year + '-' + p.month + '-' + p.day;
+      return {
+        key: ymd + 'T' + hm,
+        ymd: ymd,
+        hm: hm,
+        weekday: String(p.weekday || '').replace(/\.$/, ''),
+        ms: date.getTime(),
+      };
+    }
+    const raw = String(w.start_hm || '00:00');
+    const m = raw.match(/(\d{1,2}):(\d{2})/);
+    const hour = m ? Number(m[1]) : 0;
+    const minute = m ? Math.floor(Number(m[2]) / 10) * 10 : 0;
+    const hm = String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0');
+    return { key: 't-' + hm, ymd: '', hm: hm, weekday: '', ms: (hour * 60 + minute) * 60000 };
+  }
+  function slotDayLabel(slot) {
+    if (!slot.ymd) return 'Heute';
+    const today = berlinYmd(new Date());
+    if (slot.ymd === today) return 'Heute';
+    if (slot.ymd === nextYmd(today)) return 'Morgen';
+    const bits = slot.ymd.split('-');
+    const ddmm = bits[2] + '.' + bits[1] + '.';
+    return (slot.weekday ? slot.weekday + ' ' : '') + ddmm;
+  }
+  function kindPlural(label, n) {
+    if (n === 1) return label;
+    if (label === 'Backup') return 'Backups';
+    if (label === 'Patch') return 'Patches';
+    if (label === 'Restore-Drill') return 'Restore-Drills';
+    return label + 's';
+  }
+  function kindCounts(items) {
+    const order = ['Backup', 'Patch', 'Restore-Drill'];
+    const counts = Object.create(null);
+    items.forEach((w) => {
+      const mapped = { backup: 'Backup', patch: 'Patch', drill: 'Restore-Drill' };
+      const k = w.kind_label || mapped[w.kind] || 'Fenster';
+      counts[k] = (counts[k] || 0) + 1;
+    });
+    return Object.keys(counts)
+      .sort((a, b) => {
+        const ia = order.indexOf(a);
+        const ib = order.indexOf(b);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b, 'de');
+      })
+      .map((k) => counts[k] + ' ' + kindPlural(k, counts[k]))
+      .join(' · ');
+  }
+  function groupNext(items) {
+    const map = new Map();
+    items.forEach((w) => {
+      const slot = windowSlot(w);
+      if (!map.has(slot.key)) map.set(slot.key, { slot: slot, items: [] });
+      map.get(slot.key).items.push(w);
+    });
+    return Array.from(map.values()).sort((a, b) => {
+      if (a.slot.ymd && b.slot.ymd && a.slot.ymd !== b.slot.ymd) {
+        return a.slot.ymd < b.slot.ymd ? -1 : 1;
+      }
+      if (a.slot.hm !== b.slot.hm) return a.slot.hm < b.slot.hm ? -1 : 1;
+      return a.slot.ms - b.slot.ms;
+    });
+  }
+  function groupStartMs(g) {
+    let min = Infinity;
+    g.items.forEach((w) => {
+      if (!w.start_iso) return;
+      const t = new Date(w.start_iso).getTime();
+      if (!isNaN(t) && t < min) min = t;
+    });
+    return min === Infinity ? g.slot.ms : min;
+  }
+  function upcomingSlotKey(groups) {
+    const now = Date.now();
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      if (g.slot.ymd && groupStartMs(g) >= now) return g.slot.key;
+    }
+    return groups.length ? groups[0].slot.key : '';
+  }
+  function nextRow(w, slot) {
+    const name = w.stack || w.target_name || w.target_id || 'Fenster';
+    const actor = w.actor_label || (w.via_agent ? 'durch Agent' : '');
+    const kind = w.kind_label && w.kind_label !== name ? w.kind_label : '';
+    const line = [slot.hm || w.start_hm, name, kind, w.duration_label, actor]
+      .filter(Boolean)
+      .join(' · ');
+    return (
+      '<li class="ops-next-row">' +
+        '<p class="ops-next-line">' + esc(line) + '</p>' +
+        (w.can_start ? startBtn(w.id) : '') +
+      '</li>'
+    );
+  }
+  function renderNextList(items) {
+    const groups = groupNext(items);
+    const upcoming = upcomingSlotKey(groups);
+    return groups.map((g) => {
+      const key = g.slot.key;
+      const isOpen = Object.prototype.hasOwnProperty.call(nextSlotOpen, key)
+        ? nextSlotOpen[key]
+        : key === upcoming;
+      const header = slotDayLabel(g.slot) + ' ' + g.slot.hm + ' · ' + kindCounts(g.items);
+      return (
+        '<details class="ops-next-group" data-slot="' + esc(key) + '"' +
+          (isOpen ? ' open' : '') + '>' +
+          '<summary class="ops-next-summary">' +
+            '<span class="ops-next-summary-inner">' +
+              '<span class="ops-next-chevron" aria-hidden="true"></span>' +
+              '<span class="ops-next-summary-text">' + esc(header) + '</span>' +
+            '</span>' +
+          '</summary>' +
+          '<ul class="ops-next-list">' +
+            g.items.map((w) => nextRow(w, g.slot)).join('') +
+          '</ul>' +
+        '</details>'
+      );
+    }).join('');
   }
   function renderBoard(data) {
     const quiet = $('ops-quiet');
@@ -322,6 +488,10 @@
       const items = cols[key];
       if (!items.length && !(key === 'waiting' && ((data.scope_prompts || []).length || (data.rollback_failed || []).length))) {
         body.innerHTML = empty(empties[key]);
+        return;
+      }
+      if (key === 'next') {
+        body.innerHTML = renderNextList(items);
         return;
       }
       if (key === 'waiting') {
@@ -363,10 +533,6 @@
         const actor = w.actor_label || (w.via_agent ? 'durch Agent' : '');
         const meta = [w.start_de || w.start_hm, w.duration_label, w.bucket_label, actor]
           .filter(Boolean).join(' · ');
-        let actions = '';
-        if (key === 'next' && w.can_start) {
-          actions = startBtn(w.id);
-        }
         let st = w.status === 'failed' ? 'Fehler' : (w.status === 'skipped' ? 'übersprungen' : '');
         if (w.rollback && w.rollback.status === 'ok') st = 'Zurückgesetzt';
         else if (w.rollback && w.rollback.status === 'failed') st = 'Fehler · Rollback fehlgeschlagen';
@@ -384,6 +550,12 @@
     });
     document.querySelectorAll('[data-ops-start]').forEach((btn) => {
       btn.addEventListener('click', () => act('/start', btn.getAttribute('data-ops-start')));
+    });
+    document.querySelectorAll('[data-col="next"] details[data-slot]').forEach((el) => {
+      el.addEventListener('toggle', () => {
+        const slot = el.getAttribute('data-slot');
+        if (slot) nextSlotOpen[slot] = el.open;
+      });
     });
     document.querySelectorAll('[data-prompt-save]').forEach((btn) => {
       btn.addEventListener('click', () => answerPrompt(btn.getAttribute('data-prompt-save'), 'appeared'));
