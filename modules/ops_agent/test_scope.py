@@ -267,12 +267,17 @@ class BoardUiContractTests(unittest.TestCase):
         self.assertIn("/scan-status", html)
         self.assertIn("Scan läuft", html)
         self.assertIn("ops-scan-banner", html)
+        self.assertIn("scanStatusText", html)
+        self.assertIn("current_index", html)
+        self.assertIn("status === 409", html)
+        self.assertIn("'Images'", html)
         self.assertIn("Heute-Zeitleiste", html)
         self.assertIn("Soll / Ist", html)
         self.assertIn("ops-timeline", html)
         self.assertIn("ops-tl-body", html)
         self.assertIn("min-width: 0", html)
         self.assertIn("max-width: 100%", html)
+        self.assertIn("overflow-x: hidden", html)
         self.assertIn("ops-ledger", html)
         self.assertIn("ops-running-note", html)
         self.assertNotIn("data-col=\"shifted\"", html)
@@ -295,6 +300,18 @@ class BoardUiContractTests(unittest.TestCase):
         self.assertNotIn("Übernommen aus dem bestehenden Backup-Zeitplan", html)
         policy_block = html.split("ops-policy-form")[-1]
         self.assertNotIn("patch_scope_ids", policy_block.split("ops-enabled")[0])
+
+    def test_scan_all_runs_patch_then_images(self) -> None:
+        src = Path(__file__).resolve().parents[1].joinpath("patcher/module.py").read_text(
+            encoding="utf-8"
+        )
+        start = src.find("async def _run_scan_all")
+        self.assertGreater(start, 0)
+        nxt = src.find("\nasync def ", start + 1)
+        body = src[start:nxt]
+        self.assertIn("_scan_one_target_sync", body)
+        self.assertIn("_scan_and_persist_images", body)
+        self.assertIn("_maybe_plan_after_scan", body)
 
 
 class _Ent:
@@ -416,6 +433,50 @@ class ScopePersistEngineTests(unittest.IsolatedAsyncioTestCase):
         neu = next(h for h in matrix["hosts"] if h["id"] == "lxc:pve:9")
         self.assertFalse(neu["patch"])
         self.assertFalse(neu["image"])
+
+
+class WindowLabelTests(unittest.TestCase):
+    def test_image_windows_show_as_images(self) -> None:
+        from datetime import datetime
+
+        from app.core.locale import BERLIN
+        from ops_agent.planner import KIND_PATCH, STATUS_ACCEPTED
+
+        engine = OpsEngine.__new__(OpsEngine)
+        now = datetime(2026, 9, 6, 18, 0, tzinfo=BERLIN)
+        packed = OpsEngine._serialize_window(
+            engine,
+            {
+                "kind": KIND_PATCH,
+                "bucket": "images",
+                "target_id": "lxc:1",
+                "target_name": "mail",
+                "start_hm": "21:00",
+                "duration_min": 15,
+                "status": STATUS_ACCEPTED,
+            },
+            now,
+        )
+        self.assertEqual(packed["kind_label"], "Images")
+        self.assertEqual(packed["bucket_label"], "Images")
+
+    def test_live_image_apply_labeled_images(self) -> None:
+        from ops_agent.planner import KIND_PATCH
+
+        engine = OpsEngine.__new__(OpsEngine)
+        card = OpsEngine._card_from_live_job(
+            engine,
+            {
+                "id": "j1",
+                "kind": "image-apply",
+                "target_id": "lxc:1",
+                "status": "running",
+                "phase": "zieht Image",
+                "percent": 40,
+            },
+            kind=KIND_PATCH,
+        )
+        self.assertEqual(card["kind_label"], "Images")
 
 
 if __name__ == "__main__":

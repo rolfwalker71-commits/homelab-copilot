@@ -253,9 +253,10 @@ async def api_scan_status() -> dict[str, Any]:
 async def api_scan_now(request: Request) -> dict[str, Any]:
     """Start existing patcher scan-all (includes image scan), then ops plan."""
     global _scan_task
-    from patcher.module import _run_scan_all
+    from patcher.module import _get_store, _run_scan_all
     from patcher.scheduler import SCAN_ALL, begin_scan_all
 
+    _get_store()
     begun = await begin_scan_all(trigger="manual")
     if begun is None:
         raise HTTPException(status_code=409, detail="Scan läuft bereits.")

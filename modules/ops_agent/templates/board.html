@@ -10,7 +10,14 @@
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+#ops-timeline-card > *,
+#ops-soll-ist > *,
+#ops-waiting > * {
+  min-width: 0;
+  max-width: 100%;
 }
 #ops-timeline,
 .ops-timeline {
@@ -29,6 +36,7 @@
   padding: 0;
   min-width: 0;
   max-width: 100%;
+  overflow: hidden;
 }
 .ops-tl-kicker {
   font-size: 0.75rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase;
@@ -46,6 +54,7 @@
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
+  overflow: hidden;
 }
 html[data-chrome="desktop"] .ops-tl-row {
   border-radius: var(--radius); border: 1px solid var(--outline);
@@ -70,10 +79,15 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
 .ops-tl-mark { font-weight: 700; font-size: 1.1rem; line-height: 1; }
 #ops-timeline .ops-next-group,
 #ops-timeline .ops-next-list,
-#ops-timeline .ops-next-row {
+#ops-timeline .ops-next-row,
+#ops-timeline .ops-next-summary,
+#ops-timeline .ops-next-summary-inner,
+#ops-timeline .ops-next-line {
   max-width: 100%;
   min-width: 0;
+  box-sizing: border-box;
 }
+#ops-running-note { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .ops-ledger-table { width: 100%; max-width: 100%; border-collapse: collapse; font-size: 0.875rem; table-layout: fixed; }
 .ops-ledger-table th, .ops-ledger-table td {
   text-align: left; vertical-align: top; padding: 0.45rem 0.4rem;
@@ -233,6 +247,7 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
   const BERLIN_TZ = 'Europe/Berlin';
   const nextSlotOpen = Object.create(null);
   let lastStartMsg = '';
+  let lastBoard = {};
   function esc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -507,15 +522,18 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
     if (n === 1) return label;
     if (label === 'Backup') return 'Backups';
     if (label === 'Patch') return 'Patches';
+    if (label === 'Images') return 'Images';
     if (label === 'Restore-Drill') return 'Restore-Drills';
     return label + 's';
   }
   function kindCounts(items) {
-    const order = ['Backup', 'Patch', 'Restore-Drill'];
+    const order = ['Backup', 'Patch', 'Images', 'Restore-Drill'];
     const counts = Object.create(null);
     items.forEach((w) => {
-      const mapped = { backup: 'Backup', patch: 'Patch', drill: 'Restore-Drill' };
-      const k = w.kind_label || mapped[w.kind] || 'Fenster';
+      const mapped = { backup: 'Backup', patch: 'Patch', image: 'Images', drill: 'Restore-Drill' };
+      const k = (w.bucket === 'images' || w.kind === 'image')
+        ? 'Images'
+        : (w.kind_label || mapped[w.kind] || 'Fenster');
       counts[k] = (counts[k] || 0) + 1;
     });
     return Object.keys(counts)
@@ -746,6 +764,7 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
     root.innerHTML = html;
   }
   function renderBoard(data) {
+    lastBoard = data || {};
     const quiet = $('ops-quiet');
     if (quiet) quiet.textContent = data.quiet_rule || '';
     const en = $('ops-enabled');
@@ -758,7 +777,7 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
     renderLedger(data.ledger || {});
     renderWaiting(data);
     renderTimeline(data);
-    applyScanUi(data.scan || null);
+    applyScanUi(data.scan || null, { skipTimeline: true });
     const interview = $('ops-interview');
     if (interview && data.policy && !data.policy.answered) {
       interview.hidden = false;
@@ -931,12 +950,28 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
   async function sleep(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
-  function applyScanUi(scan) {
+  function scanStatusText(scan) {
+    if (!scan) return '';
+    if (scan.error && !scan.running) return String(scan.error);
+    const bits = [];
+    if (scan.running) bits.push('Scan läuft…');
+    if (scan.total) {
+      bits.push((scan.current_index || 0) + '/' + scan.total);
+      if (scan.percent != null) bits.push(scan.percent + ' %');
+    }
+    if (scan.current_target) bits.push(scan.current_target);
+    const msg = String(scan.message || '').trim();
+    if (msg && bits.indexOf(msg) < 0) bits.push(msg);
+    if (!bits.length && scan.finished_at) bits.push('Scan fertig.');
+    return bits.join(' · ');
+  }
+  function applyScanUi(scan, opts) {
+    const skipTimeline = !!(opts && opts.skipTimeline);
     const btn = $('btn-ops-scan');
     const msg = $('ops-msg');
     const banner = $('ops-scan-banner');
     const running = !!(scan && scan.running);
-    const text = (scan && (scan.message || scan.error)) || '';
+    const text = scanStatusText(scan);
     if (btn) {
       btn.disabled = running;
       btn.textContent = running ? 'Scan läuft…' : 'Scan jetzt';
@@ -944,9 +979,7 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
     if (banner) {
       if (running || (scan && scan.error)) {
         banner.classList.remove('hidden');
-        banner.textContent = running
-          ? ('Scan läuft… ' + (text || 'Patch- und Image-Prüfung.'))
-          : String(scan.error || text);
+        banner.textContent = text || (running ? 'Scan läuft… Patch- und Image-Prüfung.' : '');
       } else if (text && scan && scan.finished_at) {
         banner.classList.remove('hidden');
         banner.textContent = text;
@@ -958,6 +991,11 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
     if (running && msg && text) msg.textContent = text;
     const act = $('ops-activity');
     if (running && act && !act.open) act.open = true;
+    if (!skipTimeline && lastBoard && $('ops-timeline')) {
+      lastBoard.scan = scan || lastBoard.scan || {};
+      renderTimeline(lastBoard);
+      bindActions();
+    }
   }
   async function readScanStatus() {
     try {
@@ -973,13 +1011,26 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
   }
   async function scanNow() {
     const msg = $('ops-msg');
-    const btn = $('btn-ops-scan');
-    applyScanUi({ running: true, message: 'Scan startet…' });
+    applyScanUi({ running: true, message: 'Scan startet… Patch- und Image-Prüfung.' });
     if (msg) msg.textContent = 'Scan läuft… Patch- und Image-Prüfung aller Hosts.';
     try {
-      const data = await api('/scan-now', { method: 'POST', body: '{}' });
+      let data = null;
+      const res = await fetch('/api/modules/ops_agent/scan-now', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      data = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        data = (await readScanStatus()) || {
+          running: true,
+          message: data.detail || 'Scan läuft bereits…',
+        };
+      } else if (!res.ok) {
+        throw new Error(data.detail || data.message || res.statusText);
+      }
       applyScanUi(data);
-      if (msg) msg.textContent = data.message || 'Scan läuft…';
+      if (msg) msg.textContent = scanStatusText(data) || data.message || 'Scan läuft…';
       try { await load(); } catch (_) {}
       let last = data;
       for (let i = 0; i < 180; i++) {
@@ -987,7 +1038,7 @@ html[data-chrome="desktop"] .ops-tl-row.is-run {
         if (st) {
           last = st;
           applyScanUi(st);
-          if (st.message && msg) msg.textContent = st.message;
+          if (msg) msg.textContent = scanStatusText(st) || st.message || msg.textContent;
           if (st.running === false) break;
         }
         await sleep(2000);

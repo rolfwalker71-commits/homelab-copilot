@@ -3373,10 +3373,17 @@ class OpsEngine:
         phase = str(raw.get("phase") or raw.get("message") or "läuft")
         pct = raw.get("percent")
         via = bool(raw.get("via_agent"))
+        job_kind = str(raw.get("kind") or "")
+        if kind == KIND_BACKUP:
+            kind_label = "Backup"
+        elif job_kind == "image-apply" or str(raw.get("bucket") or "") == "images":
+            kind_label = "Images"
+        else:
+            kind_label = "Patch"
         return {
             "id": f"live:{raw.get('id') or raw.get('job_id')}",
             "kind": kind,
-            "kind_label": "Backup" if kind == KIND_BACKUP else "Patch",
+            "kind_label": kind_label,
             "target_id": tid,
             "target_name": name,
             "stack": stack,
@@ -3453,6 +3460,8 @@ class OpsEngine:
             KIND_PATCH: "Patch",
             KIND_DRILL: "Restore-Drill",
         }.get(str(row.get("kind") or ""), row.get("kind"))
+        if self._is_image_window(row):
+            out["kind_label"] = "Images"
         bucket = str(row.get("bucket") or "")
         out["bucket_label"] = {
             "security": "Security",

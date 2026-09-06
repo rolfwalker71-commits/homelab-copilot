@@ -802,7 +802,9 @@ async def _run_scan_all(
     store = _store
     if store is None:
         SCAN_ALL.running = False
-        return {"ok": False, "error": "Store nicht bereit."}
+        SCAN_ALL.error = "Patcher-Store nicht bereit."
+        SCAN_ALL.message = "Scan nicht gestartet — Patcher nicht bereit."
+        return {"ok": False, "error": SCAN_ALL.error}
     all_targets = await list_targets(store, snapshot)
     excluded = await store.list_unmonitored_ids()
     targets = [t for t in all_targets if t.id not in excluded]
