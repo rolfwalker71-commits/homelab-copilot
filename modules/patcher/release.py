@@ -318,6 +318,15 @@ def hop_failure_message(hop: "ReleaseHop", code: int, blob: str) -> str:
             " DistUpgrade _addSecuritySources: ExplodedDeb822SourceEntry"
             " ohne .section (Ubuntu-Bug bei Deb822)."
         )
+    if (
+        "has no setter" in low
+        or "property 'suites'" in low
+        or 'property "suites"' in low
+    ):
+        extra += (
+            " DistUpgrade updateDeb822Sources: SourceEntry.suites ohne Setter"
+            " (klassische .list, keine Deb822-Zuweisung)."
+        )
     snap = (
         " Ein Proxmox-Snapshot (hlops-*) vor dem Versuch kann zur Rückkehr "
         "genutzt werden."

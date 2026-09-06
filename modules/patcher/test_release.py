@@ -284,6 +284,25 @@ class HopPinTests(unittest.TestCase):
         self.assertIn("AttributeError", msg)
         self.assertIn("DistUpgrade Exit: 1", msg)
 
+    def test_failure_surfaces_suites_no_setter(self) -> None:
+        s = suggest_ubuntu_release(version_id="24.10", today=ASOF)
+        assert s is not None
+        hop = s.hops[0]
+        blob = (
+            "DEBUG updateDeb822Sources()\n"
+            "File \".../plucky.d/DistUpgrade/DistUpgradeController.py\", "
+            "line 999, in updateDeb822Sources\n"
+            "    entry.suites = sorted(entry.suites, key=suite_ordering_key)\n"
+            "AttributeError: property 'suites' of 'SourceEntry' object "
+            "has no setter\n"
+            "DistUpgrade Exit: 1"
+        )
+        msg = hop_failure_message(hop, 1, blob)
+        self.assertIn("SourceEntry.suites ohne Setter", msg)
+        self.assertIn("updateDeb822Sources", msg)
+        self.assertIn("has no setter", msg)
+        self.assertIn("DistUpgrade Exit: 1", msg)
+
 
 class DebianSuggestTests(unittest.TestCase):
     def test_bookworm_trixie_suggest_only(self) -> None:

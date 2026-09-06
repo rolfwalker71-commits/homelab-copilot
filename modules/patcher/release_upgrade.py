@@ -102,7 +102,13 @@ def _release_upgrade_cmd(hop: ReleaseHop, *, container: bool) -> str:
     urls = upgrade_tool_url_candidates(hop.target)
     url_list = " ".join(urls)
     skip_migrate = should_skip_migrate_deb822(hop, container=container)
-    classic_sources = classic_sources_snippet(eol_codenames=eol_ubuntu_codenames())
+    from_code = ubuntu_codename(hop.source) or hop.source
+    to_code = hop.target_codename or ubuntu_codename(hop.target)
+    classic_sources = classic_sources_snippet(
+        eol_codenames=eol_ubuntu_codenames(),
+        from_codename=from_code,
+        to_codename=to_code,
+    )
     apt_clone = apt_clone_install_snippet()
     upgrader_patch = extracted_patcher_snippet(skip_migrate=skip_migrate)
     snap_skip = ""

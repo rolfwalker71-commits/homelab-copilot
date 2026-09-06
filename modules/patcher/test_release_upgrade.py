@@ -7,8 +7,12 @@ from datetime import date
 
 from patcher.distupgrade_quirks import (
     HLOPS_SKIP_MIGRATE_FLAG,
+    apply_extracted_cache_patches,
     apply_extracted_controller_patches,
+    apply_extracted_main_patches,
+    classic_sources_snippet,
     patch_signed_by_section,
+    remap_ubuntu_suite,
     should_skip_migrate_deb822,
 )
 from patcher.release import should_use_devel_flag, suggest_ubuntu_release
@@ -24,6 +28,68 @@ _LINE_761 = """
     def migrateToDeb822Sources(self):
         logging.debug("migrateToDeb822Sources()")
         self._do_migrate()
+"""
+
+_PLUCKY_CONTROLLER = '''
+class DistUpgradeController:
+    def _addSecuritySources(self):
+        e.section['Signed-By'] = '/usr/share/keyrings/ubuntu-archive-keyring.gpg'
+
+    def migrateToDeb822Sources(self):
+        logging.debug("migrateToDeb822Sources()")
+        self._do_migrate()
+
+    def updateDeb822Sources(self):
+        """
+        deb822-aware version of updateSourcesList()
+        """
+        logging.debug("updateDeb822Sources()")
+        self.sources = SourcesList(matcherPath=self.datadir, deb822=True)
+        self.sources.backup(self.sources_backup_ext)
+
+        if not self.rewriteDeb822Sources():
+            self.abort()
+
+        # Ensure suites and components are sorted.
+        for entry in self.sources:
+            if entry.disabled or entry.invalid:
+                continue
+
+            entry.comps = sorted(entry.comps, key=component_ordering_key)
+            entry.suites = sorted(entry.suites, key=suite_ordering_key)
+
+        self.sources.save()
+
+        return True
+
+    def doUpdate(self, showErrors=True, forceRetries=None):
+        logging.debug("running doUpdate() (showErrors=%s)" % showErrors)
+        logging.error("doUpdate() failed completely")
+        if showErrors:
+            self._view.error("Error during update", "network")
+        return False
+'''
+
+_PLUCKY_CACHE = '''
+    if kernel == 0:
+        logging.warning(
+            "estimate_kernel_initrd_size_in_boot() returned '0' for kernel?")
+        kernel = 16*1024*1024
+    if initrd == 0:
+        logging.warning(
+            "estimate_kernel_initrd_size_in_boot() returned '0' for initrd?")
+        initrd = 175*1024*1024
+'''
+
+_PLUCKY_MAIN = """
+SYSTEM_DIRS = ["/bin",
+              "/boot",
+              "/etc",
+              "/initrd",
+              "/lib",
+              "/usr",
+              "/var",
+              ]
 """
 
 
@@ -81,6 +147,15 @@ class ReleaseUpgradeCmdTests(unittest.TestCase):
         self.assertIn("hasattr", cmd)
         self.assertIn("signed_by", cmd)
         self.assertIn("_addSecuritySources gegen fehlendes .section", cmd)
+        self.assertIn("HLOPS_FROM_SUITE=\"oracular\"", cmd)
+        self.assertIn("HLOPS_TO_SUITE=\"plucky\"", cmd)
+        self.assertIn("updateDeb822Sources() skipped by hlops", cmd)
+        self.assertIn("SourceEntry.suites has no setter", cmd)
+        self.assertIn("doUpdate() cache.update failed — hlops continues", cmd)
+        self.assertIn("LXC has no /boot kernel", cmd)
+        self.assertIn("hlops: LXC ohne Kernel in /boot", cmd)
+        self.assertIn("apt-get update nach Quellen-Umschreibung", cmd)
+        self.assertIn("old-releases.ubuntu.com/ubuntu", cmd)
         self.assertNotIn("resolute.tar.gz", cmd)
         self.assertNotIn("do-release-upgrade -d", cmd)
         self.assertNotRegex(cmd, r"do-release-upgrade\s+-d\b")
@@ -141,6 +216,7 @@ class DistUpgradeQuirkTests(unittest.TestCase):
         result = apply_extracted_controller_patches(_LINE_761, skip_migrate=True)
         self.assertEqual(result.signed_by_count, 1)
         self.assertTrue(result.migrate_guard)
+        self.assertFalse(result.update_deb822_guard)
         self.assertIn(HLOPS_SKIP_MIGRATE_FLAG, result.text)
         self.assertIn("skipped by hlops", result.text)
         self.assertTrue(
@@ -148,7 +224,108 @@ class DistUpgradeQuirkTests(unittest.TestCase):
         )
         keep = apply_extracted_controller_patches(_LINE_761, skip_migrate=False)
         self.assertFalse(keep.migrate_guard)
+        self.assertFalse(keep.update_deb822_guard)
         self.assertNotIn(HLOPS_SKIP_MIGRATE_FLAG, keep.text)
+
+    def test_update_deb822_noop_and_suites_no_setter(self) -> None:
+        result = apply_extracted_controller_patches(
+            _PLUCKY_CONTROLLER, skip_migrate=True
+        )
+        self.assertEqual(result.signed_by_count, 1)
+        self.assertTrue(result.migrate_guard)
+        self.assertTrue(result.update_deb822_guard)
+        self.assertGreaterEqual(result.suites_assign_count, 1)
+        self.assertTrue(result.doupdate_guard)
+        self.assertIn("updateDeb822Sources() skipped by hlops", result.text)
+        self.assertIn("return True", result.text)
+        self.assertIn("hlops: SourceEntry.suites has no setter", result.text)
+        self.assertIn("try:", result.text)
+        self.assertIn("except (AttributeError, TypeError):", result.text)
+        self.assertIn("doUpdate() cache.update failed — hlops continues", result.text)
+        self.assertTrue(
+            any("updateDeb822Sources übersprungen" in n for n in result.notes)
+        )
+        self.assertTrue(
+            any("entry.suites-Zuweisung abgesichert" in n for n in result.notes)
+        )
+        self.assertTrue(
+            any("doUpdate() fährt bei cache.update-Fehler" in n for n in result.notes)
+        )
+        compile(result.text, "<plucky-controller>", "exec")
+        again = apply_extracted_controller_patches(result.text, skip_migrate=True)
+        self.assertFalse(again.migrate_guard)
+        self.assertFalse(again.update_deb822_guard)
+        self.assertEqual(again.suites_assign_count, 0)
+        self.assertFalse(again.doupdate_guard)
+        self.assertEqual(again.text, result.text)
+        keep = apply_extracted_controller_patches(
+            _PLUCKY_CONTROLLER, skip_migrate=False
+        )
+        self.assertFalse(keep.update_deb822_guard)
+        self.assertFalse(keep.doupdate_guard)
+        self.assertGreaterEqual(keep.suites_assign_count, 1)
+        self.assertNotIn("updateDeb822Sources() skipped by hlops", keep.text)
+
+    def test_multiline_suites_assign_not_split(self) -> None:
+        src = (
+            "    e.suites = sorted([self.toDist, self.toDist + '-updates'],\n"
+            "                      key=suite_ordering_key)\n"
+            "            entry.suites = sorted(entry.suites, key=suite_ordering_key)\n"
+        )
+        result = apply_extracted_controller_patches(src, skip_migrate=False)
+        self.assertEqual(result.suites_assign_count, 1)
+        self.assertIn("e.suites = sorted([self.toDist, self.toDist + '-updates'],", result.text)
+        self.assertIn("key=suite_ordering_key)", result.text)
+        self.assertIn("hlops: SourceEntry.suites has no setter", result.text)
+        self.assertNotIn(
+            "e.suites = sorted([self.toDist, self.toDist + '-updates'],\n"
+            "    except",
+            result.text,
+        )
+
+    def test_kernel_initrd_zero_and_system_dirs_boot(self) -> None:
+        cache = apply_extracted_cache_patches(_PLUCKY_CACHE)
+        self.assertTrue(cache.kernel_zero)
+        self.assertIn("hlops: LXC has no /boot kernel", cache.text)
+        self.assertIn("hlops: LXC has no /boot initrd", cache.text)
+        self.assertNotIn("kernel = 16*1024*1024", cache.text)
+        self.assertNotIn("initrd = 175*1024*1024", cache.text)
+        self.assertTrue(
+            any("Kernel/Initrd-Größe 0 bleibt 0" in n for n in cache.notes)
+        )
+        again = apply_extracted_cache_patches(cache.text)
+        self.assertFalse(again.kernel_zero)
+        self.assertEqual(again.text, cache.text)
+        main = apply_extracted_main_patches(_PLUCKY_MAIN)
+        self.assertTrue(main.boot_skip)
+        self.assertIn("hlops: LXC ohne Kernel in /boot", main.text)
+        self.assertIn("SYSTEM_DIRS = [d for d in SYSTEM_DIRS if d != '/boot']", main.text)
+        self.assertTrue(any("/boot aus SYSTEM_DIRS" in n for n in main.notes))
+        again_main = apply_extracted_main_patches(main.text)
+        self.assertFalse(again_main.boot_skip)
+        self.assertEqual(again_main.text, main.text)
+
+    def test_remap_ubuntu_suite_and_classic_snippet(self) -> None:
+        self.assertEqual(
+            remap_ubuntu_suite("oracular-security", "oracular", "plucky"),
+            "plucky-security",
+        )
+        self.assertEqual(remap_ubuntu_suite("oracular", "oracular", "plucky"), "plucky")
+        self.assertEqual(
+            remap_ubuntu_suite("noble-updates", "oracular", "plucky"),
+            "noble-updates",
+        )
+        snippet = classic_sources_snippet(
+            eol_codenames=("oracular", "plucky", "questing"),
+            from_codename="oracular",
+            to_codename="plucky",
+        )
+        self.assertIn("HLOPS_FROM_SUITE=\"oracular\"", snippet)
+        self.assertIn("HLOPS_TO_SUITE=\"plucky\"", snippet)
+        self.assertIn("remap_suite", snippet)
+        self.assertIn("old-releases.ubuntu.com", snippet)
+        self.assertIn("apt-get update nach Quellen-Umschreibung", snippet)
+        self.assertIn("Suites umgeschrieben", snippet)
 
     def test_skip_migrate_flag_lxc_and_eol(self) -> None:
         hop = _hop_2410_to_2504()
