@@ -14,7 +14,10 @@ from app.core.compose_apply import (
     compose_stack_shell,
     docker_create_argv_from_inspect,
     extra_networks_from_inspect,
+    hub_rate_limit_error_de,
+    is_hub_rate_limit,
     parse_compose_ls_json,
+    pull_fail_message_de,
 )
 
 
@@ -112,6 +115,22 @@ class LabelToArgvTests(unittest.TestCase):
     def test_no_cwd_without_working_dir(self) -> None:
         argv = compose_stack_argv(project="x", config_files=["a.yml"], extra=["pull"])
         self.assertEqual(compose_stack_shell(working_dir=None, argv=argv), " ".join(argv))
+
+    def test_hub_rate_limit_german_not_english_log(self) -> None:
+        raw = (
+            "Error toomanyrequests: You have reached your unauthenticated "
+            "pull rate limit. https://www.docker.com/increase-rate-limit"
+        )
+        self.assertTrue(is_hub_rate_limit(raw))
+        self.assertTrue(is_hub_rate_limit("docker compose pull fehlgeschlagen: " + raw))
+        msg = pull_fail_message_de(raw, compose=True)
+        self.assertEqual(msg, hub_rate_limit_error_de())
+        self.assertIn("Docker-Hub-Limit", msg)
+        self.assertIn("ohne Login", msg)
+        self.assertIn("docker login", msg)
+        self.assertNotIn("toomanyrequests", msg)
+        self.assertFalse(is_hub_rate_limit("manifest unknown"))
+        self.assertIn("fehlgeschlagen", pull_fail_message_de("manifest unknown", compose=True))
 
 
 class RecreateArgvTests(unittest.TestCase):

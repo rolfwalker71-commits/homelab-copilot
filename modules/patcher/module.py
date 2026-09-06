@@ -19,6 +19,7 @@ if str(_MODULES_ROOT) not in sys.path:
     sys.path.insert(0, str(_MODULES_ROOT))
 
 from app.config import get_settings
+from app.core.compose_apply import hub_rate_limit_error_de, is_hub_rate_limit
 from app.core.docker_control import (
     DockerControlError,
     apply_image_updates,
@@ -635,12 +636,17 @@ async def _run_image_apply_job(
             phase="Fertig",
         )
     except (DockerControlError, RuntimeError) as exc:
-        msg = getattr(exc, "message", None) or str(exc)
+        raw = getattr(exc, "message", None) or str(exc)
+        rate = is_hub_rate_limit(raw)
+        msg = hub_rate_limit_error_de() if rate else raw
+        result = _fail_result(snap_info, via_agent=via_agent)
+        if rate:
+            result["rate_limit"] = True
         JOBS.finish(
             job_id,
             status="failed",
             error=msg,
-            result=_fail_result(snap_info, via_agent=via_agent),
+            result=result,
         )
     except Exception as exc:
         logger.exception("image-apply job failed")

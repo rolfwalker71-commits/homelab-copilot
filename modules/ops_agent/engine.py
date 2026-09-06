@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+from app.core.compose_apply import hub_rate_limit_error_de, is_hub_rate_limit
 from app.core.locale import BERLIN, format_de, iso_utc, now_berlin
 from app.core.snapshots import guest_can_snapshot
 from backup_verifier.cron import preset_to_cron
@@ -32,6 +33,7 @@ from ops_agent.planner import (
     REASON_DEST_FULL,
     REASON_HOST_GONE,
     REASON_HOST_OFFLINE_CHAIN,
+    REASON_HUB_RATE_LIMIT,
     REASON_HUNG,
     REASON_OUT_OF_FOCUS,
     REASON_CAPACITY_WARN,
@@ -111,6 +113,7 @@ from ops_agent.capacity import (
 )
 from ops_agent.image_snaps import ImageSnap, remember_after_image, snap_from_job_result
 from ops_agent.lessons import (
+    ERROR_RATE_LIMIT,
     classify_error_class,
     error_short,
     host_kind_of,
@@ -149,6 +152,7 @@ DestUsageFn = Callable[[], Awaitable[dict[str, Any]]]
 SmartFn = Callable[[], Awaitable[list[dict[str, Any]]]]
 
 COPILOT_STACK_HINTS = ("homelab-copilot", "hlops-data", "copilot-data")
+HUB_RATE_LIMIT_SHIFT_MIN = 90
 
 
 def _schedule_method_fields(row: dict[str, Any]) -> dict[str, Any]:
@@ -1423,6 +1427,10 @@ class OpsEngine:
         error: str,
         halt_wave: bool = True,
     ) -> str:
+        if is_hub_rate_limit(error):
+            return await self._defer_hub_rate_limit(
+                row, job=job, job_id=job_id, error=error
+            )
         rec = await self._maybe_rollback_failed_apply(
             {**row, "job_id": job_id or row.get("job_id") or ""},
             job,
@@ -1441,6 +1449,68 @@ class OpsEngine:
         if halt_wave:
             await self.store.save_settings(patch_halted=True)
             await self._skip_remaining_patches(agent_phrase("wave_stopped"))
+        return reason
+
+    async def _defer_hub_rate_limit(
+        self,
+        row: dict[str, Any],
+        *,
+        job: Any,
+        job_id: str | None,
+        error: str,
+    ) -> str:
+        """Pull quota — nothing applied. Keep snap, no rollback, retry later."""
+        now = now_berlin()
+        new_dt = snap_10_minutes(now + timedelta(minutes=HUB_RATE_LIMIT_SHIFT_MIN))
+        new_iso = iso_utc(new_dt)
+        new_hm = format_hhmm(clock_of(abs_minutes(new_dt, day_start(now))))
+        old_iso = str(row.get("start_iso") or "")
+        old_hm = str(row.get("start_hm") or "")
+        reason = by_agent(REASON_HUB_RATE_LIMIT)
+        de = hub_rate_limit_error_de()
+        jid = str(job_id or row.get("job_id") or "")
+        await self.store.update_window(
+            int(row["id"]),
+            status=STATUS_ACCEPTED,
+            job_id=jid or None,
+            start_iso=new_iso,
+            start_hm=new_hm,
+            reason=reason,
+        )
+        if old_iso != new_iso or old_hm != new_hm:
+            await self.store.add_shift(
+                int(row["id"]),
+                old_start_iso=old_iso,
+                old_start_hm=old_hm,
+                new_start_iso=new_iso,
+                new_start_hm=new_hm,
+                reason=reason,
+            )
+        await self._log_activity(
+            ACTION_SHIFTED,
+            result=RESULT_OK,
+            kind="image" if self._is_image_window(row) else KIND_PATCH,
+            row=row,
+            detail=f"{old_hm} → {new_hm}: {reason}",
+        )
+        self._log_job_line(jid, by_agent(de))
+        if job is not None:
+            prev = dict(getattr(job, "result", None) or {})
+            prev["rate_limit"] = True
+            try:
+                job.result = prev
+            except Exception:
+                logger.info("rate_limit am Job-Result nicht gesetzt", exc_info=True)
+        if self._notify_shift is not None:
+            try:
+                await self._notify_shift(
+                    agent_phrase("window_shifted"),
+                    f"{row.get('target_name') or row.get('stack')}: "
+                    f"{old_hm} → {new_hm}. {reason}",
+                )
+            except Exception:
+                logger.info("Push nach Hub-Limit fehlgeschlagen", exc_info=True)
+        _ = error
         return reason
 
     def _parse_start(self, row: dict[str, Any]) -> datetime | None:
@@ -1550,19 +1620,21 @@ class OpsEngine:
                         await self._maybe_prune_after_image(row)
                     finished_any = True
                 elif st == "failed":
+                    err = str(getattr(job, "error", "") or "Patch fehlgeschlagen.")
                     await self._fail_patch_window(
                         row,
                         job=job,
                         job_id=job_id,
-                        error=str(getattr(job, "error", "") or "Patch fehlgeschlagen."),
+                        error=err,
                     )
-                    await self._log_activity(
-                        ACTION_APPLY,
-                        result=RESULT_FAIL,
-                        kind="image" if self._is_image_window(row) else KIND_PATCH,
-                        row=row,
-                        detail=str(getattr(job, "error", "") or "Patch fehlgeschlagen."),
-                    )
+                    if not is_hub_rate_limit(err):
+                        await self._log_activity(
+                            ACTION_APPLY,
+                            result=RESULT_FAIL,
+                            kind="image" if self._is_image_window(row) else KIND_PATCH,
+                            row=row,
+                            detail=err,
+                        )
                     finished_any = True
         if finished_any:
             await self._advance_backup_chain()
@@ -1616,6 +1688,8 @@ class OpsEngine:
         host_kind = host_kind_of(str(row.get("target_id") or ""))
         job_kind = self._window_job_kind(row)
         err_class = classify_error_class(error)
+        if err_class == ERROR_RATE_LIMIT:
+            return {}
         rollback_ran = str((rollback or {}).get("status") or "") == "ok"
         why = why_de(err_class)
         nxt = next_action_de(host_kind=host_kind, job_kind=job_kind)
@@ -2915,6 +2989,12 @@ class OpsEngine:
                     job_id=job_id,
                     error=err or "Patch nicht gestartet.",
                 )
+                if is_hub_rate_limit(err) or is_hub_rate_limit(reason):
+                    if replan:
+                        await self.watch_and_shift(force=True)
+                    result = await self.store.get_window(window_id)
+                    assert result is not None
+                    return result
                 raise RuntimeError(reason)
             await self.store.update_window(window_id, status=STATUS_RUNNING, job_id=job_id)
             await self._note_scan_on_job(row, job_id)

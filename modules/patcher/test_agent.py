@@ -9,6 +9,7 @@ from patcher.agent import (
     HostContext,
     HostPending,
     PlannedItem,
+    banner_text,
     can_auto_apply_security,
     evaluate_gates,
     group_wave,
@@ -207,6 +208,30 @@ class ExplanationTests(unittest.TestCase):
         )
         self.assertIn("Welle", hist)
         self.assertIn("dpkg", hist)
+
+        rate = explain_wave_item(
+            {
+                "target_name": "mail",
+                "bucket": "images",
+                "status": "rate_limit",
+                "package_filter": "images",
+                "packages": ["s1t5/mailarchiver:latest"],
+                "error_message": (
+                    "Error toomanyrequests: You have reached your "
+                    "unauthenticated pull rate limit."
+                ),
+            }
+        )
+        self.assertIn("Docker-Hub-Limit", rate)
+        self.assertIn("ohne Login", rate)
+        self.assertNotIn("toomanyrequests", rate)
+        self.assertNotIn("fehlgeschlagen", rate.lower())
+        self.assertIn("Docker-Hub-Limit — später erneut", banner_text(
+            [{"status": "rate_limit", "bucket": "images"}]
+        ))
+        self.assertNotIn("fehlgeschlagen", banner_text(
+            [{"status": "rate_limit", "bucket": "images"}]
+        ))
 
 
 if __name__ == "__main__":

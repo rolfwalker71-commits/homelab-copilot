@@ -10,11 +10,13 @@ from unittest.mock import AsyncMock
 from app.core.locale import iso_utc, now_berlin
 from ops_agent.actor import VIA_AGENT, actor_fields, agent_phrase, by_agent
 from ops_agent.engine import OpsEngine
-from ops_agent.planner import KIND_PATCH, SOURCE_AGENT, STATUS_RUNNING
+from ops_agent.planner import KIND_PATCH, SOURCE_AGENT, STATUS_ACCEPTED, STATUS_RUNNING
 from ops_agent.rollback import (
     REASON_APPLY_FAILED,
+    REASON_RATE_LIMIT,
     REASON_TIMEOUT,
     REASON_UNHEALTHY,
+    SKIP_RATE_LIMIT,
     classify_fail_reason,
     plan_rollback,
     snap_name_from_logs,
@@ -71,6 +73,24 @@ class PlanRollbackTests(unittest.TestCase):
         self.assertEqual(classify_fail_reason("SSH-Befehl-Timeout zu 1.2.3.4"), REASON_TIMEOUT)
         self.assertEqual(classify_fail_reason("Gast unhealthy after apply"), REASON_UNHEALTHY)
         self.assertEqual(classify_fail_reason("apt-get exit 1"), REASON_APPLY_FAILED)
+        self.assertEqual(
+            classify_fail_reason(
+                "Error toomanyrequests: You have reached your unauthenticated pull rate limit."
+            ),
+            REASON_RATE_LIMIT,
+        )
+
+    def test_rate_limit_never_rolls_back(self) -> None:
+        plan = plan_rollback(
+            job_kind="image-apply",
+            target_id="lxc:1",
+            result={"snapshot": {"skipped": False, "name": "hlops-mail"}},
+            error="docker compose pull fehlgeschlagen: Error toomanyrequests",
+        )
+        self.assertEqual(plan.action, "skip")
+        self.assertEqual(plan.reason_code, REASON_RATE_LIMIT)
+        self.assertEqual(plan.skip_reason, SKIP_RATE_LIMIT)
+        self.assertIn("Kein Rollback", plan.skip_reason)
 
     def test_snap_from_result_or_log(self) -> None:
         plan = plan_rollback(
@@ -247,6 +267,36 @@ class RollbackEngineTests(unittest.IsolatedAsyncioTestCase):
         win = (await self.store.list_windows(statuses=["failed"]))[0]
         self.assertIn("Zurückgesetzt", win["reason"])
         self.assertIn(VIA_AGENT, win["reason"])
+
+    async def test_rate_limit_shifts_no_rollback_no_lesson(self) -> None:
+        job = JOBS.create(kind="image-apply", target_id="lxc:pve:1", via_agent=True)
+        JOBS.finish(
+            job.id,
+            status="failed",
+            error="Error toomanyrequests: You have reached your unauthenticated pull rate limit.",
+            result={"snapshot": {"skipped": False, "name": "hlops-mail"}},
+        )
+        rb = AsyncMock()
+        engine = _engine(self.store, rollback=rb)
+        row = await self._window(job_id=job.id, bucket="images")
+        reason = await engine._fail_patch_window(
+            row,
+            job=JOBS.get(job.id),
+            job_id=job.id,
+            error="Error toomanyrequests: You have reached your unauthenticated pull rate limit.",
+        )
+        rb.assert_not_awaited()
+        self.assertIn("Docker-Hub-Limit", reason)
+        self.assertIn(VIA_AGENT, reason)
+        fresh = await self.store.get_window(int(row["id"]))
+        assert fresh is not None
+        self.assertEqual(fresh["status"], STATUS_ACCEPTED)
+        self.assertNotEqual(fresh["start_iso"], row["start_iso"])
+        self.assertIn("Docker-Hub-Limit", fresh["reason"])
+        self.assertEqual(len(await self.store.list_rollbacks()), 0)
+        self.assertEqual(len(await self.store.list_lessons()), 0)
+        settings = await self.store.get_settings()
+        self.assertFalse(settings.get("patch_halted"))
 
 
 if __name__ == "__main__":

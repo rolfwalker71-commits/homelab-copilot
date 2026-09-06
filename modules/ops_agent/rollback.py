@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.compose_apply import is_hub_rate_limit
 from ops_agent.actor import actor_fields, by_agent
 from ops_agent.image_snaps import snap_from_job_result
 
@@ -14,11 +15,13 @@ ELIGIBLE_KINDS = frozenset({"apply", "image-apply"})
 REASON_APPLY_FAILED = "apply_failed"
 REASON_TIMEOUT = "timeout"
 REASON_UNHEALTHY = "unhealthy"
+REASON_RATE_LIMIT = "rate_limit"
 
 REASON_LABELS_DE = {
     REASON_APPLY_FAILED: "Apply fehlgeschlagen",
     REASON_TIMEOUT: "Timeout",
     REASON_UNHEALTHY: "Ungesund nach Apply",
+    REASON_RATE_LIMIT: "Docker-Hub-Limit",
 }
 
 JOB_KIND_LABELS_DE = {
@@ -32,6 +35,9 @@ SKIP_NO_SNAP = "Kein Pre-Apply-Snapshot — Rollback übersprungen."
 SKIP_KIND = "Kein autonomes Rollback für diesen Auftragstyp."
 SKIP_ALREADY = "Rollback bereits versucht — kein weiterer Anlauf."
 SKIP_NO_TARGET = "Kein Ziel für Rollback."
+SKIP_RATE_LIMIT = (
+    "Docker-Hub-Limit — nichts eingespielt, Snapshot bleibt. Kein Rollback."
+)
 
 _SNAP_LOG = re.compile(
     r"Proxmox-Snapshot\s+[„\"]([^\"”]+)[“\"]\s+angelegt",
@@ -49,6 +55,8 @@ class RollbackPlan:
 
 
 def classify_fail_reason(error: str | None) -> str:
+    if is_hub_rate_limit(error):
+        return REASON_RATE_LIMIT
     low = (error or "").lower()
     if "timeout" in low or "zeitüberschreitung" in low:
         return REASON_TIMEOUT
@@ -112,6 +120,8 @@ def plan_rollback(
     kind = str(job_kind or "").strip()
     if already:
         return RollbackPlan("skip", kind, "", reason, SKIP_ALREADY)
+    if reason == REASON_RATE_LIMIT:
+        return RollbackPlan("skip", kind, "", reason, SKIP_RATE_LIMIT)
     if kind not in ELIGIBLE_KINDS:
         return RollbackPlan("skip", kind, "", reason, SKIP_KIND)
     tid = str(target_id or "").strip()

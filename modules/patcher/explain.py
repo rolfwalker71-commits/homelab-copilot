@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any
 
+from app.core.compose_apply import hub_rate_limit_error_de, is_hub_rate_limit
 from ops_agent.actor import agent_phrase, by_agent, is_via_agent
 from patcher.config import PatcherSettings, get_patcher_settings
 from patcher.llm import LlmError
@@ -101,6 +102,12 @@ def explain_wave_item(item: dict[str, Any]) -> str:
             sentences.append(agent_phrase("patches_applied" if bucket != "images" else "images_applied") + ".")
         else:
             sentences.append("Fertig. Der nächste Host der Welle folgt nur nach diesem Erfolg.")
+    elif status == "rate_limit" or is_hub_rate_limit(error):
+        sentences.append(hub_rate_limit_error_de())
+        sentences.append(
+            "Nichts eingespielt — Snapshot bleibt, kein Rollback. "
+            "Die Welle pausiert und versucht später erneut."
+        )
     elif status == "failed":
         sentences.append(
             "Die Welle stoppt hier — kein stiller Retry."
@@ -145,7 +152,10 @@ def explain_apply_run(run: dict[str, Any]) -> str:
         sentences.append(f"Image-Apply auf {name} (bestehender Image-Pfad).")
     else:
         sentences.append(f"Apply ({_filter_label(filt)}) auf {name}.")
-    if status == "failed":
+    if status == "rate_limit" or is_hub_rate_limit(error):
+        sentences.append(hub_rate_limit_error_de())
+        sentences.append("Nichts eingespielt — Snapshot bleibt, kein Rollback.")
+    elif status == "failed":
         sentences.append("Fehlgeschlagen. Die Welle stoppt bei einem Apply-Fehler ohne Retry.")
         if error:
             sentences.append(error)
@@ -226,6 +236,9 @@ def explain_patch_job(job: dict[str, Any]) -> str:
         else:
             sentences.append(message or "Erfolgreich abgeschlossen.")
         sentences.append("Als Nächstes: nächsten Host der Welle oder manuell den Scan prüfen.")
+    elif status == "failed" and is_hub_rate_limit(error or message):
+        sentences.append(hub_rate_limit_error_de())
+        sentences.append("Nichts eingespielt — Snapshot bleibt, kein Rollback.")
     elif status == "failed":
         sentences.append("Fehlgeschlagen — die Welle stoppt bei einem Apply-Fehler ohne Retry-Schleife.")
         if error or message:

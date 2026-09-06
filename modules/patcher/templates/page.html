@@ -993,6 +993,7 @@
     if (st === 'running') return chip('läuft', 'chip-pending');
     if (st === 'success') return chip('ok', 'chip-running');
     if (st === 'failed') return chip('Fehler', 'chip-stopped');
+    if (st === 'rate_limit') return chip('Hub-Limit', 'chip-pending');
     if (st === 'skipped') return chip('übersprungen', 'chip-unknown');
     return chip(st, 'chip-unknown');
   }
@@ -1041,8 +1042,8 @@
     }
     if (list) {
       list.innerHTML = items.map(function (it) {
-        const waiting = it.status === 'waiting_confirm' || it.status === 'blocked' || (it.needs_confirm && !it.confirmed && it.status !== 'success' && it.status !== 'failed' && it.status !== 'skipped');
-        const expl = (it.status === 'failed' || it.status === 'waiting_confirm' || it.status === 'blocked' || it.status === 'ready')
+        const waiting = it.status === 'waiting_confirm' || it.status === 'blocked' || (it.needs_confirm && !it.confirmed && it.status !== 'success' && it.status !== 'failed' && it.status !== 'skipped' && it.status !== 'rate_limit');
+        const expl = (it.status === 'failed' || it.status === 'rate_limit' || it.status === 'waiting_confirm' || it.status === 'blocked' || it.status === 'ready')
           ? '<p class="mt-1 text-sm leading-snug break-words">' + esc(it.explanation || '') + '</p>'
           : '';
         return (

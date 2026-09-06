@@ -74,6 +74,9 @@ REASON_EOL_PROPOSE = (
 )
 REASON_PRUNE = "Ungenutzte Images bereinigt nach grüner Image-Welle"
 REASON_COPILOT_DATA = "Copilot /data hat keinen Backup-Plan. So gewollt?"
+REASON_HUB_RATE_LIMIT = (
+    "Docker-Hub-Limit (ohne Login) — später erneut"
+)
 
 DURATION_BACKUP = DEFAULT_INTERVAL
 DURATION_PATCH_SECURITY = 20

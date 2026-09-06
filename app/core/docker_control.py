@@ -22,6 +22,7 @@ from app.core.compose_apply import (
     compose_ls_match,
     compose_skip_reason_de,
     compose_spec_from_inspects,
+    pull_fail_message_de,
     compose_stack_argv,
     compose_stack_shell,
     docker_create_argv_from_inspect,
@@ -1488,7 +1489,9 @@ async def _pull_and_recreate_without_compose(
         )
         if code != 0:
             raise DockerControlError(
-                f"docker pull {image} fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                pull_fail_message_de(
+                    (stderr or stdout or "").strip(), compose=False
+                ),
                 status_code=502,
             )
 
@@ -1808,7 +1811,9 @@ async def apply_image_updates(
             logs.append((stdout or stderr or "").strip()[:4000])
             if code != 0:
                 raise DockerControlError(
-                    f"docker compose pull fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                    pull_fail_message_de(
+                        (stderr or stdout or "").strip(), compose=True
+                    ),
                     status_code=502,
                 )
             if restart:
@@ -1870,7 +1875,9 @@ async def apply_image_updates(
             logs.append((stdout or stderr or "").strip()[:2000])
             if code != 0:
                 raise DockerControlError(
-                    f"docker pull {image} fehlgeschlagen: {(stderr or stdout or '').strip()[:240]}",
+                    pull_fail_message_de(
+                        (stderr or stdout or "").strip(), compose=False
+                    ),
                     status_code=502,
                 )
             pulled.append(image)

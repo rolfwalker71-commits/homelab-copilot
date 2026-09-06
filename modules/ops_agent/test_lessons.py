@@ -7,6 +7,7 @@ import unittest
 from ops_agent.lessons import (
     ERROR_DISK,
     ERROR_DPKG_LOCK,
+    ERROR_RATE_LIMIT,
     ERROR_TIMEOUT,
     classify_error_class,
     packages_key,
@@ -20,6 +21,12 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify_error_class("ENOSPC disk voll"), ERROR_DISK)
         self.assertEqual(classify_error_class("Could not get lock /var/lib/dpkg"), ERROR_DPKG_LOCK)
         self.assertEqual(classify_error_class("SSH-Befehl-Timeout"), ERROR_TIMEOUT)
+        self.assertEqual(
+            classify_error_class(
+                "Error toomanyrequests: You have reached your unauthenticated pull rate limit."
+            ),
+            ERROR_RATE_LIMIT,
+        )
 
 
 class HoldTests(unittest.TestCase):
@@ -69,6 +76,24 @@ class HoldTests(unittest.TestCase):
             [row, dict(row)], packages_key="curl", host_kind="lxc", job_kind="patch"
         )
         self.assertIsNotNone(hold)
+
+    def test_rate_limit_never_holds_image(self) -> None:
+        row = {
+            "packages_key": "s1t5/mailarchiver:latest",
+            "host_kind": "lxc",
+            "job_kind": "image",
+            "error_class": ERROR_RATE_LIMIT,
+            "rollback_ran": False,
+            "why_de": "Docker-Hub-Limit.",
+        }
+        self.assertIsNone(
+            should_hold(
+                [row, dict(row), dict(row)],
+                packages_key="s1t5/mailarchiver:latest",
+                host_kind="lxc",
+                job_kind="image",
+            )
+        )
 
 
 class ScanNoteTests(unittest.TestCase):

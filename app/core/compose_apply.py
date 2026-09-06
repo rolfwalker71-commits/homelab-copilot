@@ -31,6 +31,18 @@ _COMPOSE_SKIP_DE = (
     "Container werden neu erzeugt."
 )
 
+HUB_RATE_LIMIT_DE = (
+    "Docker-Hub-Limit (ohne Login) — später erneut. "
+    "Optional: auf dem Pull-Host docker login für höhere Limits."
+)
+
+_HUB_RATE_LIMIT = re.compile(
+    r"toomanyrequests|too many requests|"
+    r"unauthenticated pull rate limit|pull rate limit|"
+    r"increase-rate-limit|docker-hub-limit",
+    re.I,
+)
+
 
 def normalize_guest_path(path: str) -> str | None:
     """Absolute guest path without ``..``. None if empty or unsafe."""
@@ -221,6 +233,26 @@ def compose_ls_match(
 
 def compose_skip_reason_de() -> str:
     return _COMPOSE_SKIP_DE
+
+
+def is_hub_rate_limit(text: str | None) -> bool:
+    """True when Docker Hub refused a pull for unauthenticated quota."""
+    return bool(_HUB_RATE_LIMIT.search(text or ""))
+
+
+def hub_rate_limit_error_de() -> str:
+    return HUB_RATE_LIMIT_DE
+
+
+def pull_fail_message_de(raw: str, *, compose: bool = False) -> str:
+    """German pull error — Hub quota, not a wall of English registry logs."""
+    if is_hub_rate_limit(raw):
+        return hub_rate_limit_error_de()
+    kind = "docker compose pull" if compose else "docker pull"
+    detail = " ".join((raw or "").split())[:240]
+    if detail:
+        return f"{kind} fehlgeschlagen: {detail}"
+    return f"{kind} fehlgeschlagen."
 
 
 def inspect_container_name(info: dict[str, Any]) -> str:

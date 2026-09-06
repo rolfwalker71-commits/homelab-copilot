@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from app.core.compose_apply import hub_rate_limit_error_de, is_hub_rate_limit
 from patcher.config import get_patcher_settings
 from patcher.explain import explain_wave_item, maybe_enrich_explanation
 from patcher.jobs import JOBS
@@ -31,6 +32,7 @@ STATUS_BLOCKED = "blocked"
 STATUS_RUNNING = "running"
 STATUS_SUCCESS = "success"
 STATUS_FAILED = "failed"
+STATUS_RATE_LIMIT = "rate_limit"
 STATUS_SKIPPED = "skipped"
 
 WAVE_PLANNED = "planned"
@@ -347,6 +349,7 @@ def wave_banner_counts(items: list[dict[str, Any]]) -> dict[str, int]:
     blocked = 0
     running = 0
     failed = 0
+    rate_limited = 0
     done = 0
     for item in items:
         st = str(item.get("status") or "")
@@ -361,6 +364,8 @@ def wave_banner_counts(items: list[dict[str, Any]]) -> dict[str, int]:
             running += 1
         elif st == STATUS_FAILED:
             failed += 1
+        elif st == STATUS_RATE_LIMIT:
+            rate_limited += 1
         elif st == STATUS_SUCCESS:
             done += 1
         elif st == STATUS_READY:
@@ -371,6 +376,7 @@ def wave_banner_counts(items: list[dict[str, Any]]) -> dict[str, int]:
         "blocked": blocked,
         "running": running,
         "failed": failed,
+        "rate_limited": rate_limited,
         "done": done,
         "total": len(items),
     }
@@ -387,6 +393,8 @@ def banner_text(items: list[dict[str, Any]]) -> str:
         bits.append(f"{c['blocked']} durch Gates blockiert")
     if c["running"]:
         bits.append(f"{c['running']} laufen")
+    if c.get("rate_limited"):
+        bits.append(f"{c['rate_limited']} Docker-Hub-Limit — später erneut")
     if c["failed"]:
         bits.append(f"{c['failed']} fehlgeschlagen")
     if not bits:
@@ -708,7 +716,15 @@ class WaveEngine:
                     continue
                 ctx, _tags = await self._context_for(str(item.get("target_id") or ""))
                 gates = evaluate_gates(ctx, disk_critical_pct=threshold)
-                updated.append(self._arm_item(item, policy=policy, gates=gates))
+                retry_limit = str(item.get("status") or "") == STATUS_RATE_LIMIT
+                updated.append(
+                    self._arm_item(
+                        item,
+                        policy=policy,
+                        gates=gates,
+                        force_confirm=retry_limit,
+                    )
+                )
             for item in updated:
                 await self.store.update_wave_item(
                     int(item["id"]),
@@ -940,6 +956,8 @@ class WaveEngine:
             items = await self.store.list_wave_items(int(wave["id"]))
             failed_id: int | None = None
             fail_msg = ""
+            rate_limited = False
+            rate_msg = hub_rate_limit_error_de()
             for chosen, result in zip(runnable, results, strict=True):
                 if isinstance(result, Exception):
                     ok, error, job_id = False, str(result), None
@@ -953,6 +971,23 @@ class WaveEngine:
                         int(chosen["id"]),
                         status=STATUS_SUCCESS,
                         job_id=job_id,
+                        explanation=expl,
+                    )
+                    continue
+                if is_hub_rate_limit(error):
+                    rate_limited = True
+                    expl = explain_wave_item(
+                        {
+                            **chosen,
+                            "status": STATUS_RATE_LIMIT,
+                            "error_message": rate_msg,
+                        }
+                    )
+                    await self.store.update_wave_item(
+                        int(chosen["id"]),
+                        status=STATUS_RATE_LIMIT,
+                        job_id=job_id,
+                        error_message=rate_msg,
                         explanation=expl,
                     )
                     continue
@@ -989,6 +1024,13 @@ class WaveEngine:
                     status=WAVE_FAILED,
                     stop_reason=fail_msg,
                     failed_item_id=failed_id,
+                )
+                return False
+            if rate_limited:
+                await self.store.update_wave(
+                    int(wave["id"]),
+                    status=WAVE_WAITING,
+                    stop_reason=rate_msg,
                 )
                 return False
 
@@ -1110,6 +1152,8 @@ class WaveEngine:
                 )
         except Exception as exc:
             msg = getattr(exc, "message", None) or str(exc)
+            if is_hub_rate_limit(msg):
+                msg = hub_rate_limit_error_de()
             JOBS.finish(job.id, status="failed", error=msg)
             return False, msg, job.id
 
@@ -1117,7 +1161,10 @@ class WaveEngine:
         if done is None:
             return False, "Apply-Job nicht mehr im Speicher.", job.id
         if done.status != "success":
-            return False, (done.error or done.message or "Apply fehlgeschlagen."), job.id
+            err = done.error or done.message or "Apply fehlgeschlagen."
+            if is_hub_rate_limit(err):
+                err = hub_rate_limit_error_de()
+            return False, err, job.id
         return True, "", job.id
 
 

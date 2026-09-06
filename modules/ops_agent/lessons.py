@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.compose_apply import is_hub_rate_limit
 from ops_agent.actor import VIA_AGENT, actor_fields, by_agent
 
 ERROR_DISK = "disk"
@@ -20,6 +21,7 @@ ERROR_TIMEOUT = "timeout"
 ERROR_NETWORK = "network"
 ERROR_APT_CONFLICT = "apt_conflict"
 ERROR_COMPOSE = "compose"
+ERROR_RATE_LIMIT = "rate_limit"
 ERROR_UNHEALTHY = "unhealthy"
 ERROR_APPLY = "apply_failed"
 
@@ -38,6 +40,7 @@ WHY_DE = {
     ERROR_NETWORK: "Netz/SSH-Fehler — Verbindung abgebrochen.",
     ERROR_APT_CONFLICT: "apt-Konflikt oder kaputte Abhängigkeiten.",
     ERROR_COMPOSE: "Compose- oder Image-Pull fehlgeschlagen.",
+    ERROR_RATE_LIMIT: "Docker-Hub-Limit (ohne Login) — später erneut, kein Image überspringen.",
     ERROR_UNHEALTHY: "Host ungesund nach Apply.",
     ERROR_APPLY: "Apply fehlgeschlagen.",
 }
@@ -109,6 +112,8 @@ def packages_key(names: list[str], *, bucket: str = "") -> str:
 
 
 def classify_error_class(error: str | None) -> str:
+    if is_hub_rate_limit(error):
+        return ERROR_RATE_LIMIT
     low = (error or "").lower()
     if any(t in low for t in ("no space", "disk voll", "disk ist kritisch", "enospc")):
         return ERROR_DISK
@@ -205,6 +210,8 @@ def should_hold(
         by_class.setdefault(str(row.get("error_class") or ERROR_APPLY), []).append(row)
     chosen: dict[str, Any] | None = None
     for _cls, group in by_class.items():
+        if _cls == ERROR_RATE_LIMIT:
+            continue
         if any(bool(r.get("rollback_ran")) for r in group):
             chosen = next(r for r in reversed(group) if r.get("rollback_ran"))
             break
