@@ -8,6 +8,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from ops_agent.actor import actor_fields, agent_phrase
+
 
 @dataclass
 class BackupJob:
@@ -15,6 +17,7 @@ class BackupJob:
     parent_id: str
     project: str
     kind: str = "backup"  # backup | restore | wipe
+    via_agent: bool = False
     status: str = "queued"  # queued | running | success | partial | failed
     phase: str = "Warteschlange"
     percent: int = 0
@@ -75,6 +78,7 @@ class BackupJob:
             "done": self.status in ("success", "partial", "failed"),
             "ok": self.status in ("success", "partial"),
             "kind": self.kind,
+            **actor_fields(via_agent=self.via_agent),
             "engine": str(run.get("engine") or ""),
             "snapshot_id": run.get("snapshot_id") or "",
             "bytes_added": run.get("bytes_added"),
@@ -91,7 +95,9 @@ class JobRegistry:
         self._lock = threading.Lock()
         self._max_jobs = max_jobs
 
-    def create(self, *, parent_id: str, project: str, kind: str = "backup") -> BackupJob:
+    def create(
+        self, *, parent_id: str, project: str, kind: str = "backup", via_agent: bool = False
+    ) -> BackupJob:
         if kind == "restore":
             kind_n = "restore"
             msg = "Restore läuft…"
@@ -101,11 +107,14 @@ class JobRegistry:
         else:
             kind_n = "backup"
             msg = "Backup läuft…"
+        if via_agent and kind_n == "backup":
+            msg = agent_phrase("backup_started")
         job = BackupJob(
             id=str(uuid.uuid4()),
             parent_id=parent_id,
             project=project,
             kind=kind_n,
+            via_agent=bool(via_agent),
             status="queued",
             phase="Warteschlange",
             percent=0,

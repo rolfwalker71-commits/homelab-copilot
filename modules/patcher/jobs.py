@@ -8,12 +8,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from ops_agent.actor import actor_fields
+
 
 @dataclass
 class PatchJob:
     id: str
     kind: str  # scan | apply | apply-batch | release-upgrade | image-scan | image-apply
     target_id: str
+    via_agent: bool = False
     status: str = "queued"  # queued | running | success | failed
     phase: str = "Warteschlange"
     percent: int = 0
@@ -36,6 +39,7 @@ class PatchJob:
             "id": self.id,
             "kind": self.kind,
             "target_id": self.target_id,
+            **actor_fields(via_agent=self.via_agent),
             "status": self.status,
             "phase": self.phase,
             "percent": max(0, min(100, int(self.percent))),
@@ -60,11 +64,12 @@ class JobRegistry:
         self._lock = threading.Lock()
         self._max_jobs = max_jobs
 
-    def create(self, *, kind: str, target_id: str) -> PatchJob:
+    def create(self, *, kind: str, target_id: str, via_agent: bool = False) -> PatchJob:
         job = PatchJob(
             id=str(uuid.uuid4()),
             kind=kind,
             target_id=target_id,
+            via_agent=bool(via_agent),
             status="queued",
             phase="Warteschlange",
             percent=0,

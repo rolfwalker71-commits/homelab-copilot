@@ -18,6 +18,7 @@
   <p class="mt-1 text-sm text-[var(--muted)] leading-snug">
     Einmal festlegen — danach plant und startet er selbst. Vorausgewählt ist der sichere Standard.
     DistUpgrade, Wipe, Power-Cycle und Restore-auf-Prod bleiben harte Stops.
+    Welche Hosts er anfasst, stellst du in der Liste darunter ein.
   </p>
   <form id="ops-policy-form" class="mt-4 grid gap-4">
     <fieldset>
@@ -39,27 +40,6 @@
         <span>Nichts — voll autonom (außer harte Stops)</span>
       </label>
     </fieldset>
-    <fieldset>
-      <legend class="text-sm font-semibold">Worauf konzentrieren?</legend>
-      <div class="mt-2 flex h-10 min-h-10 max-w-xl rounded-full bg-muted p-0.5" role="radiogroup" aria-label="Fokus">
-        <label class="flex-1">
-          <input type="radio" name="focus-mode" value="all" class="sr-only" checked />
-          <span class="ops-seg flex h-full min-h-0 items-center justify-center rounded-full text-sm">Alle</span>
-        </label>
-        <label class="flex-1">
-          <input type="radio" name="focus-mode" value="only" class="sr-only" />
-          <span class="ops-seg flex h-full min-h-0 items-center justify-center rounded-full text-sm">Nur diese</span>
-        </label>
-        <label class="flex-1">
-          <input type="radio" name="focus-mode" value="exclude" class="sr-only" />
-          <span class="ops-seg flex h-full min-h-0 items-center justify-center rounded-full text-sm">Diese auslassen</span>
-        </label>
-      </div>
-      <label class="label mt-3" for="pol-focus-ids">Hosts / Gäste (IDs, Komma)</label>
-      <input id="pol-focus-ids" class="field" type="text" placeholder="lxc:pve:105, qemu:pve:200" />
-      <label class="label mt-3" for="pol-focus-tags">Tags (Komma)</label>
-      <input id="pol-focus-tags" class="field" type="text" placeholder="mail, wiki" />
-    </fieldset>
     <div class="flex flex-wrap gap-2">
       <button type="submit" class="btn btn-primary min-h-12">Speichern und selbst arbeiten lassen</button>
     </div>
@@ -76,6 +56,19 @@
   </label>
   <p id="ops-msg" class="text-sm text-[var(--muted)] leading-snug" role="status"></p>
 </div>
+
+<article id="ops-scope" class="surface-tinted p-4 sm:p-5 mb-5 animate-in">
+  <h2 class="font-display text-lg font-bold leading-snug break-words">Welche Hosts soll der Agent anfassen?</h2>
+  <p class="mt-1 text-sm text-[var(--muted)] leading-snug">
+    Getrennt: Patchen und Image-Updates. Leer = keine autonome Welle dieser Art.
+    Neue oder weggefallene Gäste fragt der Agent einzeln nach — nichts wird stillschweigend ergänzt.
+  </p>
+  <div id="ops-scope-list" class="ops-scope-list mt-4" role="list"></div>
+  <div class="mt-4 flex flex-wrap gap-2">
+    <button type="button" id="btn-ops-scope" class="btn btn-primary min-h-12">Auswahl speichern</button>
+  </div>
+  <p id="ops-scope-msg" class="mt-2 text-sm text-[var(--muted)]" role="status"></p>
+</article>
 
 <div id="ops-board" class="ops-board animate-in" aria-live="polite">
   <section class="ops-col surface p-3 sm:p-4" data-col="next">
@@ -122,37 +115,95 @@
     if (!res.ok) throw new Error(data.detail || data.message || res.statusText);
     return data;
   }
-  function splitCsv(v) {
-    return String(v || '').split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
-  }
-  function focusMode() {
-    const el = document.querySelector('input[name="focus-mode"]:checked');
-    return el ? el.value : 'all';
-  }
-  function paintFocusSeg() {
-    document.querySelectorAll('input[name="focus-mode"]').forEach((inp) => {
-      const span = inp.parentElement && inp.parentElement.querySelector('.ops-seg');
-      if (!span) return;
-      if (inp.checked) {
-        span.classList.add('bg-[var(--primary)]', 'text-[var(--on-primary)]');
-      } else {
-        span.classList.remove('bg-[var(--primary)]', 'text-[var(--on-primary)]');
-      }
-    });
-  }
   function fillPolicy(p) {
     if (!p) return;
     $('pol-kernel').checked = !!p.confirm_kernel_docker;
     $('pol-firstbak').checked = !!p.confirm_new_guest_backup;
     $('pol-prod').checked = !!p.confirm_production;
     $('pol-nothing').checked = !!p.confirm_nothing;
-    const mode = p.focus_mode || 'all';
-    document.querySelectorAll('input[name="focus-mode"]').forEach((inp) => {
-      inp.checked = inp.value === mode;
+  }
+  function renderScope(hosts) {
+    const root = $('ops-scope-list');
+    if (!root) return;
+    const rows = hosts || [];
+    if (!rows.length) {
+      root.innerHTML = '<p class="text-sm text-[var(--muted)] leading-snug">Noch keine Hosts aus der Discovery. Nach dem nächsten Scan erscheinen sie hier.</p>';
+      return;
+    }
+    root.innerHTML = rows.map((h) => {
+      const gone = !!h.gone || h.present === false;
+      const meta = [h.kind_label, h.node, gone ? 'weggefallen' : (h.online ? 'online' : 'offline')]
+        .filter(Boolean).join(' · ');
+      return (
+        '<article class="entity-card ops-scope-row" role="listitem"' +
+          (gone ? ' data-gone="1"' : '') + ' data-host-id="' + esc(h.id) + '">' +
+          '<div class="min-w-0">' +
+            '<p class="font-medium leading-snug break-words">' + esc(h.name || h.id) + '</p>' +
+            '<p class="mt-0.5 text-sm text-[var(--muted)] leading-snug break-words">' + esc(meta) + '</p>' +
+          '</div>' +
+          '<label class="ops-scope-check">' +
+            '<input type="checkbox" data-scope="patch" ' + (h.patch ? 'checked ' : '') +
+              (gone ? 'disabled ' : '') + '/>' +
+            '<span>Patchen</span>' +
+          '</label>' +
+          '<label class="ops-scope-check">' +
+            '<input type="checkbox" data-scope="image" ' + (h.image ? 'checked ' : '') +
+              (gone ? 'disabled ' : '') + '/>' +
+            '<span>Images</span>' +
+          '</label>' +
+        '</article>'
+      );
+    }).join('');
+  }
+  function collectScope() {
+    const patch = [];
+    const image = [];
+    document.querySelectorAll('#ops-scope-list [data-host-id]').forEach((row) => {
+      const id = row.getAttribute('data-host-id');
+      if (!id) return;
+      const p = row.querySelector('input[data-scope="patch"]');
+      const i = row.querySelector('input[data-scope="image"]');
+      if (p && p.checked) patch.push(id);
+      if (i && i.checked) image.push(id);
     });
-    $('pol-focus-ids').value = (p.focus_ids || []).join(', ');
-    $('pol-focus-tags').value = (p.focus_tags || []).join(', ');
-    paintFocusSeg();
+    return { patch_scope_ids: patch, image_scope_ids: image };
+  }
+  function promptCard(p) {
+    const name = p.target_name || p.target_id || 'Host';
+    if (p.kind === 'appeared') {
+      return (
+        '<article class="entity-card p-3" data-scope-prompt="' + esc(p.id) + '">' +
+          '<p class="font-medium leading-snug break-words">Neuer Host/Gast ' + esc(name) + '</p>' +
+          '<p class="mt-1 text-sm leading-snug break-words">Automatisch zu Patching? zu Image-Update? Bis du antwortest, bleibt er draußen.</p>' +
+          '<div class="mt-2 grid gap-1">' +
+            '<label class="flex items-center gap-2 text-sm min-h-12">' +
+              '<input type="checkbox" data-prompt-patch class="h-4 w-4" /> <span>Patchen ja</span></label>' +
+            '<label class="flex items-center gap-2 text-sm min-h-12">' +
+              '<input type="checkbox" data-prompt-image class="h-4 w-4" /> <span>Images ja</span></label>' +
+          '</div>' +
+          '<div class="mt-2 flex flex-wrap gap-2">' +
+            '<button type="button" class="btn btn-primary btn-xs min-h-12" data-prompt-save="' + esc(p.id) + '">Übernehmen</button>' +
+          '</div>' +
+        '</article>'
+      );
+    }
+    return (
+      '<article class="entity-card p-3" data-scope-prompt="' + esc(p.id) + '">' +
+        '<p class="font-medium leading-snug break-words">' + esc(name) + ' ist weg</p>' +
+        '<p class="mt-1 text-sm leading-snug break-words">Aus Patch- und Image-Liste nehmen? Bis du antwortest, plant der Agent dort nichts.</p>' +
+        '<div class="mt-2 flex flex-wrap gap-2">' +
+          '<button type="button" class="btn btn-primary btn-xs min-h-12" data-prompt-drop="' + esc(p.id) + '">Aus Liste nehmen</button>' +
+          '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-prompt-keep="' + esc(p.id) + '">Behalten, falls er zurückkommt</button>' +
+        '</div>' +
+      '</article>'
+    );
+  }
+  function rollbackCard(s) {
+    const st = s.status_label || (s.status === 'ok' ? 'Zurückgesetzt' : (s.status === 'skipped' ? 'Rollback übersprungen' : 'Rollback fehlgeschlagen'));
+    const actor = s.actor_label || 'durch Agent';
+    const meta = [s.job_kind_label, s.snap_name, s.created_at, actor].filter(Boolean).join(' · ');
+    const why = [s.reason_label, s.error].filter(Boolean).join(' — ');
+    return card((s.target_name || s.target_id || 'Host') + ' · ' + st, meta, why, '');
   }
   function card(title, meta, reason, actions) {
     return (
@@ -176,6 +227,7 @@
     const en = $('ops-enabled');
     if (en) en.checked = !!data.enabled;
     fillPolicy(data.policy);
+    renderScope(data.hosts || []);
     const interview = $('ops-interview');
     if (interview && data.policy && !data.policy.answered) {
       interview.hidden = false;
@@ -191,41 +243,63 @@
       next: 'Nichts geplant — „Plan vorschlagen“ oder bestehende Zeitpläne erscheinen hier.',
       running: 'Kein laufender Auftrag.',
       waiting: 'Nichts wartet auf dich. Der Agent arbeitet die übrigen Fenster selbst.',
-      shifted: 'Keine Verschiebungen.',
+      shifted: 'Keine Verschiebungen oder Zurücksetzungen.',
       done: 'Noch nichts abgeschlossen.',
     };
     Object.keys(cols).forEach((key) => {
       const body = document.querySelector('[data-col="' + key + '"] .ops-col-body');
       if (!body) return;
       const items = cols[key];
-      if (!items.length) {
+      if (!items.length && !(key === 'waiting' && ((data.scope_prompts || []).length || (data.rollback_failed || []).length))) {
         body.innerHTML = empty(empties[key]);
         return;
       }
+      if (key === 'waiting') {
+        const rbFails = (data.rollback_failed || []).map(rollbackCard).join('');
+        const prompts = (data.scope_prompts || []).map(promptCard).join('');
+        const wins = items.map((w) => {
+          const title = (w.target_name || w.target_id || '') +
+            (w.stack ? ' · ' + w.stack : '') +
+            (w.kind_label ? ' · ' + w.kind_label : '');
+          const meta = [w.start_de || w.start_hm, w.duration_label, w.bucket_label]
+            .filter(Boolean).join(' · ');
+          const actions =
+            '<button type="button" class="btn btn-primary btn-xs min-h-12" data-ops-confirm="' + esc(w.id) + '">Bestätigen</button>' +
+            '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-decline="' + esc(w.id) + '">Ablehnen</button>';
+          return card(title, meta, w.reason || '', actions);
+        }).join('');
+        body.innerHTML = rbFails + prompts + wins || empty(empties.waiting);
+        return;
+      }
       if (key === 'shifted') {
-        body.innerHTML = items.map((s) => card(
-          (s.target_name || s.stack || 'Fenster') + ' · ' + (s.kind === 'patch' ? 'Patch' : 'Backup'),
-          (s.old_start_hm || '—') + ' → ' + (s.new_start_hm || '—'),
-          s.reason || '',
-          ''
-        )).join('');
+        body.innerHTML = items.map((s) => {
+          if (s.event === 'rollback' || s.kind === 'rollback') {
+            return rollbackCard(s);
+          }
+          const actor = s.actor_label || (s.via_agent ? 'durch Agent' : '');
+          return card(
+            (s.target_name || s.stack || 'Fenster') + ' · ' + (s.kind === 'patch' ? 'Patch' : 'Backup'),
+            [(s.old_start_hm || '—') + ' → ' + (s.new_start_hm || '—'), actor].filter(Boolean).join(' · '),
+            s.reason || '',
+            ''
+          );
+        }).join('');
         return;
       }
       body.innerHTML = items.map((w) => {
         const title = (w.target_name || w.target_id || '') +
           (w.stack ? ' · ' + w.stack : '') +
           (w.kind_label ? ' · ' + w.kind_label : '');
-        const meta = [w.start_de || w.start_hm, w.duration_label, w.bucket_label]
+        const actor = w.actor_label || (w.via_agent ? 'durch Agent' : '');
+        const meta = [w.start_de || w.start_hm, w.duration_label, w.bucket_label, actor]
           .filter(Boolean).join(' · ');
         let actions = '';
-        if (key === 'waiting') {
-          actions =
-            '<button type="button" class="btn btn-primary btn-xs min-h-12" data-ops-confirm="' + esc(w.id) + '">Bestätigen</button>' +
-            '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-decline="' + esc(w.id) + '">Ablehnen</button>';
-        } else if (key === 'next' && w.can_start) {
+        if (key === 'next' && w.can_start) {
           actions = startBtn(w.id);
         }
-        const st = w.status === 'failed' ? 'Fehler' : (w.status === 'skipped' ? 'übersprungen' : '');
+        let st = w.status === 'failed' ? 'Fehler' : (w.status === 'skipped' ? 'übersprungen' : '');
+        if (w.rollback && w.rollback.status === 'ok') st = 'Zurückgesetzt';
+        else if (w.rollback && w.rollback.status === 'failed') st = 'Fehler · Rollback fehlgeschlagen';
         return card(title, meta + (st ? ' · ' + st : ''), w.reason || '', actions);
       }).join('');
     });
@@ -241,6 +315,35 @@
     document.querySelectorAll('[data-ops-start]').forEach((btn) => {
       btn.addEventListener('click', () => act('/start', btn.getAttribute('data-ops-start')));
     });
+    document.querySelectorAll('[data-prompt-save]').forEach((btn) => {
+      btn.addEventListener('click', () => answerPrompt(btn.getAttribute('data-prompt-save'), 'appeared'));
+    });
+    document.querySelectorAll('[data-prompt-drop]').forEach((btn) => {
+      btn.addEventListener('click', () => answerPrompt(btn.getAttribute('data-prompt-drop'), 'drop'));
+    });
+    document.querySelectorAll('[data-prompt-keep]').forEach((btn) => {
+      btn.addEventListener('click', () => answerPrompt(btn.getAttribute('data-prompt-keep'), 'keep'));
+    });
+  }
+  async function answerPrompt(id, mode) {
+    const msg = $('ops-msg');
+    const cardEl = document.querySelector('[data-scope-prompt="' + id + '"]');
+    const body = { prompt_id: Number(id) };
+    if (mode === 'appeared') {
+      body.patch = !!(cardEl && cardEl.querySelector('[data-prompt-patch]')?.checked);
+      body.image = !!(cardEl && cardEl.querySelector('[data-prompt-image]')?.checked);
+    } else if (mode === 'drop') {
+      body.drop = true;
+    } else {
+      body.drop = false;
+    }
+    try {
+      await api('/scope-prompt', { method: 'POST', body: JSON.stringify(body) });
+      if (msg) msg.textContent = 'Host-Frage übernommen.';
+      await load();
+    } catch (e) {
+      if (msg) msg.textContent = String(e.message || e);
+    }
   }
   async function act(path, id) {
     const msg = $('ops-msg');
@@ -277,8 +380,18 @@
     const box = $('ops-interview');
     if (box) box.hidden = !box.hidden;
   });
-  document.querySelectorAll('input[name="focus-mode"]').forEach((inp) => {
-    inp.addEventListener('change', paintFocusSeg);
+  $('btn-ops-scope')?.addEventListener('click', async () => {
+    const msg = $('ops-scope-msg');
+    try {
+      const data = await api('/scope', {
+        method: 'POST',
+        body: JSON.stringify(collectScope()),
+      });
+      if (msg) msg.textContent = data.message || 'Auswahl gespeichert.';
+      await load();
+    } catch (e) {
+      if (msg) msg.textContent = String(e.message || e);
+    }
   });
   $('ops-enabled')?.addEventListener('change', async (ev) => {
     try {
@@ -303,9 +416,6 @@
           confirm_new_guest_backup: $('pol-firstbak').checked,
           confirm_production: $('pol-prod').checked,
           confirm_nothing: $('pol-nothing').checked,
-          focus_mode: focusMode(),
-          focus_ids: splitCsv($('pol-focus-ids').value),
-          focus_tags: splitCsv($('pol-focus-tags').value),
           enabled: true,
         }),
       });
@@ -316,7 +426,6 @@
       if (msg) msg.textContent = String(e.message || e);
     }
   });
-  paintFocusSeg();
   load();
   setInterval(load, 20000);
 })();

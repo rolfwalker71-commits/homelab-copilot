@@ -23,6 +23,8 @@ from ops_agent.planner import (
     Occupied,
     PlannedWindow,
     REASON_BACKUP_OVERRUN,
+    REASON_HOST_GONE,
+    REASON_OUT_OF_FOCUS,
     REASON_PATCH_OVERRUN,
     SOURCE_AGENT,
     SOURCE_DRILL,
@@ -43,7 +45,16 @@ from ops_agent.planner import (
     propose_windows,
     Need,
 )
-from ops_agent.policy import ConfirmPolicy, default_policy
+from ops_agent.hosts import collect_live_hosts, split_inventory_changes
+from ops_agent.actor import actor_fields, agent_phrase, by_agent
+from ops_agent.image_snaps import ImageSnap, remember_after_image, snap_from_job_result
+from ops_agent.policy import ConfirmPolicy, in_job_scope
+from ops_agent.rollback import (
+    job_kind_label_de,
+    plan_rollback,
+    reason_label_de,
+    window_reason_after_rollback,
+)
 from ops_agent.store import OpsStore
 from patcher.agent import (
     HostPending,
@@ -83,6 +94,8 @@ class OpsEngine:
         list_patch_jobs: Callable[[], list[Any]],
         get_inventory_tags: Callable[[str], Awaitable[list[str]]] | None = None,
         notify_shift: Callable[[str, str], Awaitable[None]] | None = None,
+        delete_guest_snap: Callable[[str, str], Awaitable[Any]] | None = None,
+        rollback_guest_snap: Callable[[str, str], Awaitable[Any]] | None = None,
     ) -> None:
         self.store = store
         self._get_snapshot = get_snapshot
@@ -95,7 +108,13 @@ class OpsEngine:
         self._list_patch_jobs = list_patch_jobs
         self._get_inventory_tags = get_inventory_tags
         self._notify_shift = notify_shift
+        self._delete_guest_snap = delete_guest_snap
+        self._rollback_guest_snap = rollback_guest_snap
         self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _is_image_window(row: dict[str, Any]) -> bool:
+        return str(row.get("bucket") or "") == "images" or str(row.get("kind") or "") == "image"
 
     async def settings(self) -> EffectiveSettings:
         env = get_ops_settings()
@@ -116,6 +135,286 @@ class OpsEngine:
 
     async def policy(self) -> ConfirmPolicy:
         return await self.store.get_policy()
+
+    async def gone_ids(self) -> set[str]:
+        return {
+            str(h.get("target_id") or "")
+            for h in await self.store.list_known_hosts()
+            if h.get("gone") and str(h.get("target_id") or "")
+        }
+
+    async def _live_hosts(self) -> list[dict[str, Any]]:
+        snap = self._get_snapshot()
+        manuals: list[dict[str, Any]] = []
+        try:
+            from patcher.module import _get_store as _pstore
+            from patcher.targets import manual_targets
+
+            pstore = _pstore()
+            if pstore is not None:
+                manuals = [t.to_dict() for t in await manual_targets(pstore)]
+        except Exception:
+            manuals = []
+        return collect_live_hosts(snap, manuals)
+
+    async def reconcile_hosts(self) -> list[dict[str, Any]]:
+        """Ask about new/removed guests. First empty known-set is seeded, no flood."""
+        live = await self._live_hosts()
+        known = await self.store.list_known_hosts()
+        if not known:
+            if live:
+                await self.store.seed_known_hosts(live)
+            return []
+        pending = await self.store.list_scope_prompts(status="waiting")
+        pending_ids = {str(p.get("target_id") or "") for p in pending if p.get("target_id")}
+        live_by_id = {str(h["id"]): h for h in live}
+        live_ids = set(live_by_id)
+        present = {
+            str(h.get("target_id") or "")
+            for h in known
+            if not h.get("gone") and h.get("target_id")
+        }
+        gone = {
+            str(h.get("target_id") or "")
+            for h in known
+            if h.get("gone") and h.get("target_id")
+        }
+        known_by_id = {str(h.get("target_id") or ""): h for h in known}
+        appeared, disappeared, returned = split_inventory_changes(
+            live_ids=live_ids,
+            known_present_ids=present,
+            known_gone_ids=gone,
+            pending_ids=pending_ids,
+        )
+        created: list[dict[str, Any]] = []
+        for tid in sorted(appeared):
+            host = live_by_id[tid]
+            await self.store.upsert_known_host(
+                target_id=tid,
+                target_name=str(host.get("name") or tid),
+                kind=str(host.get("kind") or ""),
+                gone=False,
+            )
+            pid = await self.store.insert_scope_prompt(
+                target_id=tid,
+                target_name=str(host.get("name") or tid),
+                kind="appeared",
+                reason=(
+                    f"Neuer Host/Gast {host.get('name') or tid} — "
+                    "automatisch zu Patching? zu Image-Update?"
+                ),
+            )
+            if pid:
+                row = await self.store.get_scope_prompt(pid)
+                if row:
+                    created.append(row)
+        for tid in sorted(disappeared):
+            host = known_by_id.get(tid) or {}
+            name = str(host.get("target_name") or tid)
+            await self.store.mark_known_gone(tid)
+            pid = await self.store.insert_scope_prompt(
+                target_id=tid,
+                target_name=name,
+                kind="disappeared",
+                reason=f"{name} ist weg — aus Patch- und Image-Liste nehmen?",
+            )
+            if pid:
+                row = await self.store.get_scope_prompt(pid)
+                if row:
+                    created.append(row)
+        for tid in sorted(returned):
+            host = live_by_id[tid]
+            waiting = await self.store.find_waiting_prompt(tid)
+            if waiting and waiting.get("kind") == "disappeared":
+                await self.store.dismiss_scope_prompt(
+                    int(waiting["id"]),
+                    reason="Host ist wieder da — Frage zurückgezogen.",
+                )
+            await self.store.mark_known_present(
+                tid,
+                target_name=str(host.get("name") or tid),
+                kind=str(host.get("kind") or ""),
+            )
+        for tid in live_ids & present:
+            host = live_by_id[tid]
+            waiting = await self.store.find_waiting_prompt(tid)
+            if waiting and waiting.get("kind") == "disappeared":
+                await self.store.dismiss_scope_prompt(
+                    int(waiting["id"]),
+                    reason="Host ist wieder da — Frage zurückgezogen.",
+                )
+            await self.store.mark_known_present(
+                tid,
+                target_name=str(host.get("name") or tid),
+                kind=str(host.get("kind") or ""),
+            )
+        leftover = await self.store.list_scope_prompts(status="waiting")
+        for prompt in leftover:
+            tid = str(prompt.get("target_id") or "")
+            if prompt.get("kind") == "appeared" and tid and tid not in live_ids:
+                await self.store.dismiss_scope_prompt(
+                    int(prompt["id"]),
+                    reason="Wieder weg, bevor du entschieden hast.",
+                )
+                await self.store.mark_known_gone(tid)
+        return created
+
+    async def _release_ok_image_snap(self) -> None:
+        rec = await self.store.get_ok_image_snap()
+        if not rec:
+            return
+        if self._delete_guest_snap is not None:
+            try:
+                await self._delete_guest_snap(rec["target_id"], rec["snap_name"])
+            except Exception:
+                logger.info(
+                    "Erfolgreichen Image-Snapshot nicht gelöscht",
+                    extra={"target_id": rec.get("target_id")},
+                    exc_info=True,
+                )
+        await self.store.clear_ok_image_snap()
+
+    async def _remember_image_snap(self, row: dict[str, Any], job: Any) -> None:
+        created = snap_from_job_result(
+            str(row.get("target_id") or ""),
+            getattr(job, "result", None) if job is not None else None,
+        )
+        last = await self.store.get_ok_image_snap()
+        last_snap = (
+            ImageSnap(last["target_id"], last["snap_name"]) if last else None
+        )
+        nxt = remember_after_image(
+            last_snap,
+            ok=str(getattr(job, "status", "") or "") == "success",
+            created=created,
+        )
+        if nxt is None:
+            await self.store.clear_ok_image_snap()
+        else:
+            await self.store.set_ok_image_snap(nxt.target_id, nxt.name)
+        remaining = await self.store.list_windows(
+            statuses=[STATUS_ACCEPTED, STATUS_WAITING]
+        )
+        more_images = [
+            w
+            for w in remaining
+            if self._is_image_window(w) and w.get("kind") == KIND_PATCH
+        ]
+        if not more_images:
+            await self._release_ok_image_snap()
+
+    async def save_scope(
+        self, *, patch_scope_ids: list[str], image_scope_ids: list[str]
+    ) -> ConfirmPolicy:
+        policy = await self.store.get_policy()
+        policy.patch_scope_ids = [str(x).strip() for x in patch_scope_ids if str(x).strip()]
+        policy.image_scope_ids = [str(x).strip() for x in image_scope_ids if str(x).strip()]
+        saved = await self.store.save_policy(policy)
+        for tid in set(saved.patch_scope_ids) | set(saved.image_scope_ids):
+            waiting = await self.store.find_waiting_prompt(tid)
+            if waiting and waiting.get("kind") == "appeared":
+                await self.store.answer_scope_prompt(
+                    int(waiting["id"]),
+                    patch=tid in saved.patch_scope_ids,
+                    image=tid in saved.image_scope_ids,
+                )
+        return saved
+
+    async def answer_host_prompt(
+        self,
+        prompt_id: int,
+        *,
+        patch: bool | None = None,
+        image: bool | None = None,
+        drop: bool | None = None,
+    ) -> dict[str, Any]:
+        row = await self.store.get_scope_prompt(prompt_id)
+        if not row or row.get("status") != "waiting":
+            raise RuntimeError("Keine offene Host-Frage.")
+        policy = await self.store.get_policy()
+        tid = str(row.get("target_id") or "")
+        kind = str(row.get("kind") or "")
+        if kind == "appeared":
+            want_patch = bool(patch)
+            want_image = bool(image)
+            patch_ids = [x for x in policy.patch_scope_ids if x.lower() != tid.lower()]
+            image_ids = [x for x in policy.image_scope_ids if x.lower() != tid.lower()]
+            if want_patch:
+                patch_ids.append(tid)
+            if want_image:
+                image_ids.append(tid)
+            policy.patch_scope_ids = patch_ids
+            policy.image_scope_ids = image_ids
+            await self.store.save_policy(policy)
+            await self.store.answer_scope_prompt(
+                prompt_id, patch=want_patch, image=want_image
+            )
+        elif kind == "disappeared":
+            if drop:
+                policy.patch_scope_ids = [
+                    x for x in policy.patch_scope_ids if x.lower() != tid.lower()
+                ]
+                policy.image_scope_ids = [
+                    x for x in policy.image_scope_ids if x.lower() != tid.lower()
+                ]
+                await self.store.save_policy(policy)
+                await self.store.delete_known_host(tid)
+            else:
+                await self.store.upsert_known_host(
+                    target_id=tid,
+                    target_name=str(row.get("target_name") or tid),
+                    kind="",
+                    gone=True,
+                    keep_preference=True,
+                )
+            await self.store.answer_scope_prompt(prompt_id, drop_from_scope=bool(drop))
+        else:
+            raise RuntimeError("Unbekannte Host-Frage.")
+        fresh = await self.store.get_scope_prompt(prompt_id)
+        assert fresh is not None
+        return fresh
+
+    async def scope_matrix(self) -> dict[str, Any]:
+        policy = await self.policy()
+        live = await self._live_hosts()
+        known = await self.store.list_known_hosts()
+        live_ids = {str(h["id"]) for h in live}
+        by_id: dict[str, dict[str, Any]] = {str(h["id"]): dict(h) for h in live}
+        for k in known:
+            tid = str(k.get("target_id") or "")
+            if not tid:
+                continue
+            if tid not in by_id:
+                by_id[tid] = {
+                    "id": tid,
+                    "target_id": tid,
+                    "name": k.get("target_name") or tid,
+                    "kind": k.get("kind") or "",
+                    "kind_label": "Host",
+                    "node": "",
+                    "online": False,
+                    "present": False,
+                }
+            row = by_id[tid]
+            row["present"] = tid in live_ids
+            row["gone"] = bool(k.get("gone")) and tid not in live_ids
+            row["keep_preference"] = bool(k.get("keep_preference"))
+        patch = {x.lower() for x in policy.patch_scope_ids}
+        image = {x.lower() for x in policy.image_scope_ids}
+        hosts = sorted(by_id.values(), key=lambda r: str(r.get("name") or "").lower())
+        for h in hosts:
+            tid = str(h.get("id") or "").lower()
+            h["patch"] = tid in patch
+            h["image"] = tid in image
+            if h.get("gone"):
+                h["present"] = False
+        prompts = await self.store.list_scope_prompts(status="waiting")
+        return {
+            "hosts": hosts,
+            "patch_scope_ids": list(policy.patch_scope_ids),
+            "image_scope_ids": list(policy.image_scope_ids),
+            "prompts": prompts,
+        }
 
     def _attach_times(self, win: PlannedWindow, now: datetime) -> dict[str, Any]:
         dt = dt_from_abs(now, win.start_min)
@@ -228,9 +527,18 @@ class OpsEngine:
                 hosts = await _hosts(
                     patcher_store, snap, tags_for=self._get_inventory_tags
                 )
+                gone = await self.gone_ids()
                 for host in hosts:
                     known.add(host.target_id)
                     for item in group_host_work(host):
+                        if not in_job_scope(
+                            policy,
+                            kind=KIND_PATCH,
+                            bucket=item.bucket,
+                            target_id=item.target_id,
+                            gone_ids=gone,
+                        ):
+                            continue
                         needs.append(
                             Need(
                                 kind=KIND_PATCH,
@@ -331,6 +639,7 @@ class OpsEngine:
     async def propose(self, *, auto_apply: bool = True) -> dict[str, Any]:
         """Compute next windows. After policy, accepted rows run themselves."""
         now = now_berlin()
+        await self.reconcile_hosts()
         await self.ingest(now=now)
         policy = await self.policy()
         settings = await self.settings()
@@ -362,6 +671,7 @@ class OpsEngine:
             disk_critical=disk,
             running_targets=running,
             snap_unavailable=no_snap,
+            gone_ids=await self.gone_ids(),
         )
         created: list[dict[str, Any]] = []
         for win in planned:
@@ -370,6 +680,11 @@ class OpsEngine:
                 row["status"] = STATUS_WAITING
                 row["needs_confirm"] = True
                 row["reason"] = "Vorschlag — Agent ist aus, daher noch nicht übernommen."
+            if str(row.get("source") or "") == SOURCE_AGENT:
+                reason = str(row.get("reason") or "").strip()
+                row["reason"] = (
+                    by_agent(reason) if reason else agent_phrase("window_planned")
+                )
             wid = await self.store.insert_window(row)
             created.append(await self.store.get_window(wid) or row)
             if (
@@ -386,6 +701,9 @@ class OpsEngine:
             row = win.to_row()
             row["start_iso"] = iso_utc(now)
             row["start_hm"] = now.strftime("%H:%M")
+            if str(row.get("source") or "") == SOURCE_AGENT:
+                reason = str(row.get("reason") or "").strip()
+                row["reason"] = by_agent(reason) if reason else agent_phrase("window_planned")
             await self.store.insert_window(row)
         return {
             "ok": True,
@@ -567,11 +885,12 @@ class OpsEngine:
                 old_iso = str(row.get("start_iso") or "")
                 new_dt = dt_from_abs(now, moved.start_min)
                 new_iso = iso_utc(new_dt)
+                shifted_reason = by_agent(moved.reason or agent_phrase("window_shifted", via_agent=False))
                 await self.store.update_window(
                     int(row["id"]),
                     start_iso=new_iso,
                     start_hm=moved.start_hm,
-                    reason=moved.reason,
+                    reason=shifted_reason,
                 )
                 await self.store.add_shift(
                     int(row["id"]),
@@ -579,7 +898,7 @@ class OpsEngine:
                     old_start_hm=rec["old_start_hm"],
                     new_start_iso=new_iso,
                     new_start_hm=rec["new_start_hm"],
-                    reason=rec["reason"],
+                    reason=by_agent(rec["reason"]),
                 )
                 if row.get("schedule_id") and moved.kind == KIND_BACKUP:
                     await self._rewrite_schedule_time(
@@ -594,7 +913,7 @@ class OpsEngine:
                 if self._notify_shift is not None:
                     try:
                         await self._notify_shift(
-                            "Fenster verschoben",
+                            agent_phrase("window_shifted"),
                             f"{row.get('target_name') or row.get('stack')}: "
                             f"{rec['old_start_hm']} → {rec['new_start_hm']}. {rec['reason']}",
                         )
@@ -655,8 +974,23 @@ class OpsEngine:
             if kind == KIND_PATCH:
                 if settings.patch_halted:
                     continue
+                if not in_job_scope(
+                    await self.policy(),
+                    kind=kind,
+                    bucket=str(row.get("bucket") or ""),
+                    target_id=tid,
+                    gone_ids=await self.gone_ids(),
+                ):
+                    await self.store.update_window(
+                        int(row["id"]),
+                        status=STATUS_SKIPPED,
+                        reason=REASON_OUT_OF_FOCUS,
+                    )
+                    continue
                 if any(j for j in self._list_patch_jobs() if str(getattr(j, "kind", "")) in ("apply", "image-apply")):
                     continue
+                if self._is_image_window(row):
+                    await self._release_ok_image_snap()
                 ok, err, job_id = await self._start_patch(row)
                 if ok:
                     await self.store.update_window(
@@ -664,14 +998,13 @@ class OpsEngine:
                     )
                     started.append({**row, "status": STATUS_RUNNING, "job_id": job_id})
                 else:
-                    await self.store.update_window(
-                        int(row["id"]),
-                        status=STATUS_FAILED,
+                    job = self._lookup_patch_job(job_id or "")
+                    await self._fail_patch_window(
+                        row,
+                        job=job,
                         job_id=job_id,
-                        reason=err or "Patch fehlgeschlagen.",
+                        error=err or "Patch fehlgeschlagen.",
                     )
-                    await self.store.save_settings(patch_halted=True)
-                    await self._skip_remaining_patches(err or "Welle gestoppt nach Fehler.")
             elif kind == KIND_BACKUP:
                 job_id = await self._start_backup(row)
                 await self.store.update_window(
@@ -688,6 +1021,193 @@ class OpsEngine:
             await self.store.update_window(
                 int(row["id"]), status=STATUS_SKIPPED, reason=reason
             )
+
+    def _lookup_patch_job(self, job_id: str) -> Any:
+        jid = str(job_id or "").strip()
+        if not jid:
+            return None
+        try:
+            from patcher.jobs import JOBS
+
+            return JOBS.get(jid)
+        except Exception:
+            return None
+
+    def _log_job_line(self, job_id: str, line: str) -> None:
+        jid = str(job_id or "").strip()
+        if not jid or not line:
+            return
+        try:
+            from patcher.jobs import JOBS
+
+            JOBS.append_log(jid, line)
+        except Exception:
+            logger.info("Rollback-Log am Job nicht geschrieben", exc_info=True)
+
+    def _attach_job_rollback(self, job: Any, rec: dict[str, Any]) -> None:
+        if job is None:
+            return
+        prev = dict(getattr(job, "result", None) or {})
+        prev["rollback"] = {
+            "status": rec.get("status"),
+            "snap_name": rec.get("snap_name") or "",
+            "reason": rec.get("reason") or "",
+            "error": rec.get("error") or "",
+            **actor_fields(via_agent=True),
+        }
+        try:
+            job.result = prev
+        except Exception:
+            logger.info("Rollback am Job-Result nicht gesetzt", exc_info=True)
+
+    async def _maybe_rollback_failed_apply(
+        self,
+        row: dict[str, Any],
+        job: Any,
+        *,
+        error: str,
+    ) -> dict[str, Any]:
+        """One autonomous rollback per job. Never raises. DistUpgrade is never eligible."""
+        job_id = str(
+            (getattr(job, "id", None) if job is not None else None)
+            or row.get("job_id")
+            or ""
+        )
+        existing = await self.store.get_rollback_for_job(job_id) if job_id else None
+        if existing is None and row.get("id") is not None:
+            existing = await self.store.get_rollback_for_window(int(row["id"]))
+        if existing:
+            self._attach_job_rollback(job, existing)
+            return existing
+
+        kind = str(
+            (getattr(job, "kind", None) if job is not None else None)
+            or ("image-apply" if self._is_image_window(row) else "apply")
+        )
+        target_id = str(
+            row.get("target_id")
+            or (getattr(job, "target_id", "") if job is not None else "")
+            or ""
+        )
+        result = getattr(job, "result", None) if job is not None else None
+        logs = list(getattr(job, "log_lines", None) or []) if job is not None else None
+        plan = plan_rollback(
+            job_kind=kind,
+            target_id=target_id,
+            result=result if isinstance(result, dict) else None,
+            error=error,
+            log_lines=logs,
+        )
+        target_name = str(row.get("target_name") or target_id)
+        window_id = int(row["id"]) if row.get("id") is not None else None
+
+        if plan.action != "rollback":
+            rec = await self.store.insert_rollback(
+                window_id=window_id,
+                job_id=job_id,
+                target_id=target_id,
+                target_name=target_name,
+                job_kind=plan.job_kind,
+                snap_name=plan.snap_name,
+                reason=plan.reason_code,
+                status="skipped",
+                error=plan.skip_reason,
+            )
+            self._log_job_line(job_id, by_agent(plan.skip_reason))
+            self._attach_job_rollback(job, rec)
+            logger.info(
+                "Autonomes Rollback übersprungen: %s",
+                plan.skip_reason,
+                extra={"target_id": target_id, "job_kind": kind},
+            )
+            return rec
+
+        rb_ok = False
+        rb_err = ""
+        if self._rollback_guest_snap is None:
+            rb_err = "Keine Rollback-Funktion."
+        else:
+            try:
+                raw = await self._rollback_guest_snap(target_id, plan.snap_name)
+                if isinstance(raw, dict) and raw.get("ok") is False:
+                    rb_err = str(raw.get("error") or "Rollback fehlgeschlagen.")
+                else:
+                    rb_ok = True
+            except Exception as exc:
+                rb_err = getattr(exc, "message", None) or str(exc)
+
+        rec = await self.store.insert_rollback(
+            window_id=window_id,
+            job_id=job_id,
+            target_id=target_id,
+            target_name=target_name,
+            job_kind=plan.job_kind,
+            snap_name=plan.snap_name,
+            reason=plan.reason_code,
+            status="ok" if rb_ok else "failed",
+            error="" if rb_ok else rb_err,
+        )
+        if rb_ok:
+            self._log_job_line(
+                job_id,
+                agent_phrase("rolled_back", snap=plan.snap_name)
+                + f" ({reason_label_de(plan.reason_code)}). Snapshot bleibt "
+                "bis PATCHER_SNAP_KEEP.",
+            )
+        else:
+            self._log_job_line(
+                job_id,
+                by_agent(
+                    f"Rollback auf „{plan.snap_name}“ fehlgeschlagen: {rb_err} "
+                    "Kein weiterer Versuch."
+                ),
+            )
+        self._attach_job_rollback(job, rec)
+        if self._notify_shift is not None:
+            try:
+                title = (
+                    agent_phrase("rolled_back", snap=plan.snap_name)
+                    if rb_ok
+                    else agent_phrase("rollback_failed", snap=plan.snap_name)
+                )
+                body = (
+                    f"{target_name}: Snapshot {plan.snap_name} "
+                    f"({reason_label_de(plan.reason_code)})."
+                    if rb_ok
+                    else f"{target_name}: {rb_err}"
+                )
+                await self._notify_shift(title, body)
+            except Exception:
+                logger.info("Push nach Rollback fehlgeschlagen", exc_info=True)
+        return rec
+
+    async def _fail_patch_window(
+        self,
+        row: dict[str, Any],
+        *,
+        job: Any,
+        job_id: str | None,
+        error: str,
+        halt_wave: bool = True,
+    ) -> str:
+        rec = await self._maybe_rollback_failed_apply(
+            {**row, "job_id": job_id or row.get("job_id") or ""},
+            job,
+            error=error,
+        )
+        reason = window_reason_after_rollback(error, rec)
+        await self.store.update_window(
+            int(row["id"]),
+            status=STATUS_FAILED,
+            job_id=job_id or row.get("job_id"),
+            reason=reason,
+        )
+        if self._is_image_window(row) and job is not None:
+            await self._remember_image_snap(row, job)
+        if halt_wave:
+            await self.store.save_settings(patch_halted=True)
+            await self._skip_remaining_patches(agent_phrase("wave_stopped"))
+        return reason
 
     def _parse_start(self, row: dict[str, Any]) -> datetime | None:
         iso = str(row.get("start_iso") or "")
@@ -759,14 +1279,15 @@ class OpsEngine:
                 if st == "success":
                     await self.store.update_window(int(row["id"]), status=STATUS_DONE)
                     await self.store.save_settings(patch_halted=False)
+                    if self._is_image_window(row):
+                        await self._remember_image_snap(row, job)
                 elif st == "failed":
-                    await self.store.update_window(
-                        int(row["id"]),
-                        status=STATUS_FAILED,
-                        reason=str(getattr(job, "error", "") or "Patch fehlgeschlagen."),
+                    await self._fail_patch_window(
+                        row,
+                        job=job,
+                        job_id=job_id,
+                        error=str(getattr(job, "error", "") or "Patch fehlgeschlagen."),
                     )
-                    await self.store.save_settings(patch_halted=True)
-                    await self._skip_remaining_patches("Welle gestoppt nach Apply-Fehler.")
 
     async def start_now(self, window_id: int) -> dict[str, Any]:
         row = await self.store.get_window(window_id)
@@ -784,12 +1305,29 @@ class OpsEngine:
             raise RuntimeError("Auf diesem Ziel läuft bereits ein Auftrag.")
         kind = str(row.get("kind") or "")
         if kind == KIND_PATCH:
+            if not in_job_scope(
+                await self.policy(),
+                kind=kind,
+                bucket=str(row.get("bucket") or ""),
+                target_id=tid,
+                gone_ids=await self.gone_ids(),
+            ):
+                await self.store.update_window(
+                    window_id, status=STATUS_SKIPPED, reason=REASON_OUT_OF_FOCUS
+                )
+                raise RuntimeError(REASON_OUT_OF_FOCUS)
+            if self._is_image_window(row):
+                await self._release_ok_image_snap()
             ok, err, job_id = await self._start_patch(row)
             if not ok:
-                await self.store.update_window(
-                    window_id, status=STATUS_FAILED, job_id=job_id, reason=err
+                job = self._lookup_patch_job(job_id or "")
+                reason = await self._fail_patch_window(
+                    row,
+                    job=job,
+                    job_id=job_id,
+                    error=err or "Patch nicht gestartet.",
                 )
-                raise RuntimeError(err or "Patch nicht gestartet.")
+                raise RuntimeError(reason)
             await self.store.update_window(window_id, status=STATUS_RUNNING, job_id=job_id)
         elif kind == KIND_BACKUP:
             job_id = await self._start_backup(row)
@@ -837,6 +1375,10 @@ class OpsEngine:
     async def tick(self) -> None:
         async with self._lock:
             try:
+                await self.reconcile_hosts()
+            except Exception:
+                logger.exception("Agent-Host-Abgleich fehlgeschlagen")
+            try:
                 await self.ingest()
             except Exception:
                 logger.exception("Agent-Ingest fehlgeschlagen")
@@ -863,10 +1405,21 @@ class OpsEngine:
             await self.sync_jobs()
         except Exception:
             logger.exception("Sync für Board")
+        try:
+            await self.reconcile_hosts()
+        except Exception:
+            logger.exception("Host-Abgleich für Board")
         policy = await self.policy()
         settings = await self.settings()
+        matrix = await self.scope_matrix()
         all_rows = await self.store.list_windows(limit=300)
         shifts = await self.store.list_shifts(limit=30)
+        rollbacks = await self.store.list_rollbacks(limit=40)
+        rb_by_window = {
+            int(r["window_id"]): r
+            for r in rollbacks
+            if r.get("window_id") is not None
+        }
         live_backup = [j.to_dict() for j in self._list_backup_jobs()]
         live_patch = [j.to_dict() for j in self._list_patch_jobs()]
         next_up: list[dict[str, Any]] = []
@@ -874,7 +1427,12 @@ class OpsEngine:
         running: list[dict[str, Any]] = []
         done: list[dict[str, Any]] = []
         for row in all_rows:
-            packed = self._serialize_window(row, now)
+            wid = row.get("id")
+            packed = self._serialize_window(
+                row,
+                now,
+                rollback=rb_by_window.get(int(wid)) if wid is not None else None,
+            )
             st = str(row.get("status") or "")
             if st == STATUS_WAITING:
                 waiting.append(packed)
@@ -885,6 +1443,31 @@ class OpsEngine:
             elif st == STATUS_ACCEPTED:
                 next_up.append(packed)
         done.sort(key=lambda r: str(r.get("updated_at_iso") or r.get("start_iso") or ""), reverse=True)
+        rollback_events = [self._serialize_rollback(r) for r in rollbacks]
+        shifted: list[dict[str, Any]] = [
+            {
+                "event": "shift",
+                "id": s.get("id"),
+                "window_id": s.get("window_id"),
+                "kind": s.get("kind"),
+                "target_name": s.get("target_name"),
+                "stack": s.get("stack"),
+                "old_start_hm": s.get("old_start_hm"),
+                "new_start_hm": s.get("new_start_hm"),
+                "reason": s.get("reason"),
+                "created_at": s.get("created_at"),
+                "created_at_iso": s.get("created_at_iso"),
+                **actor_fields(via_agent=True),
+            }
+            for s in shifts
+        ]
+        for ev in rollback_events:
+            if ev.get("status") != "failed":
+                shifted.append(ev)
+        shifted.sort(
+            key=lambda r: str(r.get("created_at_iso") or r.get("created_at") or ""),
+            reverse=True,
+        )
         return {
             "ok": True,
             "enabled": settings.enabled,
@@ -896,30 +1479,59 @@ class OpsEngine:
                 "nicht während 04:00-Scan oder 05:00-Drill. Bestehende Zeitpläne bleiben."
             ),
             "policy": policy.to_dict(),
+            "hosts": matrix["hosts"],
+            "scope": {
+                "patch_ids": matrix["patch_scope_ids"],
+                "image_ids": matrix["image_scope_ids"],
+            },
+            "scope_prompts": matrix["prompts"],
             "next": next_up,
             "running": running,
             "waiting": waiting,
-            "shifted": [
-                {
-                    "id": s.get("id"),
-                    "window_id": s.get("window_id"),
-                    "kind": s.get("kind"),
-                    "target_name": s.get("target_name"),
-                    "stack": s.get("stack"),
-                    "old_start_hm": s.get("old_start_hm"),
-                    "new_start_hm": s.get("new_start_hm"),
-                    "reason": s.get("reason"),
-                    "created_at": s.get("created_at"),
-                }
-                for s in shifts
-            ],
+            "rollback_failed": [e for e in rollback_events if e.get("status") == "failed"],
+            "shifted": shifted,
+            "rollbacks": rollback_events,
             "done": done[:40],
             "live_jobs": {"backup": live_backup, "patch": live_patch},
             "time": format_de(now),
             "timezone": "Europe/Berlin",
         }
 
-    def _serialize_window(self, row: dict[str, Any], now: datetime) -> dict[str, Any]:
+    def _serialize_rollback(self, rec: dict[str, Any]) -> dict[str, Any]:
+        status = str(rec.get("status") or "")
+        status_label = {
+            "ok": "Zurückgesetzt",
+            "failed": "Rollback fehlgeschlagen",
+            "skipped": "Rollback übersprungen",
+        }.get(status, status)
+        out = {
+            "event": "rollback",
+            "id": rec.get("id"),
+            "window_id": rec.get("window_id"),
+            "kind": "rollback",
+            "job_kind": rec.get("job_kind"),
+            "job_kind_label": job_kind_label_de(str(rec.get("job_kind") or "")),
+            "target_id": rec.get("target_id"),
+            "target_name": rec.get("target_name"),
+            "snap_name": rec.get("snap_name") or "",
+            "reason": rec.get("reason"),
+            "reason_label": reason_label_de(str(rec.get("reason") or "")),
+            "status": status,
+            "status_label": status_label,
+            "error": rec.get("error") or "",
+            "created_at": rec.get("created_at"),
+            "created_at_iso": rec.get("created_at_iso"),
+            **actor_fields(via_agent=True),
+        }
+        return out
+
+    def _serialize_window(
+        self,
+        row: dict[str, Any],
+        now: datetime,
+        *,
+        rollback: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         start = self._parse_start(row)
         out = dict(row)
         out["start_de"] = format_de(start, with_uhr=True) if start else row.get("start_hm")
@@ -942,6 +1554,10 @@ class OpsEngine:
         ) and str(row.get("kind") or "") != KIND_DRILL
         dur = int(row.get("duration_min") or 10)
         out["duration_label"] = f"{dur} min"
+        via = str(row.get("source") or "") == SOURCE_AGENT
+        out.update(actor_fields(via_agent=via))
+        if rollback:
+            out["rollback"] = self._serialize_rollback(rollback)
         return out
 
 

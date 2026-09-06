@@ -225,6 +225,11 @@
     else if (kind === 'image-apply') head = 'Images werden aktualisiert';
     return head + (targetName ? ': ' + targetName : '…');
   }
+  function actorSuffix(job) {
+    if (!job) return '';
+    const label = job.actor_label || (job.via_agent ? 'durch Agent' : '');
+    return label ? ' · ' + label : '';
+  }
 
   function esc(s) {
     return String(s == null ? '' : s)
@@ -442,7 +447,7 @@
     const el = jp('explain');
     if (!el) return;
     const text = job && job.explanation;
-    const show = !!(text && job && (job.status === 'failed' || job.status === 'queued' || !job.ok || job.wave_item));
+    const show = !!(text && job && (job.status === 'failed' || job.status === 'queued' || !job.ok || job.wave_item || job.via_agent));
     if (!show) {
       el.textContent = '';
       el.classList.add('hidden');
@@ -454,8 +459,13 @@
 
   function updateProgress(job) {
     const pct = Math.max(0, Math.min(100, Number(job.percent) || 0));
+    const title = jp('title');
+    if (title && job.via_agent) {
+      const base = title.textContent.replace(/\s·\sdurch Agent$/, '');
+      title.textContent = base + actorSuffix(job);
+    }
     const phase = jp('phase');
-    if (phase) phase.textContent = job.phase || '—';
+    if (phase) phase.textContent = (job.phase || '—') + actorSuffix(job);
     const message = jp('message');
     if (message) message.textContent = job.message || job.status || '';
     const percent = jp('percent');

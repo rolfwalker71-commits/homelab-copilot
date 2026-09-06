@@ -414,8 +414,9 @@ def _enqueue_backup(
     restic_full_every_days: int = 7,
     restic_keep_last: int = 14,
     restic_keep_weekly: int = 8,
+    via_agent: bool = False,
 ):
-    job = JOBS.create(parent_id=parent_id, project=project)
+    job = JOBS.create(parent_id=parent_id, project=project, via_agent=via_agent)
 
     async def _bg() -> None:
         await _run_enqueued_backup(

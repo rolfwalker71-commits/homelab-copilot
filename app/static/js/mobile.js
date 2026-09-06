@@ -386,7 +386,8 @@
     }
     const next = (ops.next || []).slice(0, 5);
     const waiting = ops.waiting || [];
-    if (!next.length && !waiting.length) {
+    const prompts = ops.scope_prompts || [];
+    if (!next.length && !waiting.length && !prompts.length) {
       root.hidden = true;
       root.innerHTML = "";
       return;
@@ -419,9 +420,20 @@
           '">Bestätigen</button></article>'
       )
       .join("");
+    const scope = ops.scope || {};
+    const nPatch = (scope.patch_ids || []).length;
+    const nImg = (scope.image_ids || []).length;
+    const nAsk = (ops.scope_prompts || []).length;
+    const scopeLine =
+      "Patchen: " +
+      nPatch +
+      " · Images: " +
+      nImg +
+      (nAsk ? " · " + nAsk + " Host-Frage(n)" : "");
     root.innerHTML =
       '<article class="m-card"><h2 class="m-card-title">Nächste Fenster</h2>' +
-      '<p class="m-card-meta"><a href="/ops">Agent-Board</a></p></article>' +
+      '<p class="m-card-meta">' + esc(scopeLine) + '</p>' +
+      '<p class="m-card-meta"><a href="/ops">Agent-Board · Host-Auswahl</a></p></article>' +
       nextHtml +
       waitHtml;
     root.querySelectorAll("[data-m-ops-confirm]").forEach((btn) => {

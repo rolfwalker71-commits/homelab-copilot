@@ -310,7 +310,10 @@
     const pctEl = document.getElementById('bp-percent');
     if (pctEl) pctEl.textContent = pct + ' %';
     const phase = document.getElementById('bp-phase');
-    if (phase) phase.textContent = job.phase || '—';
+    if (phase) {
+      const actor = job.via_agent ? ' · ' + (job.actor_label || 'durch Agent') : '';
+      phase.textContent = (job.phase || '—') + actor;
+    }
     const msg = document.getElementById('bp-message');
     if (msg) msg.textContent = job.message || '';
     const log = document.getElementById('bp-log');

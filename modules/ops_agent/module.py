@@ -74,7 +74,21 @@ class PolicyPayload(BaseModel):
     focus_mode: str = Field(default="all", pattern="^(all|only|exclude)$")
     focus_ids: list[str] = Field(default_factory=list)
     focus_tags: list[str] = Field(default_factory=list)
+    patch_scope_ids: list[str] | None = None
+    image_scope_ids: list[str] | None = None
     enabled: bool | None = True
+
+
+class ScopePayload(BaseModel):
+    patch_scope_ids: list[str] = Field(default_factory=list)
+    image_scope_ids: list[str] = Field(default_factory=list)
+
+
+class ScopePromptPayload(BaseModel):
+    prompt_id: int = Field(..., ge=1)
+    patch: bool | None = None
+    image: bool | None = None
+    drop: bool | None = None
 
 
 class SettingsPayload(BaseModel):
@@ -96,6 +110,7 @@ async def api_board() -> dict[str, Any]:
 @router.post("/policy")
 async def api_save_policy(payload: PolicyPayload) -> dict[str, Any]:
     engine = _get_engine()
+    current = await engine.store.get_policy()
     policy = ConfirmPolicy(
         answered=True,
         confirm_kernel_docker=payload.confirm_kernel_docker,
@@ -106,6 +121,16 @@ async def api_save_policy(payload: PolicyPayload) -> dict[str, Any]:
         focus_mode=payload.focus_mode,
         focus_ids=payload.focus_ids,
         focus_tags=payload.focus_tags,
+        patch_scope_ids=(
+            payload.patch_scope_ids
+            if payload.patch_scope_ids is not None
+            else current.patch_scope_ids
+        ),
+        image_scope_ids=(
+            payload.image_scope_ids
+            if payload.image_scope_ids is not None
+            else current.image_scope_ids
+        ),
     )
     saved = await engine.store.save_policy(policy)
     if payload.enabled is not None:
@@ -136,6 +161,34 @@ async def api_settings(payload: SettingsPayload) -> dict[str, Any]:
         "quiet_start": settings.quiet_start,
         "quiet_end": settings.quiet_end,
     }
+
+
+@router.post("/scope")
+async def api_save_scope(payload: ScopePayload) -> dict[str, Any]:
+    engine = _get_engine()
+    saved = await engine.save_scope(
+        patch_scope_ids=payload.patch_scope_ids,
+        image_scope_ids=payload.image_scope_ids,
+    )
+    return {
+        "ok": True,
+        "policy": saved.to_dict(),
+        "message": "Host-Auswahl gespeichert. Der Agent nutzt nur diese Listen.",
+    }
+
+
+@router.post("/scope-prompt")
+async def api_answer_scope_prompt(payload: ScopePromptPayload) -> dict[str, Any]:
+    try:
+        row = await _get_engine().answer_host_prompt(
+            payload.prompt_id,
+            patch=payload.patch,
+            image=payload.image,
+            drop=payload.drop,
+        )
+    except RuntimeError as exc:
+        raise _http(exc) from exc
+    return {"ok": True, "prompt": row}
 
 
 @router.post("/plan")
@@ -179,7 +232,7 @@ async def api_start(payload: WindowIdPayload) -> dict[str, Any]:
 
 class OpsAgentModule:
     name = "ops_agent"
-    version = "0.1.0"
+    version = "0.3.0"
     description = (
         "Plant Patch- und Backup-Fenster selbst, prüft Plausibilität, "
         "verschiebt bei Überlauf und startet über die bestehenden Engines."
@@ -235,6 +288,7 @@ class OpsAgentModule:
                 project=str(window.get("stack") or ""),
                 snapshot=_snap(),
                 engine=str(window.get("engine") or "tar"),
+                via_agent=True,
             )
             asyncio.create_task(coro(), name=f"ops-backup-{job.id}")
             return job.id
@@ -270,6 +324,16 @@ class OpsAgentModule:
             except Exception:
                 return []
 
+        async def _delete_snap(guest_id: str, snap_name: str) -> Any:
+            from patcher.pre_snap import delete_pre_snapshot
+
+            return await delete_pre_snapshot(guest_id, snap_name, via_agent=True)
+
+        async def _rollback_snap(guest_id: str, snap_name: str) -> Any:
+            from patcher.pre_snap import rollback_pre_snapshot
+
+            return await rollback_pre_snapshot(guest_id, snap_name, via_agent=True)
+
         async def _notify(title: str, body: str) -> None:
             app_store = getattr(app.state, "app_store", None)
             if app_store is None:
@@ -292,6 +356,8 @@ class OpsAgentModule:
             list_patch_jobs=_patch_jobs,
             get_inventory_tags=_tags,
             notify_shift=_notify,
+            delete_guest_snap=_delete_snap,
+            rollback_guest_snap=_rollback_snap,
         )
         app.state.ops_engine = _engine
 

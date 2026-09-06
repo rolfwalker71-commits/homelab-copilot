@@ -1053,14 +1053,17 @@ class WaveEngine:
         filt = str(item.get("package_filter") or "security")
         packages = [str(p) for p in (item.get("packages") or []) if p]
         job_kind = "image-apply" if bucket == BUCKET_IMAGES else "apply"
-        job = JOBS.create(kind=job_kind, target_id=target_id)
+        job = JOBS.create(kind=job_kind, target_id=target_id, via_agent=True)
         JOBS.set_progress(
             job.id,
             phase="Welle",
             percent=4,
             message=f"Wellen-Position: {_bucket_de(bucket)} auf {item.get('target_name') or target_id}",
         )
-        JOBS.append_log(job.id, explain_wave_item({**item, "status": STATUS_RUNNING}))
+        JOBS.append_log(
+            job.id,
+            explain_wave_item({**item, "status": STATUS_RUNNING, "via_agent": True}),
+        )
         try:
             iid = int(item.get("id") or 0)
             if iid > 0:

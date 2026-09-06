@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any
 
+from ops_agent.actor import agent_phrase, by_agent, is_via_agent
 from patcher.config import PatcherSettings, get_patcher_settings
 from patcher.llm import LlmError
 
@@ -96,16 +97,31 @@ def explain_wave_item(item: dict[str, Any]) -> str:
     elif status == "running":
         sentences.append("Der Apply läuft gerade über die bestehende Patcher-Pipeline.")
     elif status == "success":
-        sentences.append("Fertig. Der nächste Host der Welle folgt nur nach diesem Erfolg.")
+        if is_via_agent(item):
+            sentences.append(agent_phrase("patches_applied" if bucket != "images" else "images_applied") + ".")
+        else:
+            sentences.append("Fertig. Der nächste Host der Welle folgt nur nach diesem Erfolg.")
     elif status == "failed":
         sentences.append(
             "Die Welle stoppt hier — kein stiller Retry."
             + (f" {error}" if error else "")
         )
-        sentences.append(
-            "Vor dem nächsten Versuch den Host prüfen; ein hlops-Snapshot (PATCHER_SNAP_KEEP) "
-            "kann das Rollback erleichtern."
-        )
+        rb = item.get("rollback") if isinstance(item.get("rollback"), dict) else None
+        if rb and rb.get("status") == "ok":
+            sentences.append(
+                agent_phrase("rolled_back", snap=str(rb.get("snap_name") or ""))
+            )
+        elif rb and rb.get("status") == "failed":
+            sentences.append(
+                by_agent("Rollback fehlgeschlagen — bitte den Host prüfen. Kein weiterer Versuch.")
+            )
+        elif rb and rb.get("status") == "skipped":
+            sentences.append(by_agent(str(rb.get("error") or "Kein Pre-Apply-Snapshot — Rollback übersprungen.")))
+        else:
+            sentences.append(
+                "Vor dem nächsten Versuch den Host prüfen; ein hlops-Snapshot (PATCHER_SNAP_KEEP) "
+                "kann das Rollback erleichtern."
+            )
     elif status == "skipped":
         sentences.append("Übersprungen, weil die Welle gestoppt oder nach einem Fehler beendet wurde.")
     else:
@@ -133,13 +149,25 @@ def explain_apply_run(run: dict[str, Any]) -> str:
         sentences.append("Fehlgeschlagen. Die Welle stoppt bei einem Apply-Fehler ohne Retry.")
         if error:
             sentences.append(error)
-        sentences.append(
-            "Logs und einen hlops-Snapshot (PATCHER_SNAP_KEEP) prüfen, bevor du neu planst."
-        )
+        rb = run.get("rollback") if isinstance(run.get("rollback"), dict) else None
+        if rb and rb.get("status") == "ok":
+            sentences.append(agent_phrase("rolled_back", snap=str(rb.get("snap_name") or "")))
+        elif is_via_agent(run):
+            sentences.append(by_agent("Logs und den hlops-Snapshot prüfen, bevor du neu planst."))
+        else:
+            sentences.append(
+                "Logs und einen hlops-Snapshot (PATCHER_SNAP_KEEP) prüfen, bevor du neu planst."
+            )
     elif status == "running":
         sentences.append("Läuft noch — Snapshot zuerst, dann apt/dnf/apk wie bisher.")
+        if is_via_agent(run):
+            sentences.append(by_agent("Der Agent spielt ein."))
     else:
-        sentences.append("Eingespielt. Nächster Host der Welle nur nach Erfolg.")
+        if is_via_agent(run):
+            key = "images_applied" if filt == "images" else "patches_applied"
+            sentences.append(agent_phrase(key) + ".")
+        else:
+            sentences.append("Eingespielt. Nächster Host der Welle nur nach Erfolg.")
         if run.get("reboot_required"):
             sentences.append("Reboot empfohlen — bitte manuell bestätigen, kein automatischer Neustart.")
     return " ".join(sentences[:5])
@@ -188,15 +216,34 @@ def explain_patch_job(job: dict[str, Any]) -> str:
         if message:
             sentences.append(message)
     elif status == "success":
-        sentences.append(message or "Erfolgreich abgeschlossen.")
+        if is_via_agent(job):
+            if kind == "image-apply":
+                sentences.append(agent_phrase("images_applied") + ".")
+            elif kind in ("apply", "apply-batch"):
+                sentences.append(agent_phrase("patches_applied") + ".")
+            else:
+                sentences.append(by_agent(message or "Erfolgreich abgeschlossen."))
+        else:
+            sentences.append(message or "Erfolgreich abgeschlossen.")
         sentences.append("Als Nächstes: nächsten Host der Welle oder manuell den Scan prüfen.")
     elif status == "failed":
         sentences.append("Fehlgeschlagen — die Welle stoppt bei einem Apply-Fehler ohne Retry-Schleife.")
         if error or message:
             sentences.append(error or message)
-        sentences.append(
-            "Logs und einen hlops-Snapshot (PATCHER_SNAP_KEEP) prüfen, bevor du neu planst."
-        )
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        rb = result.get("rollback") if isinstance(result, dict) else None
+        if not rb and isinstance(job.get("rollback"), dict):
+            rb = job.get("rollback")
+        if rb and rb.get("status") == "ok":
+            sentences.append(agent_phrase("rolled_back", snap=str(rb.get("snap_name") or "")))
+        elif rb and rb.get("status") == "failed":
+            sentences.append(by_agent("Rollback fehlgeschlagen — kein weiterer Versuch."))
+        elif rb and rb.get("status") == "skipped":
+            sentences.append(by_agent(str(rb.get("error") or "Kein Pre-Apply-Snapshot.")))
+        else:
+            sentences.append(
+                "Logs und einen hlops-Snapshot (PATCHER_SNAP_KEEP) prüfen, bevor du neu planst."
+            )
     else:
         sentences.append(message or "Bereit.")
 

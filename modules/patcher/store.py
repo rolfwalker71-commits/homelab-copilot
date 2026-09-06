@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS apply_runs (
     created_at TEXT NOT NULL,
     created_at_iso TEXT NOT NULL,
     finished_at TEXT,
-    finished_at_iso TEXT
+    finished_at_iso TEXT,
+    via_agent INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_patcher_apply_created ON apply_runs(created_at_iso DESC);
 
@@ -176,7 +177,17 @@ class PatcherStore:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA foreign_keys = ON")
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        db = self._require()
+        async with db.execute("PRAGMA table_info(apply_runs)") as cur:
+            cols = {row[1] for row in await cur.fetchall()}
+        if "via_agent" not in cols:
+            await db.execute(
+                "ALTER TABLE apply_runs ADD COLUMN via_agent INTEGER NOT NULL DEFAULT 0"
+            )
 
     async def close(self) -> None:
         if self._db:
@@ -476,6 +487,7 @@ class PatcherStore:
         package_filter: str,
         packages: list[str] | None = None,
         pm: str | None = None,
+        via_agent: bool = False,
     ) -> int:
         db = self._require()
         stamp, stamp_iso = self._stamp()
@@ -483,8 +495,8 @@ class PatcherStore:
             """
             INSERT INTO apply_runs (
                 target_id, target_name, package_filter, packages_json,
-                status, pm, created_at, created_at_iso
-            ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?)
+                status, pm, created_at, created_at_iso, via_agent
+            ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)
             """,
             (
                 target_id,
@@ -494,6 +506,7 @@ class PatcherStore:
                 pm,
                 stamp,
                 stamp_iso,
+                1 if via_agent else 0,
             ),
         )
         await db.commit()
@@ -553,6 +566,11 @@ class PatcherStore:
     def _apply_dict(self, row: aiosqlite.Row) -> dict[str, Any]:
         d = dict(row)
         d["reboot_required"] = bool(d.get("reboot_required"))
+        d["via_agent"] = bool(d.get("via_agent"))
+        if d["via_agent"]:
+            from ops_agent.actor import actor_fields
+
+            d.update(actor_fields(via_agent=True))
         raw = d.get("packages_json")
         if isinstance(raw, str) and raw:
             try:

@@ -35,6 +35,7 @@ from patcher.release_upgrade import perform_release_upgrade
 from patcher.config import get_patcher_settings
 from patcher import cron as cron_mod
 from patcher.explain import explain_apply_run, explain_patch_job
+from ops_agent.actor import agent_phrase, by_agent
 from patcher.jobs import JOBS
 from patcher.llm import LlmError, summarize_scan
 from patcher.scan import ScanError, scan_target
@@ -228,6 +229,8 @@ class ImageApplyPayload(BaseModel):
     restart: bool = True
     prune: bool = True
     wait: bool = False
+    snapshot_first: bool = True
+    proceed_without_snapshot: bool = False
 
 
 class ReleaseUpgradePayload(BaseModel):
@@ -420,6 +423,18 @@ async def _run_image_scan_job(
         JOBS.finish(job_id, status="failed", error=str(exc))
 
 
+def _job_via_agent(job_id: str) -> bool:
+    job = JOBS.get(job_id)
+    return bool(job and getattr(job, "via_agent", False))
+
+
+def _fail_result(snap_info: dict[str, Any] | None, *, via_agent: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {"via_agent": via_agent}
+    if isinstance(snap_info, dict) and not snap_info.get("skipped") and snap_info.get("name"):
+        out["snapshot"] = snap_info
+    return out
+
+
 async def _run_image_apply_job(
     job_id: str,
     *,
@@ -428,13 +443,35 @@ async def _run_image_apply_job(
     names: list[str],
     restart: bool,
     prune: bool = True,
+    snapshot_first: bool = True,
+    proceed_without_snapshot: bool = False,
 ) -> None:
     store = _store
     if store is None:
         JOBS.finish(job_id, status="failed", error="Store nicht bereit")
         return
+    via_agent = _job_via_agent(job_id)
+    snap_info: dict[str, Any] | None = None
     try:
         target = await resolve_target(store, snapshot, target_id)
+        JOBS.set_progress(
+            job_id,
+            phase="Snapshot",
+            percent=6,
+            message=f"Snapshot vor Image-Update auf {target.name}…",
+        )
+
+        async def on_snap_log(line: str) -> None:
+            JOBS.append_log(job_id, line)
+
+        snap_info = await maybe_pre_snapshot(
+            target,
+            snapshot_first=snapshot_first,
+            proceed_without_snapshot=proceed_without_snapshot,
+            on_log=on_snap_log,
+            reason="Image-Update",
+            via_agent=via_agent,
+        )
         JOBS.set_progress(
             job_id,
             phase="Pull",
@@ -475,6 +512,8 @@ async def _run_image_apply_job(
             prune=prune,
             on_line=on_line,
         )
+        if isinstance(result, dict):
+            result = {**result, "snapshot": snap_info, "via_agent": via_agent}
         JOBS.set_progress(
             job_id, phase="Prüfen", percent=90, message="Zähle verbleibende Image-Updates…"
         )
@@ -499,6 +538,12 @@ async def _run_image_apply_job(
             done_msg = f"{done_msg} Noch {remaining} Image-Update(s)."
         else:
             done_msg = f"{done_msg} Keine weiteren Image-Updates."
+        if via_agent:
+            done_msg = (
+                agent_phrase("images_applied")
+                if done_msg.startswith("Images aktualisiert")
+                else by_agent(done_msg)
+            )
         JOBS.finish(
             job_id,
             status="success",
@@ -508,10 +553,20 @@ async def _run_image_apply_job(
         )
     except (DockerControlError, RuntimeError) as exc:
         msg = getattr(exc, "message", None) or str(exc)
-        JOBS.finish(job_id, status="failed", error=msg)
+        JOBS.finish(
+            job_id,
+            status="failed",
+            error=msg,
+            result=_fail_result(snap_info, via_agent=via_agent),
+        )
     except Exception as exc:
         logger.exception("image-apply job failed")
-        JOBS.finish(job_id, status="failed", error=str(exc))
+        JOBS.finish(
+            job_id,
+            status="failed",
+            error=str(exc),
+            result=_fail_result(snap_info, via_agent=via_agent),
+        )
 
 
 async def _run_scan_job(
@@ -798,21 +853,28 @@ async def _apply_one_target(
     reboot_after: bool = False,
     snapshot_first: bool = True,
     proceed_without_snapshot: bool = False,
+    via_agent: bool = False,
+    snap_holder: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     apply_id = await store.create_apply_run(
         target_id=target.id,
         target_name=target.name,
         package_filter=package_filter,
         packages=packages,
+        via_agent=via_agent,
     )
     try:
-        await maybe_pre_snapshot(
+        snap_info = await maybe_pre_snapshot(
             target,
             snapshot_first=snapshot_first,
             proceed_without_snapshot=proceed_without_snapshot,
             on_log=on_log,
             reason="Patch",
+            via_agent=via_agent,
         )
+        if snap_holder is not None:
+            snap_holder.clear()
+            snap_holder.update(snap_info)
         result = await apply_updates(
             target,
             package_filter=package_filter,
@@ -828,7 +890,7 @@ async def _apply_one_target(
             reboot_required=bool(result.get("reboot_required")),
             pm=result.get("pm"),
         )
-        return {"ok": True, "apply_id": apply_id, **result}
+        return {"ok": True, "apply_id": apply_id, "snapshot": snap_info, "via_agent": via_agent, **result}
     except Exception as exc:
         msg = getattr(exc, "message", None) or str(exc)
         try:
@@ -856,6 +918,8 @@ async def _run_apply_job(
         JOBS.finish(job_id, status="failed", error="Store nicht bereit")
         return
     apply_id: int | None = None
+    via_agent = _job_via_agent(job_id)
+    snap_holder: dict[str, Any] = {}
     try:
         target = await resolve_target(store, snapshot, target_id)
         JOBS.set_progress(
@@ -886,6 +950,8 @@ async def _run_apply_job(
             reboot_after=reboot_after,
             snapshot_first=snapshot_first,
             proceed_without_snapshot=proceed_without_snapshot,
+            via_agent=via_agent,
+            snap_holder=snap_holder,
         )
         apply_id = result.get("apply_id")
         if apply_id is not None:
@@ -900,6 +966,14 @@ async def _run_apply_job(
             msg = f"Updates eingespielt. Reboot fehlgeschlagen: {result.get('reboot_error')}"
         elif result.get("reboot_required"):
             msg += " Reboot empfohlen — bitte manuell bestätigen."
+        if via_agent:
+            msg = (
+                agent_phrase("patches_applied")
+                if msg == "Updates eingespielt."
+                else by_agent(msg)
+            )
+        if isinstance(result, dict):
+            result = {**result, "via_agent": via_agent}
         JOBS.finish(
             job_id,
             status="success",
@@ -908,10 +982,20 @@ async def _run_apply_job(
         )
     except (ApplyError, DockerControlError) as exc:
         msg = getattr(exc, "message", None) or str(exc)
-        JOBS.finish(job_id, status="failed", error=msg)
+        JOBS.finish(
+            job_id,
+            status="failed",
+            error=msg,
+            result=_fail_result(snap_holder, via_agent=via_agent),
+        )
     except Exception as exc:
         logger.exception("apply job failed")
-        JOBS.finish(job_id, status="failed", error=str(exc))
+        JOBS.finish(
+            job_id,
+            status="failed",
+            error=str(exc),
+            result=_fail_result(snap_holder, via_agent=via_agent),
+        )
 
 
 async def _run_apply_batch_job(
@@ -1580,6 +1664,8 @@ async def api_image_apply(
             names=names,
             restart=payload.restart,
             prune=payload.prune,
+            snapshot_first=payload.snapshot_first,
+            proceed_without_snapshot=payload.proceed_without_snapshot,
         )
         done = JOBS.get(job.id)
         return done.to_dict() if done else {"job_id": job.id, "status": "unknown"}
@@ -1592,6 +1678,8 @@ async def api_image_apply(
         names=names,
         restart=payload.restart,
         prune=payload.prune,
+        snapshot_first=payload.snapshot_first,
+        proceed_without_snapshot=payload.proceed_without_snapshot,
     )
     return job.to_dict()
 

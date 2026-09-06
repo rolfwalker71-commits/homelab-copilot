@@ -27,7 +27,7 @@ from backup_verifier.planner import (
     parse_hhmm,
     windows_overlap,
 )
-from ops_agent.policy import ConfirmPolicy, in_focus, needs_human
+from ops_agent.policy import ConfirmPolicy, in_job_scope, needs_human
 
 KIND_BACKUP = "backup"
 KIND_PATCH = "patch"
@@ -53,7 +53,8 @@ REASON_CONFLICT = "Konflikt mit Backup/Patch auf demselben Host."
 REASON_RUNNING = "Backup, Restore oder Apply läuft bereits auf diesem Ziel."
 REASON_NO_AUTO = "Host ist mit no-auto-patch markiert."
 REASON_SNAP = "Snapshot nicht verfügbar — Patch-Fenster übersprungen."
-REASON_OUT_OF_FOCUS = "Liegt außerhalb des Agent-Fokus."
+REASON_OUT_OF_FOCUS = "Liegt außerhalb der Host-Auswahl."
+REASON_HOST_GONE = "Host ist weggefallen — warte auf deine Entscheidung."
 REASON_DRILL_BLOCK = "Restore-Drill um 05:00 — nicht in dieses Fenster legen."
 REASON_SCAN_BLOCK = "Täglicher Scan um 04:00 — nicht in dieses Fenster legen."
 
@@ -484,19 +485,42 @@ def propose_windows(
     disk_critical: dict[str, bool] | None = None,
     running_targets: set[str] | None = None,
     snap_unavailable: set[str] | None = None,
+    gone_ids: set[str] | None = None,
 ) -> tuple[list[PlannedWindow], list[PlannedWindow]]:
     """Assign non-overlapping slots. Returns (planned, skipped)."""
     online_map = host_online or {}
     disk_map = disk_critical or {}
     running = running_targets or set()
     no_snap = snap_unavailable or set()
+    gone = {str(x).strip() for x in (gone_ids or set()) if str(x).strip()}
     live = list(occupied)
     planned: list[PlannedWindow] = []
     skipped: list[PlannedWindow] = []
     cursor = preferred_start_min(live, now, quiet_start=quiet_start)
 
     for need in needs:
-        if not in_focus(policy, target_id=need.target_id, tags=need.tags):
+        if need.target_id in gone and need.kind == KIND_PATCH:
+            skipped.append(
+                PlannedWindow(
+                    kind=need.kind,
+                    target_id=need.target_id,
+                    target_name=need.target_name,
+                    stack=need.stack,
+                    bucket=need.bucket or need.kind,
+                    status=STATUS_SKIPPED,
+                    source=need.source,
+                    reason=REASON_HOST_GONE,
+                    tags=need.tags,
+                )
+            )
+            continue
+        if not in_job_scope(
+            policy,
+            kind=need.kind,
+            bucket=need.bucket,
+            target_id=need.target_id,
+            gone_ids=gone,
+        ):
             skipped.append(
                 PlannedWindow(
                     kind=need.kind,

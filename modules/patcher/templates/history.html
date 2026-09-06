@@ -73,10 +73,11 @@
                 '<div><strong>' + esc(a.target_name || a.target_id) + '</strong>' +
                 '<p class="text-xs text-[var(--muted)]">' + esc(a.created_at) +
                 ' · ' + esc(a.package_filter === 'release-upgrade' ? 'Release-Upgrade' : a.package_filter) +
+                (a.via_agent || a.actor_label ? ' · ' + esc(a.actor_label || 'durch Agent') : '') +
                 (a.reboot_required ? ' · Reboot' : '') + '</p></div>' +
                 statusChip(a.status) +
               '</div>' +
-              (a.explanation && (a.status === 'failed' || a.status === 'running')
+              (a.explanation && (a.status === 'failed' || a.status === 'running' || a.via_agent)
                 ? '<p class="mt-2 text-sm leading-snug break-words">' + esc(a.explanation) + '</p>'
                 : '') +
               (a.error_message ? '<p class="mt-1" style="color:var(--danger,#c44)">' + esc(a.error_message) + '</p>' : '') +

@@ -26,9 +26,11 @@ class ConfirmPolicy:
     confirm_production: bool = False
     confirm_nothing: bool = False
     production_tags: list[str] = field(default_factory=lambda: list(PROD_TAGS))
-    focus_mode: str = "all"  # all | only | exclude
+    focus_mode: str = "all"  # legacy; host matrix is the source of truth
     focus_ids: list[str] = field(default_factory=list)
     focus_tags: list[str] = field(default_factory=list)
+    patch_scope_ids: list[str] = field(default_factory=list)
+    image_scope_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +43,8 @@ class ConfirmPolicy:
             "focus_mode": self.focus_mode,
             "focus_ids": list(self.focus_ids),
             "focus_tags": list(self.focus_tags),
+            "patch_scope_ids": list(self.patch_scope_ids),
+            "image_scope_ids": list(self.image_scope_ids),
             "defaults_note": DEFAULTS_NOTE,
             "hard_stops": list(HARD_STOPS),
         }
@@ -48,7 +52,8 @@ class ConfirmPolicy:
 
 DEFAULTS_NOTE = (
     "Standard, bis du etwas änderst: Backups und Security auf bekannten Hosts "
-    "laufen selbst. Kernel, Docker-Engine und das erste Backup-Fenster auf einem "
+    "laufen selbst — aber nur auf Hosts, die du in der Liste für Patchen bzw. "
+    "Images anhakst. Kernel, Docker-Engine und das erste Backup-Fenster auf einem "
     "neuen Gast warten auf dich. DistUpgrade, Wipe, Power-Cycle und Restore-auf-Prod "
     "macht der Agent nie."
 )
@@ -82,11 +87,60 @@ def policy_from_row(row: dict[str, Any] | None) -> ConfirmPolicy:
             for t in (row.get("focus_tags") or [])
             if str(t).strip()
         ],
+        patch_scope_ids=_norm_ids(row.get("patch_scope_ids")),
+        image_scope_ids=_norm_ids(row.get("image_scope_ids")),
     )
+
+
+def _norm_ids(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        tid = str(item).strip()
+        key = tid.lower()
+        if not tid or key in seen:
+            continue
+        seen.add(key)
+        out.append(tid)
+    return out
 
 
 def _norm_tags(tags: list[str] | None) -> set[str]:
     return {str(t).strip().lower() for t in (tags or []) if str(t).strip()}
+
+
+def in_id_list(ids: list[str], target_id: str) -> bool:
+    """Empty list is never a match — no silent 'all hosts'."""
+    wanted = {str(x).strip().lower() for x in ids if str(x).strip()}
+    if not wanted:
+        return False
+    return str(target_id or "").strip().lower() in wanted
+
+
+def in_job_scope(
+    policy: ConfirmPolicy,
+    *,
+    kind: str,
+    bucket: str = "",
+    target_id: str = "",
+    gone_ids: set[str] | None = None,
+) -> bool:
+    """Patch and image windows use separate persisted lists. Empty = no autonomous wave."""
+    kind_n = str(kind or "").strip().lower()
+    bucket_n = str(bucket or "").strip().lower()
+    tid = str(target_id or "").strip()
+    if kind_n in ("backup", "drill", "restore"):
+        return True
+    gone = {str(x).strip().lower() for x in (gone_ids or set()) if str(x).strip()}
+    if tid and tid.lower() in gone:
+        return False
+    if bucket_n == "images" or kind_n == "image":
+        return in_id_list(policy.image_scope_ids, tid)
+    if kind_n == "patch":
+        return in_id_list(policy.patch_scope_ids, tid)
+    return True
 
 
 def in_focus(policy: ConfirmPolicy, *, target_id: str, tags: list[str] | None) -> bool:

@@ -12,7 +12,9 @@ from ops_agent.planner import (
     Occupied,
     PlannedWindow,
     REASON_BACKUP_OVERRUN,
+    REASON_HOST_GONE,
     REASON_HOST_OFFLINE,
+    REASON_OUT_OF_FOCUS,
     STATUS_ACCEPTED,
     STATUS_SKIPPED,
     STATUS_WAITING,
@@ -27,6 +29,15 @@ from ops_agent.policy import ConfirmPolicy, default_policy, needs_human
 
 def _now() -> datetime:
     return datetime(2026, 9, 6, 18, 0, tzinfo=BERLIN)
+
+
+def _pol(*ids: str, images: list[str] | None = None, **kwargs: object) -> ConfirmPolicy:
+    img = list(ids if images is None else images)
+    return ConfirmPolicy(
+        patch_scope_ids=list(ids),
+        image_scope_ids=img,
+        **kwargs,  # type: ignore[arg-type]
+    )
 
 
 class PolicyTests(unittest.TestCase):
@@ -103,7 +114,7 @@ class ConflictTests(unittest.TestCase):
             )
         ]
         planned, skipped = propose_windows(
-            needs, occupied, now=_now(), policy=default_policy()
+            needs, occupied, now=_now(), policy=_pol("lxc:pve:105")
         )
         self.assertEqual(skipped, [])
         self.assertEqual(len(planned), 1)
@@ -130,7 +141,7 @@ class ConflictTests(unittest.TestCase):
             ),
         ]
         planned, _ = propose_windows(
-            needs, [], now=_now(), policy=default_policy()
+            needs, [], now=_now(), policy=_pol("lxc:1", "lxc:2")
         )
         self.assertEqual(len(planned), 2)
         self.assertLessEqual(
@@ -191,7 +202,7 @@ class OfflineTests(unittest.TestCase):
             needs,
             [],
             now=_now(),
-            policy=default_policy(),
+            policy=_pol("lxc:9"),
             host_online={"lxc:9": False},
         )
         self.assertEqual(planned, [])
@@ -239,11 +250,144 @@ class WaitingTests(unittest.TestCase):
             )
         ]
         planned, _ = propose_windows(
-            needs, [], now=_now(), policy=default_policy()
+            needs, [], now=_now(), policy=_pol("lxc:1")
         )
         self.assertEqual(planned[0].status, STATUS_WAITING)
         self.assertTrue(planned[0].needs_confirm)
         self.assertIn("Kernel", planned[0].reason)
+
+
+class ScopeFilterTests(unittest.TestCase):
+    def test_empty_patch_scope_skips_all_patches(self) -> None:
+        needs = [
+            Need(
+                kind=KIND_PATCH,
+                target_id="lxc:1",
+                target_name="a",
+                bucket="security",
+                duration_min=20,
+            )
+        ]
+        planned, skipped = propose_windows(
+            needs, [], now=_now(), policy=default_policy()
+        )
+        self.assertEqual(planned, [])
+        self.assertEqual(skipped[0].reason, REASON_OUT_OF_FOCUS)
+
+    def test_empty_image_scope_skips_images_not_patches(self) -> None:
+        needs = [
+            Need(
+                kind=KIND_PATCH,
+                target_id="lxc:1",
+                target_name="a",
+                bucket="security",
+                duration_min=20,
+            ),
+            Need(
+                kind=KIND_PATCH,
+                target_id="lxc:1",
+                target_name="a",
+                bucket="images",
+                duration_min=30,
+            ),
+        ]
+        planned, skipped = propose_windows(
+            needs, [], now=_now(), policy=_pol("lxc:1", images=[])
+        )
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0].bucket, "security")
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0].bucket, "images")
+        self.assertEqual(skipped[0].reason, REASON_OUT_OF_FOCUS)
+
+    def test_patch_and_image_lists_are_separate(self) -> None:
+        needs = [
+            Need(
+                kind=KIND_PATCH,
+                target_id="lxc:mail",
+                target_name="mail",
+                bucket="security",
+                duration_min=20,
+            ),
+            Need(
+                kind=KIND_PATCH,
+                target_id="lxc:wiki",
+                target_name="wiki",
+                bucket="images",
+                duration_min=30,
+            ),
+        ]
+        planned, skipped = propose_windows(
+            needs,
+            [],
+            now=_now(),
+            policy=_pol("lxc:mail", images=["lxc:wiki"]),
+        )
+        self.assertEqual({(w.target_id, w.bucket) for w in planned}, {
+            ("lxc:mail", "security"),
+            ("lxc:wiki", "images"),
+        })
+        self.assertEqual(skipped, [])
+
+    def test_unchecked_host_never_planned(self) -> None:
+        needs = [
+            Need(
+                kind=KIND_PATCH,
+                target_id="lxc:in",
+                target_name="in",
+                bucket="security",
+                duration_min=20,
+            ),
+            Need(
+                kind=KIND_PATCH,
+                target_id="lxc:out",
+                target_name="out",
+                bucket="security",
+                duration_min=20,
+            ),
+        ]
+        planned, skipped = propose_windows(
+            needs, [], now=_now(), policy=_pol("lxc:in")
+        )
+        self.assertEqual([w.target_id for w in planned], ["lxc:in"])
+        self.assertEqual(skipped[0].target_id, "lxc:out")
+
+    def test_gone_host_skipped_even_if_in_scope(self) -> None:
+        needs = [
+            Need(
+                kind=KIND_PATCH,
+                target_id="lxc:gone",
+                target_name="gone",
+                bucket="security",
+                duration_min=20,
+            )
+        ]
+        planned, skipped = propose_windows(
+            needs,
+            [],
+            now=_now(),
+            policy=_pol("lxc:gone"),
+            gone_ids={"lxc:gone"},
+        )
+        self.assertEqual(planned, [])
+        self.assertEqual(skipped[0].reason, REASON_HOST_GONE)
+
+    def test_backup_ignores_patch_scope(self) -> None:
+        needs = [
+            Need(
+                kind=KIND_BACKUP,
+                target_id="lxc:new",
+                target_name="new",
+                stack="paperless",
+                duration_min=10,
+                has_existing_schedule=True,
+            )
+        ]
+        planned, skipped = propose_windows(
+            needs, [], now=_now(), policy=default_policy()
+        )
+        self.assertEqual(skipped, [])
+        self.assertEqual(len(planned), 1)
 
 
 if __name__ == "__main__":
