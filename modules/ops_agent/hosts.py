@@ -137,6 +137,28 @@ def collect_live_hosts(
     return out
 
 
+def overlay_local_scope(
+    hosts: list[dict[str, Any]],
+    *,
+    local_patch: list[str] | None,
+    local_image: list[str] | None,
+    dirty: bool,
+) -> list[dict[str, Any]]:
+    """Keep unsaved Patchen/Images ticks when the board rebuilds from the server."""
+    if not dirty:
+        return [dict(h) for h in hosts]
+    patch = {str(x).strip().lower() for x in (local_patch or []) if str(x).strip()}
+    image = {str(x).strip().lower() for x in (local_image or []) if str(x).strip()}
+    out: list[dict[str, Any]] = []
+    for h in hosts:
+        row = dict(h)
+        tid = str(row.get("id") or row.get("target_id") or "").strip().lower()
+        row["patch"] = tid in patch
+        row["image"] = tid in image
+        out.append(row)
+    return out
+
+
 def split_inventory_changes(
     *,
     live_ids: set[str],

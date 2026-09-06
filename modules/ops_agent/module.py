@@ -25,7 +25,7 @@ from app.core.topology import TopologyStore
 
 from ops_agent.config import get_ops_settings
 from ops_agent.engine import OpsEngine, run_ops_loop
-from ops_agent.policy import ConfirmPolicy, default_policy
+from ops_agent.policy import apply_interview, default_policy
 from ops_agent.store import OpsStore
 
 logger = logging.getLogger(__name__)
@@ -111,8 +111,8 @@ async def api_board() -> dict[str, Any]:
 async def api_save_policy(payload: PolicyPayload) -> dict[str, Any]:
     engine = _get_engine()
     current = await engine.store.get_policy()
-    policy = ConfirmPolicy(
-        answered=True,
+    policy = apply_interview(
+        current,
         confirm_kernel_docker=payload.confirm_kernel_docker,
         confirm_new_guest_backup=payload.confirm_new_guest_backup,
         confirm_production=payload.confirm_production,
@@ -121,16 +121,8 @@ async def api_save_policy(payload: PolicyPayload) -> dict[str, Any]:
         focus_mode=payload.focus_mode,
         focus_ids=payload.focus_ids,
         focus_tags=payload.focus_tags,
-        patch_scope_ids=(
-            payload.patch_scope_ids
-            if payload.patch_scope_ids is not None
-            else current.patch_scope_ids
-        ),
-        image_scope_ids=(
-            payload.image_scope_ids
-            if payload.image_scope_ids is not None
-            else current.image_scope_ids
-        ),
+        patch_scope_ids=payload.patch_scope_ids,
+        image_scope_ids=payload.image_scope_ids,
     )
     saved = await engine.store.save_policy(policy)
     if payload.enabled is not None:

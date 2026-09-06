@@ -60,12 +60,12 @@
 <article id="ops-scope" class="surface-tinted p-4 sm:p-5 mb-5 animate-in">
   <h2 class="font-display text-lg font-bold leading-snug break-words">Welche Hosts soll der Agent anfassen?</h2>
   <p class="mt-1 text-sm text-[var(--muted)] leading-snug">
-    Getrennt: Patchen und Image-Updates. Leer = keine autonome Welle dieser Art.
+    Haken speichern sich sofort. Getrennt: Patchen und Image-Updates. Leer = keine autonome Welle dieser Art.
     Neue oder weggefallene Gäste fragt der Agent einzeln nach — nichts wird stillschweigend ergänzt.
   </p>
   <div id="ops-scope-list" class="ops-scope-list mt-4" role="list"></div>
   <div class="mt-4 flex flex-wrap gap-2">
-    <button type="button" id="btn-ops-scope" class="btn btn-primary min-h-12">Auswahl speichern</button>
+    <button type="button" id="btn-ops-scope" class="btn btn-ghost min-h-12">Auswahl speichern</button>
   </div>
   <p id="ops-scope-msg" class="mt-2 text-sm text-[var(--muted)]" role="status"></p>
 </article>
@@ -115,6 +115,9 @@
     if (!res.ok) throw new Error(data.detail || data.message || res.statusText);
     return data;
   }
+  let scopeDirty = false;
+  let scopeSaving = false;
+  let scopeSaveTimer = 0;
   function fillPolicy(p) {
     if (!p) return;
     $('pol-kernel').checked = !!p.confirm_kernel_docker;
@@ -122,10 +125,24 @@
     $('pol-prod').checked = !!p.confirm_production;
     $('pol-nothing').checked = !!p.confirm_nothing;
   }
+  function scopeKey(id) {
+    return String(id == null ? '' : id).trim().toLowerCase();
+  }
+  function overlayDirtyTicks(hosts) {
+    const rows = hosts || [];
+    if (!scopeDirty && !scopeSaving) return rows;
+    const local = collectScope();
+    const patch = new Set((local.patch_scope_ids || []).map(scopeKey));
+    const image = new Set((local.image_scope_ids || []).map(scopeKey));
+    return rows.map((h) => {
+      const tid = scopeKey(h.id || h.target_id);
+      return Object.assign({}, h, { patch: patch.has(tid), image: image.has(tid) });
+    });
+  }
   function renderScope(hosts) {
     const root = $('ops-scope-list');
     if (!root) return;
-    const rows = hosts || [];
+    const rows = overlayDirtyTicks(hosts);
     if (!rows.length) {
       root.innerHTML = '<p class="text-sm text-[var(--muted)] leading-snug">Noch keine Hosts aus der Discovery. Nach dem nächsten Scan erscheinen sie hier.</p>';
       return;
@@ -167,6 +184,59 @@
       if (i && i.checked) image.push(id);
     });
     return { patch_scope_ids: patch, image_scope_ids: image };
+  }
+  function scheduleScopeSave() {
+    scopeDirty = true;
+    if (scopeSaveTimer) window.clearTimeout(scopeSaveTimer);
+    scopeSaveTimer = window.setTimeout(() => { saveScope(); }, 280);
+  }
+  function waitScopeIdle() {
+    return new Promise((resolve) => {
+      const tick = () => {
+        if (!scopeSaving) { resolve(); return; }
+        window.setTimeout(tick, 30);
+      };
+      tick();
+    });
+  }
+  async function saveScope(opts) {
+    const silent = !!(opts && opts.silent);
+    const msg = $('ops-scope-msg');
+    if (scopeSaveTimer) {
+      window.clearTimeout(scopeSaveTimer);
+      scopeSaveTimer = 0;
+    }
+    if (scopeSaving) {
+      scopeDirty = true;
+      await waitScopeIdle();
+      if (!scopeDirty) return;
+    }
+    scopeSaving = true;
+    try {
+      while (true) {
+        const payload = collectScope();
+        scopeDirty = false;
+        const data = await api('/scope', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        if (!silent && msg) msg.textContent = data.message || 'Auswahl gespeichert.';
+        if (!scopeDirty) break;
+      }
+    } catch (e) {
+      scopeDirty = true;
+      if (msg) msg.textContent = String(e.message || e);
+    } finally {
+      scopeSaving = false;
+    }
+  }
+  async function flushScopeSave() {
+    if (scopeSaveTimer) {
+      window.clearTimeout(scopeSaveTimer);
+      scopeSaveTimer = 0;
+    }
+    await waitScopeIdle();
+    if (scopeDirty) await saveScope({ silent: true });
   }
   function promptCard(p) {
     const name = p.target_name || p.target_id || 'Host';
@@ -357,6 +427,7 @@
   }
   async function load() {
     try {
+      await flushScopeSave();
       const data = await api('/board');
       renderBoard(data);
     } catch (e) {
@@ -380,18 +451,14 @@
     const box = $('ops-interview');
     if (box) box.hidden = !box.hidden;
   });
+  $('ops-scope-list')?.addEventListener('change', (ev) => {
+    const t = ev.target;
+    if (!t || !t.matches || !t.matches('input[data-scope]')) return;
+    scheduleScopeSave();
+  });
   $('btn-ops-scope')?.addEventListener('click', async () => {
-    const msg = $('ops-scope-msg');
-    try {
-      const data = await api('/scope', {
-        method: 'POST',
-        body: JSON.stringify(collectScope()),
-      });
-      if (msg) msg.textContent = data.message || 'Auswahl gespeichert.';
-      await load();
-    } catch (e) {
-      if (msg) msg.textContent = String(e.message || e);
-    }
+    await saveScope();
+    await load();
   });
   $('ops-enabled')?.addEventListener('change', async (ev) => {
     try {
@@ -409,6 +476,7 @@
     ev.preventDefault();
     const msg = $('ops-policy-msg');
     try {
+      await flushScopeSave();
       await api('/policy', {
         method: 'POST',
         body: JSON.stringify({

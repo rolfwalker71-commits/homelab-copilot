@@ -92,6 +92,58 @@ def policy_from_row(row: dict[str, Any] | None) -> ConfirmPolicy:
     )
 
 
+def apply_interview(
+    current: ConfirmPolicy,
+    *,
+    confirm_kernel_docker: bool,
+    confirm_new_guest_backup: bool,
+    confirm_production: bool,
+    confirm_nothing: bool,
+    production_tags: list[str] | None = None,
+    focus_mode: str | None = None,
+    focus_ids: list[str] | None = None,
+    focus_tags: list[str] | None = None,
+    patch_scope_ids: list[str] | None = None,
+    image_scope_ids: list[str] | None = None,
+) -> ConfirmPolicy:
+    """Interview answers must not wipe host scope unless lists are sent."""
+    mode = str(focus_mode or current.focus_mode or "all")
+    if mode not in ("all", "only", "exclude"):
+        mode = "all"
+    tags = production_tags if production_tags is not None else current.production_tags
+    if not isinstance(tags, list) or not tags:
+        tags = list(PROD_TAGS)
+    return ConfirmPolicy(
+        answered=True,
+        confirm_kernel_docker=bool(confirm_kernel_docker),
+        confirm_new_guest_backup=bool(confirm_new_guest_backup),
+        confirm_production=bool(confirm_production),
+        confirm_nothing=bool(confirm_nothing),
+        production_tags=[str(t).strip().lower() for t in tags if str(t).strip()],
+        focus_mode=mode,
+        focus_ids=(
+            [str(x).strip() for x in focus_ids if str(x).strip()]
+            if focus_ids is not None
+            else list(current.focus_ids)
+        ),
+        focus_tags=(
+            [str(t).strip().lower() for t in focus_tags if str(t).strip()]
+            if focus_tags is not None
+            else list(current.focus_tags)
+        ),
+        patch_scope_ids=(
+            _norm_ids(patch_scope_ids)
+            if patch_scope_ids is not None
+            else list(current.patch_scope_ids)
+        ),
+        image_scope_ids=(
+            _norm_ids(image_scope_ids)
+            if image_scope_ids is not None
+            else list(current.image_scope_ids)
+        ),
+    )
+
+
 def _norm_ids(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
