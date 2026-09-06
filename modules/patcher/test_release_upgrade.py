@@ -5,10 +5,26 @@ from __future__ import annotations
 import unittest
 from datetime import date
 
+from patcher.distupgrade_quirks import (
+    HLOPS_SKIP_MIGRATE_FLAG,
+    apply_extracted_controller_patches,
+    patch_signed_by_section,
+    should_skip_migrate_deb822,
+)
 from patcher.release import should_use_devel_flag, suggest_ubuntu_release
 from patcher.release_upgrade import _release_upgrade_cmd, _set_prompt_cmd
 
 ASOF = date(2026, 9, 5)
+
+_LINE_761 = """
+    def _addSecuritySources(self):
+        for e in self.sources.list:
+            e.section['Signed-By'] = '/usr/share/keyrings/ubuntu-archive-keyring.gpg'
+
+    def migrateToDeb822Sources(self):
+        logging.debug("migrateToDeb822Sources()")
+        self._do_migrate()
+"""
 
 
 def _hop_2410_to_2504():
@@ -55,6 +71,16 @@ class ReleaseUpgradeCmdTests(unittest.TestCase):
         self.assertIn("release-upgrader-sshd.pid", cmd)
         self.assertIn("gpgv", cmd)
         self.assertIn("chmod a+x", cmd)
+        self.assertIn("apt-clone", cmd)
+        self.assertIn("python3-apt", cmd)
+        self.assertIn("HLOPS_EOL_CODENAMES", cmd)
+        self.assertIn("oracular", cmd)
+        self.assertIn("klassisches sources.list-Format", cmd)
+        self.assertIn("HLOPS_SKIP_MIGRATE=1", cmd)
+        self.assertIn(HLOPS_SKIP_MIGRATE_FLAG, cmd)
+        self.assertIn("hasattr", cmd)
+        self.assertIn("signed_by", cmd)
+        self.assertIn("_addSecuritySources gegen fehlendes .section", cmd)
         self.assertNotIn("resolute.tar.gz", cmd)
         self.assertNotIn("do-release-upgrade -d", cmd)
         self.assertNotRegex(cmd, r"do-release-upgrade\s+-d\b")
@@ -95,6 +121,45 @@ class ReleaseUpgradeCmdTests(unittest.TestCase):
         self.assertNotIn("questing-updates", cmd)
         self.assertNotIn("do-release-upgrade -d", cmd)
         self.assertNotIn("resolute.tar.gz", cmd)
+        self.assertIn("HLOPS_SKIP_MIGRATE=1", cmd)
+        self.assertIn("apt-clone", cmd)
+
+
+class DistUpgradeQuirkTests(unittest.TestCase):
+    def test_signed_by_section_guard_on_line_761_fixture(self) -> None:
+        patched, n = patch_signed_by_section(_LINE_761)
+        self.assertEqual(n, 1)
+        self.assertIn("if hasattr(e, 'section'):", patched)
+        self.assertIn("e.section['Signed-By'] = '/usr/share/keyrings/ubuntu-archive-keyring.gpg'", patched)
+        self.assertIn("elif hasattr(e, 'signed_by'):", patched)
+        self.assertIn("e.signed_by = '/usr/share/keyrings/ubuntu-archive-keyring.gpg'", patched)
+        again, n2 = patch_signed_by_section(patched)
+        self.assertEqual(n2, 0)
+        self.assertEqual(again, patched)
+
+    def test_migrate_skip_flag_injected(self) -> None:
+        result = apply_extracted_controller_patches(_LINE_761, skip_migrate=True)
+        self.assertEqual(result.signed_by_count, 1)
+        self.assertTrue(result.migrate_guard)
+        self.assertIn(HLOPS_SKIP_MIGRATE_FLAG, result.text)
+        self.assertIn("skipped by hlops", result.text)
+        self.assertTrue(
+            any("migrateToDeb822Sources übersprungen" in n for n in result.notes)
+        )
+        keep = apply_extracted_controller_patches(_LINE_761, skip_migrate=False)
+        self.assertFalse(keep.migrate_guard)
+        self.assertNotIn(HLOPS_SKIP_MIGRATE_FLAG, keep.text)
+
+    def test_skip_migrate_flag_lxc_and_eol(self) -> None:
+        hop = _hop_2410_to_2504()
+        self.assertTrue(should_skip_migrate_deb822(hop, container=True, today=ASOF))
+        self.assertTrue(should_skip_migrate_deb822(hop, container=False, today=ASOF))
+        lts = _hop_2404_to_2604()
+        self.assertTrue(should_skip_migrate_deb822(lts, container=True, today=ASOF))
+        self.assertFalse(should_skip_migrate_deb822(lts, container=False, today=ASOF))
+        lts_cmd = _release_upgrade_cmd(lts, container=False)
+        self.assertIn("HLOPS_SKIP_MIGRATE=0", lts_cmd)
+        self.assertIn("hasattr", lts_cmd)
 
 
 if __name__ == "__main__":

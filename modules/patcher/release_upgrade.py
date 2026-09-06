@@ -23,6 +23,13 @@ from patcher.apply import (
 )
 from patcher.config import get_patcher_settings
 from patcher.detect import HostDetect, check_reboot_required, detect_host
+from patcher.distupgrade_quirks import (
+    apt_clone_install_snippet,
+    classic_sources_snippet,
+    eol_ubuntu_codenames,
+    extracted_patcher_snippet,
+    should_skip_migrate_deb822,
+)
 from patcher.release import (
     ReleaseHop,
     build_meta_release_pin,
@@ -94,6 +101,10 @@ def _release_upgrade_cmd(hop: ReleaseHop, *, container: bool) -> str:
     meta = build_meta_release_pin(source=hop.source, target=hop.target)
     urls = upgrade_tool_url_candidates(hop.target)
     url_list = " ".join(urls)
+    skip_migrate = should_skip_migrate_deb822(hop, container=container)
+    classic_sources = classic_sources_snippet(eol_codenames=eol_ubuntu_codenames())
+    apt_clone = apt_clone_install_snippet()
+    upgrader_patch = extracted_patcher_snippet(skip_migrate=skip_migrate)
     snap_skip = ""
     if container:
         snap_skip = (
@@ -161,7 +172,7 @@ if command -v gpgv >/dev/null 2>&1 && [ -s "$WORKDIR/$CODE.tar.gz.gpg" ]; then
 else
   echo "Hinweis: keine gpgv-Signaturprüfung (gpgv oder .gpg fehlt)."
 fi
-EXTRACT="$WORKDIR/$CODE.d"
+export EXTRACT="$WORKDIR/$CODE.d"
 echo "Entpacke nach $EXTRACT (--no-same-owner, nicht ins Arbeitsverzeichnis)"
 rm -rf "$EXTRACT"
 mkdir -p "$EXTRACT"
@@ -188,6 +199,7 @@ if [ ! -x "$SCRIPT" ]; then
 fi
 echo "DistUpgrade-Skript: $SCRIPT"
 echo HLOPS_HOP_TARGET=$CODE
+HLOPS_PATCHER_PLACEHOLDER
 mkdir -p /var/log/dist-upgrade /var/run
 # Spare sshd on :1022 hangs or is missing in LXC; we always come in via SSH.
 : > /var/run/release-upgrader-sshd.pid
@@ -214,7 +226,7 @@ fi
 """
         invoke = ""
 
-    return f"""
+    cmd = f"""
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C \\
   DEBIAN_PRIORITY=critical DEBCONF_NONINTERACTIVE_SEEN=true \\
   NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \\
@@ -251,15 +263,20 @@ URI_UNSTABLE_POSTFIX =
 URI_PROPOSED_POSTFIX =
 HLOPS_URI_EOF
 echo "meta-release gepinnt: {hop.source} → {hop.target} ({code})"
+HLOPS_CLASSIC_PLACEHOLDER
 apt-get install -y update-manager-core gpgv \\
   -o DPkg::Lock::Timeout=60 \\
   -o Acquire::ForceIPv4=true \\
   -o APT::Sandbox::User=root
+HLOPS_APTCLONE_PLACEHOLDER
 {snap_skip}if ! command -v do-release-upgrade >/dev/null 2>&1; then
   echo 'do-release-upgrade fehlt (update-manager-core)'; exit 2
 fi
 {fetch}{invoke}
 """
+    return cmd.replace("HLOPS_CLASSIC_PLACEHOLDER", classic_sources).replace(
+        "HLOPS_APTCLONE_PLACEHOLDER", apt_clone
+    ).replace("HLOPS_PATCHER_PLACEHOLDER", upgrader_patch)
 
 
 async def _emit(progress: ProgressFn | None, phase: str, percent: int, message: str) -> None:

@@ -308,6 +308,16 @@ def hop_failure_message(hop: "ReleaseHop", code: int, blob: str) -> str:
             + (f" (Ubuntu {ver})" if ver else "")
             + f" statt {want}.tar.gz ({hop.target})."
         )
+    low = blob or ""
+    if (
+        "ExplodedDeb822SourceEntry" in low
+        or "has no attribute 'section'" in low
+        or "has no attribute \"section\"" in low
+    ):
+        extra += (
+            " DistUpgrade _addSecuritySources: ExplodedDeb822SourceEntry"
+            " ohne .section (Ubuntu-Bug bei Deb822)."
+        )
     snap = (
         " Ein Proxmox-Snapshot (hlops-*) vor dem Versuch kann zur Rückkehr "
         "genutzt werden."

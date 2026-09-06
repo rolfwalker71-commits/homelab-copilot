@@ -263,6 +263,27 @@ class HopPinTests(unittest.TestCase):
         self.assertIn("Can not write to '/boot'", tail)
         self.assertNotIn("line 0", tail)
 
+    def test_failure_surfaces_deb822_section_attribute_error(self) -> None:
+        s = suggest_ubuntu_release(version_id="24.10", today=ASOF)
+        assert s is not None
+        hop = s.hops[0]
+        blob = (
+            "ERROR failed to import AptClone\n"
+            "DEBUG migrateToDeb822Sources()\n"
+            "File \".../plucky.d/DistUpgrade/DistUpgradeController.py\", "
+            "line 761, in _addSecuritySources\n"
+            "    e.section['Signed-By'] = "
+            "'/usr/share/keyrings/ubuntu-archive-keyring.gpg'\n"
+            "AttributeError: 'ExplodedDeb822SourceEntry' object has no "
+            "attribute 'section'\n"
+            "DistUpgrade Exit: 1"
+        )
+        msg = hop_failure_message(hop, 1, blob)
+        self.assertIn("ExplodedDeb822SourceEntry", msg)
+        self.assertIn("ohne .section", msg)
+        self.assertIn("AttributeError", msg)
+        self.assertIn("DistUpgrade Exit: 1", msg)
+
 
 class DebianSuggestTests(unittest.TestCase):
     def test_bookworm_trixie_suggest_only(self) -> None:
