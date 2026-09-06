@@ -807,15 +807,6 @@
                 <span class="topo-rail-item-name break-words">{{ g.name }}</span>
                 <span class="topo-rail-item-sub">
                   <span data-guest-live="rail-ip">{% if g.ip_addresses %}{{ g.ip_addresses[0] }}{% else %}{{ g.kind.value }}{% endif %}</span>{% if g.vmid %} · {{ g.vmid }}{% endif %}
-                  {% set rail_tags = (g.meta or {}).get('tags_list') or [] %}
-                  {% if rail_tags %}
-                  <span class="topo-rail-tags" data-pve-tag-list data-pve-node="{{ g.node or '' }}">
-                    {% for tag in rail_tags[:2] %}
-                    {{ pve_tag_chip_el(tag, g.node or '', 'topo-tag-chip--rail', 'span') }}
-                    {% endfor %}
-                    {% if rail_tags|length > 2 %}<span class="topo-rail-tags-more">…</span>{% endif %}
-                  </span>
-                  {% endif %}
                 </span>
               </span>
             </button>

@@ -1659,10 +1659,6 @@ html[data-theme="light"] .topo-rail-status-running {
 }
 
 .topo-rail-item-sub {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.2rem 0.35rem;
   font-size: 0.6875rem;
   line-height: 1.3;
   color: var(--muted);
@@ -1871,24 +1867,6 @@ html[data-theme="light"] .topo-tag-chip[data-pve-contrast="dark"] {
 
 html[data-chrome="android"] .topo-tag-chip {
   border-radius: 0.75rem;
-}
-
-.topo-tag-chip--rail {
-  max-width: 6.5rem;
-  padding: 0.04rem 0.32rem;
-  font-size: 0.625rem;
-}
-
-.topo-rail-tags {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.2rem;
-}
-
-.topo-rail-tags-more {
-  color: var(--muted);
-  font-size: 0.625rem;
 }
 
 .topo-inv-tag-chips {
