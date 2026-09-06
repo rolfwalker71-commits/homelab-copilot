@@ -1,7 +1,7 @@
 /*! Homelab Operations Copilot — dual chrome:
  *  android  → Material You 3 Expressive (mobile / <lg)
  *  desktop  → Fluent 2 (lg+)
- *  Seed: Homelab-Teal (#0D9488) + complementary ochre for structure
+ *  Seed: Homelab-Teal (#0D9488) + complementary orange for structure
  */
 
 html {
@@ -30,7 +30,7 @@ html[data-theme="light"] {
   --warn: #d9a63a;
   --danger: #e8a8a4;
   --info: #5ec9be;
-  --tertiary: #d4b06a;
+  --tertiary: #e8924a;
   --on-primary: #003732;
   --motion: cubic-bezier(0.2, 0, 0, 1);
 }
@@ -54,9 +54,9 @@ html[data-chrome="android"] {
   --secondary: #1a3f3a;
   --on-secondary: #c5ebe4;
   --on-primary: #003732;
-  --tertiary: #d4b06a;
-  --tertiary-container: #3a3220;
-  --on-tertiary: #3a2c10;
+  --tertiary: #e8924a;
+  --tertiary-container: #4a2e16;
+  --on-tertiary: #3d1c08;
   --success: #5dca7a;
   --partial: #e0a04a;
   --warn: #d9a63a;
@@ -89,9 +89,9 @@ html[data-chrome="desktop"] {
   --secondary: #223632;
   --on-secondary: #d6efe9;
   --on-primary: #003732;
-  --tertiary: #d4b06a;
-  --tertiary-container: #3a3220;
-  --on-tertiary: #3a2c10;
+  --tertiary: #e8924a;
+  --tertiary-container: #4a2e16;
+  --on-tertiary: #3d1c08;
   --success: #5dca7a;
   --partial: #e0a04a;
   --warn: #d9a63a;
@@ -121,9 +121,9 @@ html[data-theme="light"][data-chrome="android"] {
   --secondary: #b5ddd5;
   --on-secondary: #0d1916;
   --on-primary: #ffffff;
-  --tertiary: #8a6820;
-  --tertiary-container: #f3e2b8;
-  --on-tertiary: #3a2c10;
+  --tertiary: #c24e0e;
+  --tertiary-container: #ffd9c4;
+  --on-tertiary: #3d1c08;
   --success: #14753a;
   --partial: #b45309;
   --danger: #b3261e;
@@ -147,9 +147,9 @@ html[data-theme="light"][data-chrome="desktop"] {
   --secondary: #d5ebe6;
   --on-secondary: #121a18;
   --on-primary: #ffffff;
-  --tertiary: #8a6820;
-  --tertiary-container: #f3e2b8;
-  --on-tertiary: #3a2c10;
+  --tertiary: #c24e0e;
+  --tertiary-container: #ffd9c4;
+  --on-tertiary: #3d1c08;
   --success: #14753a;
   --partial: #b45309;
   --danger: #c42b1c;
@@ -1010,7 +1010,7 @@ html[data-chrome="desktop"] .alert-tonal {
 }
 
 .stat-tile[data-kpi="hosts"] .kpi-bagel-offline {
-  stroke: var(--warn);
+  stroke: var(--tertiary);
 }
 
 .stat-tile-ico {
@@ -1057,6 +1057,7 @@ html[data-chrome="desktop"] .stat-tile-ico {
   height: 4.25rem;
   flex-shrink: 0;
   color: var(--info);
+  overflow: visible;
 }
 
 html[data-chrome="desktop"] .kpi-bagel {
@@ -1080,22 +1081,23 @@ html[data-chrome="desktop"] .kpi-bagel {
   width: 100%;
   height: 100%;
   display: block;
+  overflow: visible;
 }
 
 .kpi-bagel-track {
   stroke: color-mix(in srgb, currentColor 20%, transparent);
-  stroke-width: 3.35;
+  stroke-width: 6.7;
 }
 
 .kpi-bagel-fill {
   stroke: currentColor;
-  stroke-width: 3.35;
+  stroke-width: 6.7;
   stroke-linecap: round;
 }
 
 .kpi-bagel-center {
   position: absolute;
-  inset: 0.55rem;
+  inset: 0.75rem;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1137,7 +1139,7 @@ html[data-chrome="desktop"] .kpi-bagel {
 }
 
 .kpi-meta-offline {
-  color: var(--warn);
+  color: var(--tertiary);
 }
 
 .kpi-meta-quiet {
@@ -4038,7 +4040,7 @@ html[data-chrome="desktop"] .seg button {
   flex-shrink: 0;
 }
 
-/* ── /mobile companion (MY3, reuse teal/ochre tokens) ── */
+/* ── /mobile companion (MY3, reuse teal/orange tokens) ── */
 html.mobile-app,
 html.mobile-app[data-chrome="android"] {
   --nav-h: 4.5rem;
