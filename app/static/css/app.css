@@ -30,7 +30,7 @@ html[data-theme="light"] {
   --warn: #d9a63a;
   --danger: #e8a8a4;
   --info: #5ec9be;
-  --tertiary: #e8924a;
+  --tertiary: #f97316;
   --on-primary: #003732;
   --motion: cubic-bezier(0.2, 0, 0, 1);
 }
@@ -54,8 +54,8 @@ html[data-chrome="android"] {
   --secondary: #1a3f3a;
   --on-secondary: #c5ebe4;
   --on-primary: #003732;
-  --tertiary: #e8924a;
-  --tertiary-container: #4a2e16;
+  --tertiary: #f97316;
+  --tertiary-container: #431407;
   --on-tertiary: #3d1c08;
   --success: #5dca7a;
   --partial: #e0a04a;
@@ -89,8 +89,8 @@ html[data-chrome="desktop"] {
   --secondary: #223632;
   --on-secondary: #d6efe9;
   --on-primary: #003732;
-  --tertiary: #e8924a;
-  --tertiary-container: #4a2e16;
+  --tertiary: #f97316;
+  --tertiary-container: #431407;
   --on-tertiary: #3d1c08;
   --success: #5dca7a;
   --partial: #e0a04a;
@@ -121,8 +121,8 @@ html[data-theme="light"][data-chrome="android"] {
   --secondary: #b5ddd5;
   --on-secondary: #0d1916;
   --on-primary: #ffffff;
-  --tertiary: #c24e0e;
-  --tertiary-container: #ffd9c4;
+  --tertiary: #ea580c;
+  --tertiary-container: #ffedd5;
   --on-tertiary: #3d1c08;
   --success: #14753a;
   --partial: #b45309;
@@ -147,8 +147,8 @@ html[data-theme="light"][data-chrome="desktop"] {
   --secondary: #d5ebe6;
   --on-secondary: #121a18;
   --on-primary: #ffffff;
-  --tertiary: #c24e0e;
-  --tertiary-container: #ffd9c4;
+  --tertiary: #ea580c;
+  --tertiary-container: #ffedd5;
   --on-tertiary: #3d1c08;
   --success: #14753a;
   --partial: #b45309;
@@ -1086,12 +1086,12 @@ html[data-chrome="desktop"] .kpi-bagel {
 
 .kpi-bagel-track {
   stroke: color-mix(in srgb, currentColor 20%, transparent);
-  stroke-width: 6.7;
+  stroke-width: 8;
 }
 
 .kpi-bagel-fill {
   stroke: currentColor;
-  stroke-width: 6.7;
+  stroke-width: 8;
   stroke-linecap: round;
 }
 
@@ -1132,6 +1132,14 @@ html[data-chrome="desktop"] .kpi-bagel {
 .kpi-bagel-split-num {
   font-size: 0.625rem;
   letter-spacing: -0.04em;
+}
+
+.kpi-split-online {
+  color: var(--success);
+}
+
+.kpi-split-offline {
+  color: var(--tertiary);
 }
 
 .kpi-meta-online {

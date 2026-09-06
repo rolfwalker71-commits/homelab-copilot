@@ -78,7 +78,7 @@ class StartAcceptedNowTests(unittest.IsolatedAsyncioTestCase):
             tid = str(row.get("target_id") or "")
             self.started_backup.append(tid)
             jid = f"b-{len(self.started_backup)}"
-            self.bak_jobs.append(_BakJob(jid, tid, created_at=_now().timestamp()))
+            self.bak_jobs.append(_BakJob(jid, tid, created_at=time.time()))
             return jid
 
         async def _start_patch(row: dict) -> tuple[bool, str, str | None]:

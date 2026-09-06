@@ -14,6 +14,7 @@ from ops_agent.engine import OpsEngine, _schedule_method_fields
 from ops_agent.activity import ACTION_REBOOT, ACTION_SKIPPED, ACTION_WARN
 from ops_agent.hosts import COPILOT_DATA_ID
 from ops_agent.capacity import estimate_bytes_from_runs
+from patcher.agent import HostPending
 from ops_agent.planner import (
     KIND_BACKUP,
     KIND_PATCH,
@@ -107,7 +108,7 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
             tid = str(row.get("target_id") or "")
             self.started_backup.append(tid)
             jid = f"b-{len(self.started_backup)}"
-            self.bak_jobs.append(_BakJob(jid, tid, created_at=_now().timestamp()))
+            self.bak_jobs.append(_BakJob(jid, tid, created_at=time.time()))
             return jid
 
         async def _start_patch(row: dict) -> tuple[bool, str, str | None]:
@@ -492,6 +493,31 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Backup", brief["text"])
         self.assertIn("fällt auf", brief["text"])
 
+    async def test_propose_creates_patch_window_for_ticked_pending_host(self) -> None:
+        policy = await self.store.get_policy()
+        policy.patch_scope_ids = ["lxc:pve:1"]
+        policy.image_scope_ids = []
+        await self.store.save_policy(policy)
+
+        async def _pending(*_a: object, **_k: object) -> list:
+            return [
+                HostPending(
+                    target_id="lxc:pve:1",
+                    target_name="mail",
+                    packages=[{"name": "openssl", "priority": "security"}],
+                )
+            ]
+
+        self.engine._hosts_from_store = _pending
+        result = await self.engine.propose()
+        created = result.get("created") or []
+        self.assertTrue(
+            any(
+                str(w.get("kind")) == KIND_PATCH and str(w.get("bucket")) == "security"
+                for w in created
+            )
+        )
+
     async def test_collect_needs_ignores_discovered_stacks_without_schedule(self) -> None:
         async def _stacks(_snap: object) -> list[dict]:
             return [
@@ -578,6 +604,80 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bak[0]["stack"], "paperless")
         self.assertEqual(bak[0]["source"], "ingested")
         self.assertEqual(bak[0]["schedule_id"], 3)
+
+    async def test_ingest_creates_next_day_after_done(self) -> None:
+        store = _SchedStore(
+            [
+                {
+                    "id": 9,
+                    "parent_id": "lxc:pve:1",
+                    "stack": "weatherapp",
+                    "guest_name": "mail",
+                    "enabled": True,
+                    "cron_expr": "0 20 * * *",
+                }
+            ]
+        )
+        self.engine._get_backup_store = lambda: store
+        today = datetime(2026, 9, 6, 20, 0, tzinfo=BERLIN)
+        await self.store.insert_window(
+            {
+                "kind": KIND_BACKUP,
+                "target_id": "lxc:pve:1",
+                "target_name": "mail",
+                "stack": "weatherapp",
+                "start_iso": iso_utc(today),
+                "start_hm": "20:00",
+                "status": STATUS_DONE,
+                "source": SOURCE_INGESTED,
+                "schedule_id": 9,
+                "reason": "Backup erfolgreich",
+            }
+        )
+        nxt = datetime(2026, 9, 7, 0, 10, tzinfo=BERLIN)
+        rows = await self.engine.ingest(now=nxt)
+        bak = [r for r in rows if r.get("kind") == KIND_BACKUP]
+        self.assertTrue(any(str(r.get("status")) == "accepted" for r in bak))
+        accepted = [r for r in bak if r.get("status") == "accepted"][0]
+        self.assertEqual(accepted["start_hm"], "20:00")
+        start = accepted.get("start_iso") or ""
+        self.assertTrue("2026-09-07" in start or accepted["start_hm"] == "20:00")
+        windows = await self.store.list_windows()
+        self.assertGreaterEqual(len([w for w in windows if w.get("schedule_id") == 9]), 2)
+
+    async def test_ingest_does_not_duplicate_same_day_done(self) -> None:
+        store = _SchedStore(
+            [
+                {
+                    "id": 10,
+                    "parent_id": "lxc:pve:1",
+                    "stack": "weatherapp",
+                    "guest_name": "mail",
+                    "enabled": True,
+                    "cron_expr": "0 20 * * *",
+                }
+            ]
+        )
+        self.engine._get_backup_store = lambda: store
+        start = datetime(2026, 9, 6, 20, 0, tzinfo=BERLIN)
+        await self.store.insert_window(
+            {
+                "kind": KIND_BACKUP,
+                "target_id": "lxc:pve:1",
+                "target_name": "mail",
+                "stack": "weatherapp",
+                "start_iso": iso_utc(start),
+                "start_hm": "20:00",
+                "status": STATUS_DONE,
+                "source": SOURCE_INGESTED,
+                "schedule_id": 10,
+            }
+        )
+        rows = await self.engine.ingest(now=datetime(2026, 9, 6, 18, 30, tzinfo=BERLIN))
+        bak = [r for r in rows if r.get("kind") == KIND_BACKUP]
+        self.assertEqual(len(bak), 1)
+        self.assertEqual(bak[0]["status"], STATUS_DONE)
+        self.assertEqual(len([w for w in await self.store.list_windows() if w.get("schedule_id") == 10]), 1)
 
     async def test_plan_backup_for_host_uses_existing_restic_schedule(self) -> None:
         store = _SchedStore(
@@ -706,13 +806,11 @@ class BackupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(moved["reason"], REASON_BACKUP_CHAIN)
         self.assertNotEqual(moved["start_hm"], "21:20")
         self.assertEqual(moved.get("engine") or "restic", "restic")
-        self.assertTrue(store.upserts)
-        last = store.upserts[-1]
-        self.assertEqual(int(last["schedule_id"]), 9)
-        self.assertEqual(last["engine"], "restic")
-        self.assertEqual(last["restic_full_every_days"], 3)
-        self.assertEqual(last["restic_keep_last"], 21)
-        self.assertEqual(last["restic_keep_weekly"], 4)
+        self.assertEqual(store.upserts, [])
+        sched = await store.get_schedule(9)
+        assert sched is not None
+        self.assertEqual(sched["cron_expr"], "20 21 * * *")
+        self.assertEqual(sched["engine"], "restic")
         self.assertTrue(result["shifted"])
 
     async def test_rewrite_schedule_time_passes_through_restic_retention(self) -> None:

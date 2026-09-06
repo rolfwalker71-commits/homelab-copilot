@@ -1187,15 +1187,17 @@ class OpsStore:
         target_name: str = "",
         window_id: int | None = None,
         detail: str = "",
+        via_agent: bool = True,
     ) -> dict[str, Any]:
         db = self._require()
         now = now_berlin()
+        flagged = bool(via_agent)
         cur = await db.execute(
             """
             INSERT INTO ops_activity (
                 action, result, kind, target_id, target_name, window_id,
                 detail, actor, via_agent, created_at, created_at_iso
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Agent', 1, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(action or ""),
@@ -1205,6 +1207,8 @@ class OpsStore:
                 str(target_name or ""),
                 int(window_id) if window_id is not None else None,
                 str(detail or ""),
+                "Agent" if flagged else "",
+                1 if flagged else 0,
                 format_de(now),
                 iso_utc(now),
             ),
@@ -1227,8 +1231,8 @@ class OpsStore:
             "target_name": target_name,
             "window_id": window_id,
             "detail": detail,
-            "actor": "Agent",
-            "via_agent": True,
+            "actor": "Agent" if flagged else "",
+            "via_agent": flagged,
             "created_at": format_de(now),
             "created_at_iso": iso_utc(now),
         }

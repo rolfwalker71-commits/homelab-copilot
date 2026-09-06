@@ -206,6 +206,7 @@
         <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-patch_findings" class="h-4 w-4" /> Patch-Funde / Fehler</label>
         <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-health_down" class="h-4 w-4" /> Host down / Zertifikat</label>
         <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-disk_high" class="h-4 w-4" /> Disk &gt; 90&nbsp;%</label>
+        <label class="flex items-center gap-2 text-sm min-h-12"><input type="checkbox" id="pref-ops_wait" class="h-4 w-4" /> Agent wartet auf dich</label>
       </form>
       <button type="button" id="btn-save-prefs" class="btn btn-primary btn-sm mt-3">Einstellungen speichern</button>
     </div>
@@ -412,7 +413,7 @@
   refreshTotpStatus();
   refreshPushStatus();
 
-  const PREF_KEYS = ['backup_success','backup_failure','backup_partial','patch_findings','health_down','disk_high'];
+  const PREF_KEYS = ['backup_success','backup_failure','backup_partial','patch_findings','health_down','disk_high','ops_wait'];
   async function loadPrefs() {
     try {
       const r = await fetch('/api/push/prefs');

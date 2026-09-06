@@ -63,6 +63,7 @@ DEFAULT_PUSH_PREFS: dict[str, bool] = {
     "patch_findings": True,
     "health_down": True,
     "disk_high": True,
+    "ops_wait": True,
 }
 
 

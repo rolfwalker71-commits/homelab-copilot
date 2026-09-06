@@ -3,6 +3,45 @@
 {% block title %}Agent — {{ app_name }}{% endblock %}
 
 {% block content %}
+<style>
+.ops-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.75rem; }
+.ops-tl-block { margin: 0; padding: 0; }
+.ops-tl-kicker {
+  font-size: 0.75rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--muted); margin: 0 0 0.35rem;
+}
+.ops-tl-row {
+  display: grid; grid-template-columns: 5.5rem minmax(0, 1fr) auto;
+  gap: 0.5rem 0.75rem; align-items: start;
+  padding: 0.7rem 0.9rem; border-radius: 1.75rem;
+  background: var(--surface-container-high, var(--card));
+}
+html[data-chrome="desktop"] .ops-tl-row {
+  border-radius: var(--radius); border: 1px solid var(--outline);
+  background: color-mix(in srgb, var(--card) 80%, transparent);
+  backdrop-filter: blur(8px);
+}
+.ops-tl-row.is-run {
+  background: color-mix(in srgb, var(--primary) 16%, var(--card));
+}
+html[data-chrome="desktop"] .ops-tl-row.is-run {
+  border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, var(--card));
+}
+.ops-tl-phase { font-weight: 650; line-height: 1.3; }
+.ops-tl-title { margin: 0; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; }
+.ops-tl-meta { margin: 0.15rem 0 0; font-size: 0.875rem; color: var(--muted); line-height: 1.35; overflow-wrap: anywhere; }
+.ops-tl-mark { font-weight: 700; font-size: 1.1rem; line-height: 1; }
+.ops-ledger-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+.ops-ledger-table th, .ops-ledger-table td {
+  text-align: left; vertical-align: top; padding: 0.45rem 0.4rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--outline, var(--border)) 55%, transparent);
+}
+.ops-ledger-table th { font-weight: 650; color: var(--muted); }
+.ops-ledger-wrap { overflow-x: auto; }
+.ops-ledger-group { margin-top: 0.85rem; }
+.ops-ledger-group:first-child { margin-top: 0; }
+</style>
+
 <section class="mb-5 animate-in">
   <p class="eyebrow">Planung · v{{ module_version }}</p>
   <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug break-words">Agent</h1>
@@ -11,6 +50,8 @@
     Welche Stacks und ob tar oder restic, steht auf der
     <a class="underline" href="/modules/backup_verifier">Backup-Seite</a> —
     der Agent startet nur, was dort geplant ist.
+    Patch- und Image-Fenster entstehen nach Scan (täglich ~04:00 oder <strong>Scan jetzt</strong>),
+    wenn der Host in der Matrix angehakt ist und der Scan etwas Offenes findet.
     DistUpgrade, Wipe und Restore-auf-Prod macht er nie.
   </p>
   <p id="ops-quiet" class="mt-1 max-w-3xl text-sm text-[var(--muted)] leading-snug"></p>
@@ -53,6 +94,7 @@
 <div class="mb-4 flex flex-wrap items-center gap-2">
   <button type="button" id="btn-ops-plan" class="btn btn-primary min-h-12 hidden lg:inline-flex leading-snug">Plan vorschlagen</button>
   <button type="button" id="btn-ops-start-now" class="btn btn-ghost min-h-12 leading-snug whitespace-normal text-center">Geplante jetzt starten</button>
+  <button type="button" id="btn-ops-scan" class="btn btn-ghost min-h-12 leading-snug whitespace-normal text-center" title="Patch- und Image-Scan jetzt">Scan jetzt</button>
   <button type="button" id="btn-ops-policy" class="btn btn-ghost min-h-12">Regeln ändern</button>
   <label class="flex items-center gap-2 text-sm min-h-12 px-2">
     <input type="checkbox" id="ops-enabled" class="h-4 w-4" />
@@ -83,29 +125,27 @@
   <p id="ops-scope-msg" class="mt-2 text-sm text-[var(--muted)]" role="status"></p>
 </article>
 
-<div id="ops-board" class="ops-board animate-in" aria-live="polite">
-  <section class="ops-col surface p-3 sm:p-4" data-col="next">
-    <h2 class="font-display text-base font-bold leading-snug">Als Nächstes</h2>
-    <div class="ops-col-body ops-next-body mt-3 space-y-2"></div>
-  </section>
-  <section class="ops-col surface p-3 sm:p-4" data-col="running">
-    <h2 class="font-display text-base font-bold leading-snug">Läuft</h2>
-    <p id="ops-running-note" class="ops-running-note mt-2 text-sm leading-snug break-words" role="status"></p>
-    <div class="ops-col-body mt-3 space-y-2"></div>
-  </section>
-  <section class="ops-col surface p-3 sm:p-4" data-col="waiting">
-    <h2 class="font-display text-base font-bold leading-snug">Wartet auf dich</h2>
-    <div class="ops-col-body mt-3 space-y-2"></div>
-  </section>
-  <section class="ops-col surface p-3 sm:p-4" data-col="shifted">
-    <h2 class="font-display text-base font-bold leading-snug">Verschoben</h2>
-    <div class="ops-col-body mt-3 space-y-2"></div>
-  </section>
-  <section class="ops-col surface p-3 sm:p-4" data-col="done">
-    <h2 class="font-display text-base font-bold leading-snug">Fertig / Fail</h2>
-    <div class="ops-col-body mt-3 space-y-2"></div>
-  </section>
-</div>
+<section id="ops-waiting" class="surface-tinted p-4 sm:p-5 mb-5 animate-in" aria-live="polite">
+  <h2 class="font-display text-base font-bold leading-snug break-words">Wartet auf dich</h2>
+  <div id="ops-waiting-body" class="mt-3 space-y-2"></div>
+</section>
+
+<article id="ops-soll-ist" class="surface p-4 sm:p-5 mb-5 animate-in">
+  <h2 class="font-display text-lg font-bold leading-snug break-words">Soll / Ist · heute</h2>
+  <p class="mt-1 text-sm text-[var(--muted)] leading-snug">
+    Was heute geplant war und was wirklich lief — Backups, Patches, Images.
+    Nicht fünf Spalten, sondern eine Liste.
+  </p>
+  <div id="ops-ledger" class="mt-3"></div>
+</article>
+
+<article id="ops-timeline-card" class="surface p-4 sm:p-5 mb-5 animate-in" aria-live="polite">
+  <div class="flex flex-wrap items-start justify-between gap-2">
+    <h2 class="font-display text-lg font-bold leading-snug break-words">Heute-Zeitleiste</h2>
+    <p id="ops-running-note" class="ops-running-note text-sm leading-snug break-words" role="status"></p>
+  </div>
+  <ol id="ops-timeline" class="ops-timeline mt-3"></ol>
+</article>
 
 <article class="surface-tinted p-4 sm:p-5 mt-5 mb-5 animate-in">
   <details id="ops-lessons" class="ops-next-group ops-lessons-group">
@@ -513,6 +553,140 @@
       );
     }).join('');
   }
+  function windowTitle(w) {
+    return (w.target_name || w.target_id || '') +
+      (w.stack ? ' · ' + w.stack : '') +
+      (w.kind_label ? ' · ' + w.kind_label : '');
+  }
+  function windowMark(w) {
+    if (w.status === 'failed') return '✗';
+    if (w.status === 'skipped') return '–';
+    if (w.status === 'done' || w.status === 'success') return '✓';
+    return '';
+  }
+  function windowShift(w) {
+    if (!w.shift_mark) return '';
+    const why = w.shift_reason && String(w.shift_reason).indexOf('Anschluss') >= 0 ? ' · Anschluss' : '';
+    return w.shift_mark + why;
+  }
+  function timelineRow(phase, w, extra) {
+    const mark = windowMark(w);
+    const title = windowTitle(w);
+    const actor = w.actor_label || (w.via_agent ? 'durch Agent' : '');
+    const shift = windowShift(w);
+    const meta = [w.start_de || w.start_hm, shift, w.duration_label, actor, extra]
+      .filter(Boolean).join(' · ');
+    const run = phase === 'Läuft';
+    const actions = (run && w.id && String(w.id).indexOf('live:') !== 0)
+      ? '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-decline="' + esc(w.id) + '">Loslassen</button>'
+      : '';
+    return (
+      '<li class="ops-tl-row' + (run ? ' is-run' : '') + '">' +
+        '<p class="ops-tl-phase">' + esc(phase) + '</p>' +
+        '<div>' +
+          '<p class="ops-tl-title">' + esc(title) + (mark ? ' <span class="ops-tl-mark" aria-hidden="true">' + mark + '</span>' : '') + '</p>' +
+          (meta ? '<p class="ops-tl-meta">' + esc(meta) + '</p>' : '') +
+          (w.reason && phase !== 'Als Nächstes' ? '<p class="ops-tl-meta">' + esc(w.reason) + '</p>' : '') +
+          actions +
+        '</div>' +
+      '</li>'
+    );
+  }
+  function ledgerTable(rows) {
+    if (!rows || !rows.length) return '';
+    const body = rows.map((r) => {
+      const name = r.label || r.target_name || r.target_id || '';
+      return (
+        '<tr>' +
+          '<td class="break-words">' + esc(name) + '</td>' +
+          '<td>' + esc(r.soll_hm || '—') + '</td>' +
+          '<td>' + esc(r.ist_hm || '—') + '</td>' +
+          '<td>' + esc(r.status_label || r.status || '') + '</td>' +
+          '<td class="break-words">' + esc(r.reason || '') + '</td>' +
+        '</tr>'
+      );
+    }).join('');
+    return (
+      '<div class="ops-ledger-wrap"><table class="ops-ledger-table">' +
+        '<thead><tr><th>Ziel</th><th>Soll</th><th>Ist</th><th>Status</th><th>Hinweis</th></tr></thead>' +
+        '<tbody>' + body + '</tbody>' +
+      '</table></div>'
+    );
+  }
+  function renderLedger(ledger) {
+    const root = $('ops-ledger');
+    if (!root) return;
+    const data = ledger || {};
+    const groups = [
+      { title: 'Backup', rows: data.backups || [] },
+      { title: 'Patch', rows: data.patches || [] },
+      { title: 'Images', rows: data.images || [] },
+    ];
+    if (!groups.some((g) => g.rows.length)) {
+      root.innerHTML = empty('Noch keine Soll/Ist-Zeilen — Zeitpläne und Matrix erscheinen hier.');
+      return;
+    }
+    root.innerHTML = groups.map((g) => {
+      if (!g.rows.length) {
+        return '<div class="ops-ledger-group"><h3 class="font-display text-base font-bold leading-snug">' +
+          esc(g.title) + '</h3><p class="mt-1 text-sm text-[var(--muted)] leading-snug">nichts offen</p></div>';
+      }
+      return '<div class="ops-ledger-group"><h3 class="font-display text-base font-bold leading-snug">' +
+        esc(g.title) + '</h3>' + ledgerTable(g.rows) + '</div>';
+    }).join('');
+  }
+  function renderWaiting(data) {
+    const body = $('ops-waiting-body');
+    if (!body) return;
+    const items = data.waiting || [];
+    const rbFails = (data.rollback_failed || []).map(rollbackCard).join('');
+    const prompts = (data.scope_prompts || []).map(promptCard).join('');
+    const wins = items.map((w) => {
+      const offline = w.bucket === 'offline' || (w.reason && String(w.reason).indexOf('fällt auf') >= 0);
+      const title = windowTitle(w) + (offline ? ' · fällt auf' : '');
+      const meta = [w.start_de || w.start_hm, w.duration_label, w.bucket_label]
+        .filter(Boolean).join(' · ');
+      const actions =
+        '<button type="button" class="btn btn-primary btn-xs min-h-12" data-ops-confirm="' + esc(w.id) + '">Bestätigen</button>' +
+        '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-decline="' + esc(w.id) + '">Ablehnen</button>';
+      return card(title, meta, w.reason || '', actions);
+    }).join('');
+    const html = rbFails + prompts + wins;
+    body.innerHTML = html || empty('Nichts wartet auf dich. Der Agent arbeitet die übrigen Fenster selbst.');
+  }
+  function renderTimeline(data) {
+    const root = $('ops-timeline');
+    if (!root) return;
+    const done = (data.done || []).slice().reverse();
+    const running = data.running || [];
+    const next = data.next || [];
+    let html = '';
+    html += '<li class="ops-tl-block"><p class="ops-tl-kicker">Gelaufen / Fail</p>';
+    if (!done.length) {
+      html += '<p class="text-sm text-[var(--muted)] leading-snug">Heute noch nichts abgeschlossen.</p>';
+    } else {
+      html += '<ol class="ops-timeline">' + done.map((w) => {
+        let extra = w.status === 'failed' ? 'Fehler' : (w.status === 'skipped' ? 'übersprungen' : '');
+        if (w.rollback && w.rollback.status === 'ok') extra = 'Zurückgesetzt';
+        else if (w.rollback && w.rollback.status === 'failed') extra = 'Fehler · Rollback fehlgeschlagen';
+        return timelineRow('Gelaufen', w, extra);
+      }).join('') + '</ol>';
+    }
+    html += '</li>';
+    html += '<li class="ops-tl-block"><p class="ops-tl-kicker">Läuft</p>';
+    if (!running.length) {
+      html += '<p class="text-sm text-[var(--muted)] leading-snug">—</p>';
+    } else {
+      html += '<ol class="ops-timeline">' + running.map((w) => timelineRow('Läuft', w, w.bucket_label || '')).join('') + '</ol>';
+    }
+    html += '</li>';
+    html += '<li class="ops-tl-block"><p class="ops-tl-kicker">Als Nächstes</p>';
+    html += next.length
+      ? renderNextList(next)
+      : empty('Nichts geplant — „Plan vorschlagen“, „Scan jetzt“ oder bestehende Zeitpläne erscheinen hier.');
+    html += '</li>';
+    root.innerHTML = html;
+  }
   function renderBoard(data) {
     const quiet = $('ops-quiet');
     if (quiet) quiet.textContent = data.quiet_rule || '';
@@ -523,89 +697,13 @@
     renderLessons(data.lessons || []);
     renderBrief(data);
     renderActivity(data.activity || []);
+    renderLedger(data.ledger || {});
+    renderWaiting(data);
+    renderTimeline(data);
     const interview = $('ops-interview');
     if (interview && data.policy && !data.policy.answered) {
       interview.hidden = false;
     }
-    const cols = {
-      next: data.next || [],
-      running: data.running || [],
-      waiting: data.waiting || [],
-      shifted: data.shifted || [],
-      done: (data.done || []).slice(0, 12),
-    };
-    const empties = {
-      next: 'Nichts geplant — „Plan vorschlagen“ oder bestehende Zeitpläne erscheinen hier.',
-      running: lastStartMsg || 'Kein laufender Auftrag.',
-      waiting: 'Nichts wartet auf dich. Der Agent arbeitet die übrigen Fenster selbst.',
-      shifted: 'Keine Verschiebungen oder Zurücksetzungen.',
-      done: 'Noch nichts abgeschlossen.',
-    };
-    Object.keys(cols).forEach((key) => {
-      const body = document.querySelector('[data-col="' + key + '"] .ops-col-body');
-      if (!body) return;
-      const items = cols[key];
-      if (!items.length && !(key === 'waiting' && ((data.scope_prompts || []).length || (data.rollback_failed || []).length))) {
-        body.innerHTML = empty(empties[key]);
-        return;
-      }
-      if (key === 'next') {
-        body.innerHTML = renderNextList(items);
-        return;
-      }
-      if (key === 'waiting') {
-        const rbFails = (data.rollback_failed || []).map(rollbackCard).join('');
-        const prompts = (data.scope_prompts || []).map(promptCard).join('');
-        const wins = items.map((w) => {
-          const offline = w.bucket === 'offline' || (w.reason && String(w.reason).indexOf('fällt auf') >= 0);
-          const title = (w.target_name || w.target_id || '') +
-            (w.stack ? ' · ' + w.stack : '') +
-            (w.kind_label ? ' · ' + w.kind_label : '') +
-            (offline ? ' · fällt auf' : '');
-          const meta = [w.start_de || w.start_hm, w.duration_label, w.bucket_label]
-            .filter(Boolean).join(' · ');
-          const actions =
-            '<button type="button" class="btn btn-primary btn-xs min-h-12" data-ops-confirm="' + esc(w.id) + '">Bestätigen</button>' +
-            '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-decline="' + esc(w.id) + '">Ablehnen</button>';
-          return card(title, meta, w.reason || '', actions);
-        }).join('');
-        body.innerHTML = rbFails + prompts + wins || empty(empties.waiting);
-        return;
-      }
-      if (key === 'shifted') {
-        body.innerHTML = items.map((s) => {
-          if (s.event === 'rollback' || s.kind === 'rollback') {
-            return rollbackCard(s);
-          }
-          const actor = s.actor_label || (s.via_agent ? 'durch Agent' : '');
-          return card(
-            (s.target_name || s.stack || 'Fenster') + ' · ' + (s.kind === 'patch' ? 'Patch' : 'Backup'),
-            [(s.old_start_hm || '—') + ' → ' + (s.new_start_hm || '—'), actor].filter(Boolean).join(' · '),
-            s.reason || '',
-            ''
-          );
-        }).join('');
-        return;
-      }
-      body.innerHTML = items.map((w) => {
-        const title = (w.target_name || w.target_id || '') +
-          (w.stack ? ' · ' + w.stack : '') +
-          (w.kind_label ? ' · ' + w.kind_label : '');
-        const actor = w.actor_label || (w.via_agent ? 'durch Agent' : '');
-        const meta = [w.start_de || w.start_hm, w.duration_label, w.bucket_label, actor]
-          .filter(Boolean).join(' · ');
-        let st = w.status === 'failed' ? 'Fehler' : (w.status === 'skipped' ? 'übersprungen' : '');
-        if (w.rollback && w.rollback.status === 'ok') st = 'Zurückgesetzt';
-        else if (w.rollback && w.rollback.status === 'failed') st = 'Fehler · Rollback fehlgeschlagen';
-        if (w.lesson) st = (st ? st + ' · ' : '') + 'Lektion';
-        const reason = [w.reason || '', w.lesson && w.lesson.why_de ? w.lesson.why_de : '']
-          .filter(Boolean).join(' ');
-        const actions = (key === 'running' && w.id && String(w.id).indexOf('live:') !== 0)
-          ? '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-decline="' + esc(w.id) + '">Loslassen</button>'
-          : '';
-        return card(title, meta + (st ? ' · ' + st : ''), reason, actions);
-      }).join('');
-    });
     bindActions();
     const runningNote = $('ops-running-note');
     if (runningNote && lastStartMsg) runningNote.textContent = lastStartMsg;
@@ -660,7 +758,7 @@
     document.querySelectorAll('[data-ops-start]').forEach((btn) => {
       btn.addEventListener('click', () => act('/start', btn.getAttribute('data-ops-start')));
     });
-    document.querySelectorAll('[data-col="next"] details[data-slot]').forEach((el) => {
+    document.querySelectorAll('#ops-timeline details[data-slot]').forEach((el) => {
       el.addEventListener('toggle', () => {
         const slot = el.getAttribute('data-slot');
         if (slot) nextSlotOpen[slot] = el.open;
@@ -771,6 +869,42 @@
   $('btn-ops-plan')?.addEventListener('click', plan);
   $('fab-ops-plan')?.addEventListener('click', plan);
   $('btn-ops-start-now')?.addEventListener('click', startPlanned);
+  async function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+  async function scanNow() {
+    const msg = $('ops-msg');
+    const btn = $('btn-ops-scan');
+    const prev = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Scan läuft…';
+    }
+    if (msg) msg.textContent = 'Patch- und Image-Scan startet…';
+    try {
+      const data = await api('/scan-now', { method: 'POST', body: '{}' });
+      if (msg) msg.textContent = data.message || 'Scan gestartet.';
+      for (let i = 0; i < 180; i++) {
+        const st = await fetch('/api/modules/patcher/scan-all/status').then((r) => r.json()).catch(() => ({}));
+        if (st.message && msg) msg.textContent = st.message;
+        if (!st.running) break;
+        await sleep(2000);
+      }
+      try {
+        const planned = await api('/plan', { method: 'POST', body: '{}' });
+        if (msg) msg.textContent = planned.message || 'Scan fertig — Fenster geplant.';
+      } catch (_) { /* on_complete plant bereits */ }
+      await load();
+    } catch (e) {
+      if (msg) msg.textContent = String(e.message || e);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = prev || 'Scan jetzt';
+      }
+    }
+  }
+  $('btn-ops-scan')?.addEventListener('click', scanNow);
   $('btn-ops-brief')?.addEventListener('click', async () => {
     const msg = $('ops-msg');
     try {

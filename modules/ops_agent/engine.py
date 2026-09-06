@@ -12,7 +12,12 @@ from app.core.locale import BERLIN, format_de, iso_utc, now_berlin
 from app.core.snapshots import guest_can_snapshot
 from backup_verifier.cron import preset_to_cron
 from backup_verifier.planner import format_hhmm, parse_hhmm
-from backup_verifier.scheduler import minute_key, next_run_after, schedule_clock_hm
+from backup_verifier.scheduler import (
+    cron_clock_hm,
+    minute_key,
+    next_run_after,
+    schedule_clock_hm,
+)
 from ops_agent.config import get_ops_settings
 from ops_agent.planner import (
     DURATION_BACKUP,
@@ -78,6 +83,7 @@ from ops_agent.activity import (
     ACTION_PRUNE,
     ACTION_REBOOT,
     ACTION_ROLLBACK,
+    ACTION_SCAN,
     ACTION_SHIFTED,
     ACTION_SKIPPED,
     ACTION_STARTED,
@@ -91,6 +97,7 @@ from ops_agent.activity import (
     serialize_activity,
 )
 from ops_agent.actor import actor_fields, agent_phrase, by_agent
+from ops_agent.ledger import build_day_ledger
 from ops_agent.capacity import (
     collect_dests,
     dest_is_critically_full,
@@ -228,6 +235,7 @@ class OpsEngine:
         window_id: int | None = None,
         detail: str = "",
         row: dict[str, Any] | None = None,
+        via_agent: bool = True,
     ) -> None:
         if row is not None:
             target_id = target_id or str(row.get("target_id") or "")
@@ -246,7 +254,8 @@ class OpsEngine:
                 target_id=target_id,
                 target_name=target_name,
                 window_id=window_id,
-                detail=by_agent(detail) if detail else "",
+                detail=by_agent(detail) if detail and via_agent else str(detail or ""),
+                via_agent=via_agent,
             )
         except Exception:
             logger.info("Tätigkeitslog nicht geschrieben", exc_info=True)
@@ -659,12 +668,19 @@ class OpsEngine:
             if win.schedule_id:
                 existing = await self.store.find_by_schedule(int(win.schedule_id))
                 if existing:
+                    if existing.get("status") == STATUS_RUNNING:
+                        upserted.append(existing)
+                        continue
                     if existing.get("status") in (
-                        STATUS_RUNNING,
                         STATUS_DONE,
                         STATUS_FAILED,
+                        STATUS_SKIPPED,
                     ):
-                        upserted.append(existing)
+                        if self._is_later_occurrence(row, existing):
+                            wid = await self.store.insert_window(row)
+                            upserted.append(await self.store.get_window(wid) or row)
+                        else:
+                            upserted.append(existing)
                         continue
                     existing_reason = str(existing.get("reason") or "")
                     if "Anschluss" in existing_reason or "durch Agent" in existing_reason:
@@ -695,51 +711,70 @@ class OpsEngine:
             upserted.append(await self.store.get_window(wid) or row)
         return upserted
 
-    async def _collect_needs(self, policy: ConfirmPolicy) -> list[Need]:
-        """Patch needs only. Backup windows come from ingest of saved schedules."""
+    def _is_later_occurrence(
+        self, planned: dict[str, Any], existing: dict[str, Any]
+    ) -> bool:
+        """True when ingest computed a later slot than a finished window (next day)."""
+        nxt = self._parse_start(planned)
+        old = self._parse_start(existing)
+        if nxt is None or old is None:
+            return False
+        return nxt.date() > old.date()
+
+    async def _pending_hosts(self) -> list[Any]:
+        try:
+            return list(await self._hosts_from_store() or [])
+        except TypeError:
+            pass
+        except Exception:
+            logger.info("Pending-Hosts aus Callback nicht lesbar", exc_info=True)
         snap = self._get_snapshot()
-        needs: list[Need] = []
         try:
             from patcher.agent import hosts_from_store as _hosts
+            from patcher.module import _get_store as _pstore
 
-            patcher_store = None
-            try:
-                from patcher.module import _get_store as _pstore
+            pstore = _pstore()
+            if pstore is None or snap is None:
+                return []
+            return list(
+                await _hosts(pstore, snap, tags_for=self._get_inventory_tags)
+            )
+        except Exception:
+            logger.exception("Pending patches für Agent nicht lesbar")
+            return []
 
-                patcher_store = _pstore()
-            except Exception:
-                patcher_store = None
-            if patcher_store is not None and snap is not None:
-                hosts = await _hosts(
-                    patcher_store, snap, tags_for=self._get_inventory_tags
-                )
-                gone = await self.gone_ids()
-                for host in hosts:
-                    for item in group_host_work(host):
-                        if not in_job_scope(
-                            policy,
+    async def _collect_needs(self, policy: ConfirmPolicy) -> list[Need]:
+        """Patch needs only. Backup windows come from ingest of saved schedules."""
+        needs: list[Need] = []
+        try:
+            hosts = await self._pending_hosts()
+            gone = await self.gone_ids()
+            for host in hosts:
+                for item in group_host_work(host):
+                    if not in_job_scope(
+                        policy,
+                        kind=KIND_PATCH,
+                        bucket=item.bucket,
+                        target_id=item.target_id,
+                        gone_ids=gone,
+                    ):
+                        continue
+                    needs.append(
+                        Need(
                             kind=KIND_PATCH,
-                            bucket=item.bucket,
                             target_id=item.target_id,
-                            gone_ids=gone,
-                        ):
-                            continue
-                        needs.append(
-                            Need(
-                                kind=KIND_PATCH,
-                                target_id=item.target_id,
-                                target_name=item.target_name,
-                                bucket=item.bucket,
-                                duration_min=duration_for(
-                                    kind=KIND_PATCH, bucket=item.bucket
-                                ),
-                                packages=list(item.packages),
-                                confirm_reasons=list(item.confirm_reasons),
-                                tags=list(host.tags),
-                                known_host=True,
-                                source=SOURCE_AGENT,
-                            )
+                            target_name=item.target_name,
+                            bucket=item.bucket,
+                            duration_min=duration_for(
+                                kind=KIND_PATCH, bucket=item.bucket
+                            ),
+                            packages=list(item.packages),
+                            confirm_reasons=list(item.confirm_reasons),
+                            tags=list(host.tags),
+                            known_host=True,
+                            source=SOURCE_AGENT,
                         )
+                    )
         except Exception:
             logger.exception("Pending patches für Agent nicht lesbar")
 
@@ -1470,17 +1505,23 @@ class OpsEngine:
                     )
                     finished_any = True
                 elif st == "failed":
+                    err = str(getattr(job, "error", "") or "Backup fehlgeschlagen.")
                     await self.store.update_window(
                         int(row["id"]),
                         status=STATUS_FAILED,
-                        reason=str(getattr(job, "error", "") or "Backup fehlgeschlagen."),
+                        reason=err,
                     )
                     await self._log_activity(
                         ACTION_APPLY,
                         result=RESULT_FAIL,
                         kind=KIND_BACKUP,
                         row=row,
-                        detail=str(getattr(job, "error", "") or "Backup fehlgeschlagen."),
+                        detail=err,
+                    )
+                    await self._notify_event(
+                        "Backup fehlgeschlagen",
+                        f"{row.get('target_name') or row.get('stack') or 'Backup'}: {err}",
+                        flag="backup_failure",
                     )
                     finished_any = True
             elif kind == KIND_PATCH:
@@ -1521,6 +1562,15 @@ class OpsEngine:
                     finished_any = True
         if finished_any:
             await self._advance_backup_chain()
+            leftover = [
+                w
+                for w in await self.store.list_windows(
+                    statuses=[STATUS_ACCEPTED, STATUS_RUNNING]
+                )
+                if str(w.get("kind") or "") == KIND_BACKUP
+            ]
+            if not leftover:
+                await self._notify_chain_summary()
             await self._maybe_refresh_brief()
         await self._flag_hung_jobs()
 
@@ -1921,8 +1971,6 @@ class OpsEngine:
                     "target_name": row.get("target_name"),
                 }
                 shifts.append(rec)
-            if row.get("schedule_id"):
-                await self._rewrite_schedule_time(int(row["schedule_id"]), new_hm)
             occupied.append(
                 Occupied(
                     target_id=str(row.get("target_id") or ""),
@@ -2699,12 +2747,57 @@ class OpsEngine:
             logger.info("EOL-Vorschlag fehlgeschlagen", exc_info=True)
 
     async def _notify_waiting(self, title: str, body: str) -> None:
+        await self._notify_event(title, body, flag="ops_wait")
+
+    async def _notify_event(
+        self, title: str, body: str, *, flag: str = "ops_wait"
+    ) -> None:
         if self._notify_shift is None:
             return
         try:
-            await self._notify_shift(title, body)
+            try:
+                await self._notify_shift(title, body, flag=flag)
+            except TypeError:
+                await self._notify_shift(title, body)
         except Exception:
-            logger.info("Push für Wartet-auf-dich fehlgeschlagen", exc_info=True)
+            logger.info("Push fehlgeschlagen", exc_info=True)
+
+    async def _notify_chain_summary(self) -> None:
+        if await self.store.has_activity_today(
+            action=ACTION_BRIEF, detail_contains="Kette fertig"
+        ):
+            return
+        log = await self.store.list_activity(limit=80)
+        today = [
+            r
+            for r in log
+            if r.get("action") == ACTION_APPLY and str(r.get("kind") or "") == KIND_BACKUP
+        ]
+        ok_n = sum(1 for r in today if str(r.get("result") or "") == RESULT_OK)
+        fail_n = sum(1 for r in today if str(r.get("result") or "") == RESULT_FAIL)
+        if ok_n + fail_n <= 0:
+            return
+        flag = "backup_failure" if fail_n else "backup_success"
+        body = f"Backup-Kette fertig: {ok_n} ok"
+        if fail_n:
+            body += f", {fail_n} fehlgeschlagen"
+        body += "."
+        await self._log_activity(
+            ACTION_BRIEF,
+            result=RESULT_FAIL if fail_n else RESULT_OK,
+            kind=KIND_BACKUP,
+            detail=f"Kette fertig — {body}",
+        )
+        await self._notify_event("Backup-Kette fertig", body, flag=flag)
+
+    async def log_manual_scan(self) -> None:
+        await self._log_activity(
+            ACTION_SCAN,
+            result=RESULT_INFO,
+            kind=KIND_PATCH,
+            detail="Patch- und Image-Scan manuell ausgelöst.",
+            via_agent=False,
+        )
 
     def _accepted_start_order(self, row: dict[str, Any]) -> tuple[int, str, int]:
         kind = str(row.get("kind") or "")
@@ -2720,7 +2813,19 @@ class OpsEngine:
         mark = getattr(bstore, "mark_schedule_fired", None)
         if bstore is None or mark is None:
             return
-        start = self._parse_start(row) or now_berlin()
+        start = now_berlin()
+        try:
+            sched = await bstore.get_schedule(int(sid))
+        except Exception:
+            sched = None
+        if sched:
+            hm = cron_clock_hm(str(sched.get("cron_expr") or "")) or schedule_clock_hm(sched)
+            if hm:
+                start = start.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+        else:
+            parsed = self._parse_start(row)
+            if parsed is not None:
+                start = parsed
         try:
             await mark(int(sid), minute_key=minute_key(start))
         except Exception:
@@ -3073,7 +3178,7 @@ class OpsEngine:
         settings = await self.settings()
         matrix = await self.scope_matrix()
         all_rows = await self.store.list_windows(limit=300)
-        shifts = await self.store.list_shifts(limit=30)
+        shifts = await self.store.list_shifts(limit=80)
         rollbacks = await self.store.list_rollbacks(limit=40)
         lessons = await self.store.list_lessons(limit=40)
         rb_by_window = {
@@ -3088,10 +3193,19 @@ class OpsEngine:
         }
         live_backup = [j.to_dict() for j in self._list_backup_jobs()]
         live_patch = [j.to_dict() for j in self._list_patch_jobs()]
+        shift_by_window: dict[int, dict[str, Any]] = {}
+        for s in shifts:
+            try:
+                swid = int(s.get("window_id"))
+            except (TypeError, ValueError):
+                continue
+            if swid not in shift_by_window:
+                shift_by_window[swid] = s
         next_up: list[dict[str, Any]] = []
         waiting: list[dict[str, Any]] = []
         running: list[dict[str, Any]] = []
         done: list[dict[str, Any]] = []
+        today = now.date().isoformat()
         for row in all_rows:
             wid = row.get("id")
             packed = self._serialize_window(
@@ -3099,6 +3213,7 @@ class OpsEngine:
                 now,
                 rollback=rb_by_window.get(int(wid)) if wid is not None else None,
                 lesson=lesson_by_window.get(int(wid)) if wid is not None else None,
+                shift=shift_by_window.get(int(wid)) if wid is not None else None,
             )
             st = str(row.get("status") or "")
             if st == STATUS_WAITING:
@@ -3106,13 +3221,56 @@ class OpsEngine:
             elif st == STATUS_RUNNING:
                 running.append(packed)
             elif st in (STATUS_DONE, STATUS_FAILED, STATUS_SKIPPED):
-                done.append(packed)
+                iso = str(row.get("updated_at_iso") or row.get("start_iso") or "")
+                day = ""
+                try:
+                    dt = datetime.fromisoformat(iso) if iso else None
+                    if dt is not None:
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        day = dt.astimezone(BERLIN).date().isoformat()
+                except ValueError:
+                    day = ""
+                if day == today or not day:
+                    done.append(packed)
             elif st == STATUS_ACCEPTED:
                 next_up.append(packed)
         done.sort(key=lambda r: str(r.get("updated_at_iso") or r.get("start_iso") or ""), reverse=True)
         rollback_events = [self._serialize_rollback(r) for r in rollbacks]
         activity = [serialize_activity(r) for r in await self.store.list_activity(limit=80)]
         brief = await self.store.get_brief_for_day(now.date().isoformat())
+        pending = await self._pending_hosts()
+        runs: list[dict[str, Any]] = []
+        schedules: list[dict[str, Any]] = []
+        bstore = self._get_backup_store()
+        if bstore is not None:
+            try:
+                schedules = await bstore.list_schedules()
+            except Exception:
+                schedules = []
+            try:
+                lister = getattr(bstore, "list_runs", None)
+                if lister is not None:
+                    runs = await lister(limit=80)
+            except Exception:
+                runs = []
+        skip_backup = {
+            str(h.get("target_id") or "")
+            for h in await self.store.list_known_hosts()
+            if h.get("skip_backup")
+        }
+        ledger = build_day_ledger(
+            now=now,
+            schedules=schedules,
+            windows=all_rows,
+            runs=runs,
+            hosts=matrix["hosts"],
+            patch_scope_ids=matrix["patch_scope_ids"],
+            image_scope_ids=matrix["image_scope_ids"],
+            prompts=matrix["prompts"],
+            pending=pending,
+            skip_backup_ids=skip_backup,
+        )
         shifted: list[dict[str, Any]] = [
             {
                 "event": "shift",
@@ -3165,6 +3323,7 @@ class OpsEngine:
             "brief": (brief or {}).get("text") or "",
             "brief_at": (brief or {}).get("created_at") or "",
             "done": done[:40],
+            "ledger": ledger,
             "live_jobs": {"backup": live_backup, "patch": live_patch},
             "time": format_de(now),
             "timezone": "Europe/Berlin",
@@ -3247,6 +3406,7 @@ class OpsEngine:
         *,
         rollback: dict[str, Any] | None = None,
         lesson: dict[str, Any] | None = None,
+        shift: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         start = self._parse_start(row)
         out = dict(row)
@@ -3281,6 +3441,12 @@ class OpsEngine:
             out["rollback"] = self._serialize_rollback(rollback)
         if lesson:
             out["lesson"] = serialize_lesson(lesson)
+        if shift:
+            old_hm = str(shift.get("old_start_hm") or "")
+            new_hm = str(shift.get("new_start_hm") or "")
+            if old_hm and new_hm:
+                out["shift_mark"] = f"{old_hm} → {new_hm}"
+                out["shift_reason"] = str(shift.get("reason") or "")
         return out
 
 

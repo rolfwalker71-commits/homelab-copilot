@@ -119,22 +119,27 @@ async def _job_payload(job) -> dict[str, Any]:
 
 async def _maybe_plan_after_scan(snapshot) -> None:
     engine = _engine
-    if engine is None:
-        return
+    if engine is not None:
+        try:
+            policy = await engine.policy()
+            if policy.enabled:
+                hosts = await hosts_from_store(
+                    engine.store, snapshot, tags_for=_inventory_tags
+                )
+                if hosts:
+                    await engine.plan(hosts)
+        except RuntimeError as exc:
+            logger.info("Welle nach Scan nicht geplant: %s", exc)
+        except Exception:
+            logger.exception("Welle nach Scan nicht geplant")
     try:
-        policy = await engine.policy()
-        if not policy.enabled:
-            return
-        hosts = await hosts_from_store(
-            engine.store, snapshot, tags_for=_inventory_tags
-        )
-        if not hosts:
-            return
-        await engine.plan(hosts)
-    except RuntimeError as exc:
-        logger.info("Welle nach Scan nicht geplant: %s", exc)
+        from app.main import app as fastapi_app
+
+        ops = getattr(fastapi_app.state, "ops_engine", None)
+        if ops is not None:
+            await ops.propose(auto_apply=True)
     except Exception:
-        logger.exception("Welle nach Scan nicht geplant")
+        logger.exception("Ops-Fenster nach Scan nicht geplant")
 
 
 def _snapshot(request: Request):

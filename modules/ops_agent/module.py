@@ -232,6 +232,35 @@ async def api_start_accepted() -> dict[str, Any]:
         raise _http(exc) from exc
 
 
+@router.post("/scan-now")
+async def api_scan_now(request: Request) -> dict[str, Any]:
+    """Start existing patcher scan-all (includes image scan), then ops plan."""
+    from patcher.module import _run_scan_all
+    from patcher.scheduler import SCAN_ALL, begin_scan_all
+
+    begun = await begin_scan_all(trigger="manual")
+    if begun is None:
+        raise HTTPException(status_code=409, detail="Scan läuft bereits.")
+    engine = _get_engine()
+    await engine.log_manual_scan()
+    snap = None
+    topo = getattr(request.app.state, "topology_store", None)
+    if topo is not None:
+        snap = getattr(topo, "snapshot", None)
+    asyncio.create_task(
+        _run_scan_all(
+            snapshot=snap, trigger="manual", do_summarize=False, already_begun=True
+        ),
+        name="ops-scan-now",
+    )
+    return {
+        "ok": True,
+        "started": True,
+        "message": "Patch- und Image-Scan gestartet — danach plant der Agent die Fenster.",
+        **SCAN_ALL.to_dict(),
+    }
+
+
 @router.post("/brief")
 async def api_refresh_brief() -> dict[str, Any]:
     row = await _get_engine().refresh_evening_brief(force=True)
@@ -285,7 +314,18 @@ class OpsAgentModule:
             return await list_backup_stacks(snapshot)
 
         async def _hosts(*_a: Any, **_k: Any) -> list[Any]:
-            return []
+            try:
+                from patcher.agent import hosts_from_store as real_hosts
+                from patcher.module import _get_store as _pstore
+
+                pstore = _pstore()
+                snap = _snap()
+                if pstore is None or snap is None:
+                    return []
+                return await real_hosts(pstore, snap, tags_for=_tags)
+            except Exception:
+                logger.exception("Pending Patch/Image-Hosts nicht lesbar")
+                return []
 
         async def _start_backup(window: dict[str, Any]) -> str | None:
             from backup_verifier.module import _enqueue_backup
@@ -396,14 +436,16 @@ class OpsAgentModule:
             )
             return {"ok": code == 0, "message": message, **parsed}
 
-        async def _notify(title: str, body: str) -> None:
+        async def _notify(title: str, body: str, flag: str = "ops_wait", **_k: Any) -> None:
             app_store = getattr(app.state, "app_store", None)
             if app_store is None:
                 return
-            if not await push_allowed(app_store, "ops_wait"):
+            pref = str(flag or "ops_wait")
+            if not await push_allowed(app_store, pref):
                 return
+            tag = "ops-agent-wait" if pref == "ops_wait" else "ops-agent"
             await send_push_to_all(
-                app_store, title=title, body=body, url="/ops", tag="ops-agent-wait"
+                app_store, title=title, body=body, url="/ops", tag=tag
             )
 
         _engine = OpsEngine(

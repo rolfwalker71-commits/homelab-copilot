@@ -35,6 +35,7 @@ class PushPrefsPayload(BaseModel):
     patch_findings: bool | None = None
     health_down: bool | None = None
     disk_high: bool | None = None
+    ops_wait: bool | None = None
 
 
 def _store(request: Request) -> AppStore:

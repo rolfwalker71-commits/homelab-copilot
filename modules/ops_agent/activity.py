@@ -19,6 +19,7 @@ ACTION_REBOOT = "reboot"
 ACTION_PRUNE = "prune"
 ACTION_WARN = "warn"
 ACTION_BRIEF = "brief"
+ACTION_SCAN = "scan"
 
 ACTION_LABELS_DE = {
     ACTION_PLANNED: "Geplant",
@@ -32,6 +33,7 @@ ACTION_LABELS_DE = {
     ACTION_PRUNE: "Image-Prune",
     ACTION_WARN: "Warnung",
     ACTION_BRIEF: "Abend-Kurzlage",
+    ACTION_SCAN: "Scan",
 }
 
 RESULT_OK = "ok"

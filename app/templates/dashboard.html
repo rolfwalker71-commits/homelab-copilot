@@ -601,7 +601,7 @@
 {% set bc = backup_copilot if backup_copilot is mapping else {} %}
 {% set bc_pct = bc.get('used_pct') %}
 {% set bc_used = (bc.get('used_label') or '—').split(' ') %}
-<div class="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6 kpi-row">
+<div class="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6 kpi-row" style="--tertiary:#ea580c;--warn:#ea580c">
   <div class="surface surface-tinted animate-in animate-in-delay-1 p-4 sm:p-5">
     <div class="stat-tile" data-kpi="nodes">
       <span class="stat-tile-ico" aria-hidden="true">{{ ico('nodes') }}</span>
@@ -613,10 +613,10 @@
   </div>
   <div class="surface surface-tinted animate-in animate-in-delay-1 p-4 sm:p-5">
     <div class="stat-tile" data-kpi="guests">
-      <span class="stat-tile-ico" aria-hidden="true">{{ ico('guests') }}</span>
+      <span class="stat-tile-ico" aria-hidden="true" style="color:#ea580c">{{ ico('guests') }}</span>
       <div class="stat-tile-body">
         <p class="text-sm text-[var(--muted)]">Guests</p>
-        <p class="stat-value">{% if snapshot %}{{ snapshot.guests|length }}{% else %}0{% endif %}</p>
+        <p class="stat-value" style="color:#ea580c">{% if snapshot %}{{ snapshot.guests|length }}{% else %}0{% endif %}</p>
       </div>
     </div>
   </div>
@@ -637,24 +637,29 @@
            aria-valuemax="{{ hk.get('total') or 0 }}"
            aria-valuenow="{{ hk.get('online') or 0 }}"
            aria-label="Hosts {{ hk.get('online') or 0 }} Online, {{ hk.get('offline') or 0 }} Offline">
-        <svg viewBox="0 0 36 36" aria-hidden="true" focusable="false">
-          <circle class="kpi-bagel-track" cx="18" cy="18" r="15.15" fill="none"></circle>
+        <svg viewBox="0 0 36 36" overflow="visible" aria-hidden="true" focusable="false">
+          <circle class="kpi-bagel-track" cx="18" cy="18" r="15.15" fill="none"
+                  style="stroke-width:8"></circle>
           <circle class="kpi-bagel-fill kpi-bagel-online" cx="18" cy="18" r="15.15" fill="none"
+                  style="stroke-width:8"
                   stroke-dasharray="{{ hk.get('online_dash') or '0 95.19' }}"
                   transform="rotate(-90 18 18)"></circle>
           <circle class="kpi-bagel-fill kpi-bagel-offline" cx="18" cy="18" r="15.15" fill="none"
+                  style="stroke-width:8;stroke:#ea580c"
                   stroke-dasharray="{{ hk.get('offline_dash') or '0 95.19' }}"
                   stroke-dashoffset="{{ hk.get('offline_offset') or '0' }}"
                   transform="rotate(-90 18 18)"></circle>
         </svg>
         <span class="kpi-bagel-center">
-          <span class="kpi-bagel-num kpi-bagel-split-num">{{ hk.get('center') or '0 / 0' }}</span>
+          <span class="kpi-bagel-num kpi-bagel-split-num">
+            <span class="kpi-split-online">{{ hk.get('online') or 0 }}</span><span class="kpi-split-sep"> / </span><span class="kpi-split-offline" style="color:#ea580c">{{ hk.get('offline') or 0 }}</span>
+          </span>
         </span>
       </div>
       <div class="stat-tile-body">
         <p class="text-sm text-[var(--muted)]">Hosts</p>
         <p class="kpi-bagel-meta kpi-meta-online">Online {{ hk.get('online') or 0 }}</p>
-        <p class="kpi-bagel-meta kpi-meta-offline">Offline {{ hk.get('offline') or 0 }}</p>
+        <p class="kpi-bagel-meta kpi-meta-offline" style="color:#ea580c">Offline {{ hk.get('offline') or 0 }}</p>
         {% if hk.get('unmonitored') %}
         <p class="kpi-bagel-meta kpi-meta-quiet">{{ hk.unmonitored }} nicht überwacht</p>
         {% endif %}
@@ -667,9 +672,11 @@
       <div class="kpi-bagel" role="meter" aria-valuemin="0" aria-valuemax="100"
            aria-valuenow="{{ bc_pct if bc_pct is not none else 0 }}"
            aria-label="Copilot Speicher{% if bc.get('quota_known') %}: {{ bc.get('used_label') }} von {{ bc.get('total_label') }} belegt{% endif %}">
-        <svg viewBox="0 0 36 36" aria-hidden="true" focusable="false">
-          <circle class="kpi-bagel-track" cx="18" cy="18" r="15.15" fill="none"></circle>
+        <svg viewBox="0 0 36 36" overflow="visible" aria-hidden="true" focusable="false">
+          <circle class="kpi-bagel-track" cx="18" cy="18" r="15.15" fill="none"
+                  style="stroke-width:8"></circle>
           <circle class="kpi-bagel-fill" cx="18" cy="18" r="15.15" fill="none"
+                  style="stroke-width:8"
                   stroke-dasharray="{{ bagel_dasharray(bc_pct) if bagel_dasharray is defined else '0 95.19' }}"
                   transform="rotate(-90 18 18)"></circle>
         </svg>
@@ -688,10 +695,12 @@
   <div class="surface surface-tinted animate-in animate-in-delay-3 p-4 sm:p-5" data-storage-card="hetzner">
     <div class="stat-tile stat-tile-bagel is-loading" data-kpi="hetzner" title="Hetzner Storage Box">
       <div class="kpi-bagel" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
-           aria-label="Hetzner Speicher wird geladen">
-        <svg viewBox="0 0 36 36" aria-hidden="true" focusable="false">
-          <circle class="kpi-bagel-track" cx="18" cy="18" r="15.15" fill="none"></circle>
+           aria-label="Hetzner Speicher wird geladen" style="color:#ea580c">
+        <svg viewBox="0 0 36 36" overflow="visible" aria-hidden="true" focusable="false">
+          <circle class="kpi-bagel-track" cx="18" cy="18" r="15.15" fill="none"
+                  style="stroke-width:8"></circle>
           <circle class="kpi-bagel-fill" cx="18" cy="18" r="15.15" fill="none"
+                  style="stroke-width:8;stroke:#ea580c"
                   stroke-dasharray="0 95.19" transform="rotate(-90 18 18)"></circle>
         </svg>
         <span class="kpi-bagel-center">
@@ -3679,7 +3688,13 @@
     const split = splitSiLabel(known ? data.used_label : '—');
     if (usedEl) usedEl.textContent = configured ? split.n : '—';
     if (unitEl) unitEl.textContent = configured && known ? split.u : '';
-    if (fill) fill.setAttribute('stroke-dasharray', bagelDash(pct));
+    if (fill) {
+      fill.setAttribute('stroke-dasharray', bagelDash(pct));
+      fill.style.strokeWidth = '8';
+      if (card.getAttribute('data-storage-card') === 'hetzner') {
+        fill.style.stroke = '#ea580c';
+      }
+    }
     if (tile) tile.classList.toggle('is-warn', !!(known && data.warn));
     if (bagel) {
       bagel.setAttribute('aria-valuenow', String(known && pct != null ? pct : 0));
