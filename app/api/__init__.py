@@ -12,6 +12,7 @@ from app.config import Settings, get_settings
 from app.core import docker_control as docker_ctl
 from app.core.inventory import InventoryStore, rehome_id_changes
 from app.core.locale import format_de, now_berlin
+from app.core.pve_tag_colors import serialize_color_map
 from app.core.registry import registry
 from app.core.ssh_endpoint import resolve_ssh_endpoint
 from app.api.auth import router as auth_router
@@ -310,6 +311,59 @@ async def guests_live_status(
             continue
         await _persist_guest_live(request, live)
     return {"ok": True, "guests": guests}
+
+
+def _remember_pve_nodes(request: Request) -> None:
+    engine = request.app.state.discovery_engine
+    store = getattr(request.app.state, "topology_store", None)
+    if store is not None:
+        engine.remember_from_snapshot(store.snapshot)
+
+
+@router.get("/pve/tag-style")
+async def pve_tag_style(
+    request: Request,
+    guest_id: str | None = Query(None),
+    node: str | None = Query(None),
+) -> dict[str, Any]:
+    """Datacenter tag color-map for the PVE API that owns this guest/node."""
+    engine = request.app.state.discovery_engine
+    _remember_pve_nodes(request)
+    node_name = (node or "").strip()
+    try:
+        if guest_id:
+            cmap = await engine.fetch_tag_color_map(guest_id=guest_id)
+            node_name = engine._guest_id_parts(guest_id)[1]
+        elif node_name:
+            cmap = await engine.fetch_tag_color_map(node=node_name)
+        else:
+            raise HTTPException(
+                status_code=400, detail="guest_id oder node erforderlich"
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _proxmox_node_http_error(exc, label="Proxmox-Tag-Style fehlgeschlagen") from exc
+    return {
+        "ok": True,
+        "node": node_name,
+        "color_map": serialize_color_map(cmap),
+    }
+
+
+@router.get("/pve/tag-styles")
+async def pve_tag_styles(request: Request) -> dict[str, Any]:
+    """Color-maps for every known PVE host (cached a few minutes per host)."""
+    engine = request.app.state.discovery_engine
+    _remember_pve_nodes(request)
+    try:
+        by_node = await engine.fetch_all_tag_color_maps()
+    except Exception as exc:
+        raise _proxmox_node_http_error(exc, label="Proxmox-Tag-Styles fehlgeschlagen") from exc
+    return {
+        "ok": True,
+        "by_node": {name: serialize_color_map(cmap) for name, cmap in by_node.items()},
+    }
 
 
 @router.get("/guests/{guest_id}/rrd")

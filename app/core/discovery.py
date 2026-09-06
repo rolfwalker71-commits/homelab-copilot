@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -27,6 +28,7 @@ from app.core.proxmox import (
     strip_unbound_metrics,
     unbound_message,
 )
+from app.core.pve_tag_colors import extract_color_map
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +220,8 @@ class DiscoveryEngine:
         self._node_endpoints: dict[str, ProxmoxEndpoint] = {}
         self._unbound_via: dict[str, str] = {}
         self._discovery_done = False
+        self._tag_style_cache: dict[str, tuple[float, dict[str, list[int]]]] = {}
+        self._tag_style_ttl = 180.0
 
     def set_manual_hosts_provider(self, fn: ManualHostsFn | None) -> None:
         """Reuse the patcher host store (name, IP, SSH user/port)."""
@@ -1174,6 +1178,68 @@ class DiscoveryEngine:
             if tags_list:
                 meta["tags"] = cfg_tags if isinstance(cfg_tags, str) else ";".join(tags_list)
                 meta["tags_list"] = tags_list
+
+    async def fetch_tag_color_map(
+        self,
+        *,
+        node: str | None = None,
+        guest_id: str | None = None,
+        endpoint: ProxmoxEndpoint | None = None,
+    ) -> dict[str, list[int]]:
+        """Datacenter ``tag-style`` color-map for the guest's PVE API host.
+
+        Cached a few minutes per endpoint so the dashboard does not hit
+        ``GET /cluster/options`` on every guest click.
+        """
+        if endpoint is None:
+            if guest_id:
+                endpoint = self._endpoint_for_guest_id(guest_id)
+            elif node:
+                endpoint = self._require_endpoint_for_node(node)
+            else:
+                raise ValueError("guest_id oder node erforderlich")
+        now = time.monotonic()
+        cached = self._tag_style_cache.get(endpoint.id)
+        if cached is not None and (now - cached[0]) < self._tag_style_ttl:
+            return cached[1]
+        mapping: dict[str, list[int]] = {}
+        try:
+            client, headers = await self._proxmox_authed_client(endpoint=endpoint)
+            try:
+                data = await self._proxmox_get(client, "/cluster/options", headers)
+            finally:
+                await client.aclose()
+            mapping = extract_color_map(data)
+        except Exception:
+            logger.debug(
+                "Proxmox tag-style (color-map) für %s nicht lesbar",
+                endpoint.host,
+                exc_info=True,
+            )
+        self._tag_style_cache[endpoint.id] = (now, mapping)
+        return mapping
+
+    async def fetch_all_tag_color_maps(self) -> dict[str, dict[str, list[int]]]:
+        """Node name → color-map. One cached GET per distinct PVE host."""
+        by_ep: dict[str, ProxmoxEndpoint] = {}
+        nodes_for_ep: dict[str, list[str]] = {}
+        for name, ep in self._node_endpoints.items():
+            by_ep[ep.id] = ep
+            nodes_for_ep.setdefault(ep.id, []).append(name)
+        if not by_ep:
+            endpoints = self.settings.proxmox_endpoints()
+            if len(endpoints) == 1:
+                by_ep[endpoints[0].id] = endpoints[0]
+                nodes_for_ep[endpoints[0].id] = []
+        maps_by_node: dict[str, dict[str, list[int]]] = {}
+        for ep_id, ep in by_ep.items():
+            cmap = await self.fetch_tag_color_map(endpoint=ep)
+            names = nodes_for_ep.get(ep_id) or []
+            if not names:
+                maps_by_node["*"] = cmap
+            for name in names:
+                maps_by_node[name] = cmap
+        return maps_by_node
 
     async def fetch_guest_rrd(
         self,

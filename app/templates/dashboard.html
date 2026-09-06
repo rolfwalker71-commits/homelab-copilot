@@ -26,6 +26,7 @@
     <textarea id="inv-notes-{{ entity_id }}" class="field topo-inventory-notes" rows="3" maxlength="8000" placeholder="Zweck, Zugänge, Besonderheiten…"></textarea>
     <label class="label" for="inv-tags-{{ entity_id }}">Extra-Tags (Komma oder Semikolon)</label>
     <input id="inv-tags-{{ entity_id }}" class="field" data-inv-tags maxlength="400" placeholder="prod, monitoring" />
+    <ul class="topo-tag-list topo-inv-tag-chips" data-inv-tag-chips data-pve-tag-list hidden aria-label="Extra-Tags"></ul>
     <p class="label">Links</p>
     <div class="topo-inventory-links" data-inv-links></div>
     <button type="button" class="btn btn-ghost btn-sm" data-inv-add-link>Link hinzufügen</button>
@@ -57,6 +58,18 @@
 </section>
 {%- endmacro %}
 
+{% macro pve_tag_chip_el(tag, node='', extra_class='', tag_el='li') -%}
+{% set t = (tag|string)|trim %}
+{% if t %}
+{% set chip = pve_tag_chip(t) %}
+<{{ tag_el }} class="topo-tag-chip{% if extra_class %} {{ extra_class }}{% endif %}{% if chip.numeric %} topo-tag-chip--numeric{% endif %}"
+    data-pve-tag="{{ t }}"
+    data-pve-node="{{ node or '' }}"
+    data-pve-contrast="{{ chip.contrast }}"
+    style="{{ chip.style }}">{{ t }}</{{ tag_el }}>
+{% endif %}
+{%- endmacro %}
+
 {% macro guest_tag_chips(g) -%}
 {% set tags = (g.meta or {}).get('tags_list') %}
 {% if not tags %}
@@ -65,16 +78,13 @@
     {% set tags = raw_tags.replace(',', ';').split(';') %}
   {% endif %}
 {% endif %}
-{% if tags %}
-<ul class="topo-tag-list" aria-label="Proxmox-Tags">
+<ul class="topo-tag-list" aria-label="Proxmox-Tags" data-pve-tag-list data-pve-node="{{ g.node or '' }}"{% if not tags %} hidden{% endif %}>
+  {% if tags %}
   {% for tag in tags %}
-  {% set t = (tag|string)|trim %}
-  {% if t %}
-  <li class="topo-tag-chip">{{ t }}</li>
-  {% endif %}
+  {{ pve_tag_chip_el(tag, g.node or '') }}
   {% endfor %}
+  {% endif %}
 </ul>
-{% endif %}
 {%- endmacro %}
 
 {% macro guest_power_controls(g) -%}
@@ -798,7 +808,14 @@
                 <span class="topo-rail-item-sub">
                   <span data-guest-live="rail-ip">{% if g.ip_addresses %}{{ g.ip_addresses[0] }}{% else %}{{ g.kind.value }}{% endif %}</span>{% if g.vmid %} · {{ g.vmid }}{% endif %}
                   {% set rail_tags = (g.meta or {}).get('tags_list') or [] %}
-                  {% if rail_tags %} · {{ rail_tags[:2] | join(', ') }}{% if rail_tags|length > 2 %}…{% endif %}{% endif %}
+                  {% if rail_tags %}
+                  <span class="topo-rail-tags" data-pve-tag-list data-pve-node="{{ g.node or '' }}">
+                    {% for tag in rail_tags[:2] %}
+                    {{ pve_tag_chip_el(tag, g.node or '', 'topo-tag-chip--rail', 'span') }}
+                    {% endfor %}
+                    {% if rail_tags|length > 2 %}<span class="topo-rail-tags-more">…</span>{% endif %}
+                  </span>
+                  {% endif %}
                 </span>
               </span>
             </button>
@@ -1655,6 +1672,157 @@
     if (days) return days + 'd ' + hours + 'h';
     if (hours) return hours + 'h ' + minutes + 'm';
     return minutes + 'm';
+  }
+
+  const pveColorMaps = Object.create(null);
+
+  function pveStringToRgb(tag) {
+    let hash = 0;
+    if (!tag) return [255, 255, 255];
+    const s = String(tag) + 'prox';
+    for (let i = 0; i < s.length; i++) {
+      hash = s.charCodeAt(i) + ((hash << 5) - hash);
+      hash = hash & hash;
+    }
+    const alpha = 0.7;
+    const bg = 255;
+    return [
+      (hash & 255) * alpha + bg * (1 - alpha),
+      ((hash >> 8) & 255) * alpha + bg * (1 - alpha),
+      ((hash >> 16) & 255) * alpha + bg * (1 - alpha),
+    ];
+  }
+
+  function pveTextContrastClass(rgb) {
+    const r = (rgb[0] / 255) ** 2.4;
+    const g = (rgb[1] / 255) ** 2.4;
+    const b = (rgb[2] / 255) ** 2.4;
+    let lum = r * 0.2126729 + g * 0.7151522 + b * 0.072175;
+    if (lum <= 0.022) lum = lum + (0.022 - lum) ** 1.414;
+    const contrastLight = lum ** 0.65 - 1;
+    const contrastDark = lum ** 0.56 - 0.046134502;
+    return Math.abs(contrastLight) >= Math.abs(contrastDark) ? 'light' : 'dark';
+  }
+
+  function pveLookupColorMap(tag, map) {
+    if (!tag || !map) return null;
+    const hit = map[tag];
+    if (!hit || !hit.bg || hit.bg.length < 3) return null;
+    return hit;
+  }
+
+  function pveResolveTagStyle(tag, map) {
+    const mapped = pveLookupColorMap(tag, map);
+    const rgb = mapped ? mapped.bg : pveStringToRgb(tag);
+    let fg;
+    let contrast;
+    if (mapped && mapped.fg && mapped.fg.length >= 3) {
+      fg = mapped.fg;
+      contrast = 'dark';
+    } else {
+      contrast = pveTextContrastClass(rgb);
+      fg = contrast === 'light' ? [255, 255, 255] : [0, 0, 0];
+    }
+    return {
+      bg: 'rgb(' + Math.round(rgb[0]) + ', ' + Math.round(rgb[1]) + ', ' + Math.round(rgb[2]) + ')',
+      fg: 'rgb(' + Math.round(fg[0]) + ', ' + Math.round(fg[1]) + ', ' + Math.round(fg[2]) + ')',
+      contrast: contrast,
+    };
+  }
+
+  function applyPveTagColors(root) {
+    (root || document).querySelectorAll('[data-pve-tag]').forEach((el) => {
+      const tag = el.getAttribute('data-pve-tag') || '';
+      if (!tag) return;
+      const node = el.getAttribute('data-pve-node') || '';
+      const map = pveColorMaps[node] || pveColorMaps['*'] || {};
+      const style = pveResolveTagStyle(tag, map);
+      el.style.backgroundColor = style.bg;
+      el.style.color = style.fg;
+      el.setAttribute('data-pve-contrast', style.contrast);
+    });
+  }
+
+  function pveNodeFromGuestId(guestId) {
+    const parts = String(guestId || '').split(':');
+    if ((parts[0] === 'lxc' || parts[0] === 'qemu' || parts[0] === 'node') && parts[1]) {
+      return parts[1];
+    }
+    return '';
+  }
+
+  function paintInvTagChips(form, tags) {
+    if (!form) return;
+    const list = form.querySelector('[data-inv-tag-chips]');
+    const entityId = form.getAttribute('data-inventory') || '';
+    const node = pveNodeFromGuestId(entityId) || (entityId.indexOf(':') < 0 ? entityId : '');
+    const names = (tags || []).map((t) => String(t || '').trim()).filter(Boolean);
+    if (list) {
+      list.setAttribute('data-pve-node', node);
+      list.innerHTML = names.map((tag) => pveTagChipHtml(tag, node, '', 'li')).join('');
+      list.hidden = !names.length;
+      applyPveTagColors(list);
+    }
+    const panel = form.closest('[data-guest-panel]');
+    const header = panel && panel.querySelector('.topo-detail-heading [data-pve-tag-list]');
+    if (header) {
+      header.querySelectorAll('[data-tag-source="inventory"]').forEach((el) => el.remove());
+      const have = new Set();
+      header.querySelectorAll('[data-pve-tag]').forEach((el) => {
+        have.add((el.getAttribute('data-pve-tag') || '').toLowerCase());
+      });
+      names.forEach((tag) => {
+        if (have.has(tag.toLowerCase())) return;
+        header.insertAdjacentHTML('beforeend', pveTagChipHtml(tag, node, '', 'li', 'inventory'));
+        have.add(tag.toLowerCase());
+      });
+      header.hidden = !header.querySelector('[data-pve-tag]');
+      applyPveTagColors(header);
+    }
+  }
+
+  function pveTagChipHtml(tag, node, extraClass, tagEl, source) {
+    const el = tagEl || 'li';
+    const style = pveResolveTagStyle(tag, pveColorMaps[node] || pveColorMaps['*'] || {});
+    const numeric = /^\d+$/.test(tag) ? ' topo-tag-chip--numeric' : '';
+    const extra = extraClass ? ' ' + extraClass : '';
+    const src = source ? ' data-tag-source="' + escapeHtml(source) + '"' : '';
+    return (
+      '<' + el + ' class="topo-tag-chip' + extra + numeric + '"' +
+      ' data-pve-tag="' + escapeHtml(tag) + '"' +
+      ' data-pve-node="' + escapeHtml(node || '') + '"' +
+      ' data-pve-contrast="' + style.contrast + '"' +
+      src +
+      ' style="background-color: ' + style.bg + '; color: ' + style.fg + ';">' +
+      escapeHtml(tag) +
+      '</' + el + '>'
+    );
+  }
+
+  async function loadAllPveTagStyles() {
+    try {
+      const res = await fetch('/api/pve/tag-styles');
+      if (!res.ok) return;
+      const data = await res.json();
+      const byNode = (data && data.by_node) || {};
+      Object.keys(byNode).forEach((name) => {
+        pveColorMaps[name] = byNode[name] || {};
+      });
+      applyPveTagColors();
+    } catch (_) {}
+  }
+
+  async function loadPveTagStyleForGuest(guestId) {
+    if (!guestId || !(guestId.startsWith('lxc:') || guestId.startsWith('qemu:'))) return;
+    try {
+      const res = await fetch('/api/pve/tag-style?guest_id=' + encodeURIComponent(guestId));
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.node) {
+        pveColorMaps[data.node] = data.color_map || {};
+        applyPveTagColors();
+      }
+    } catch (_) {}
   }
 
   function metricLevelJs(pct) {
@@ -2566,6 +2734,7 @@
     const linksRoot = form.querySelector('[data-inv-links]');
     if (notes) notes.value = (data && data.notes) || '';
     if (tags) tags.value = ((data && data.extra_tags) || []).join(', ');
+    paintInvTagChips(form, (data && data.extra_tags) || []);
     if (linksRoot) {
       const links = (data && data.links) || [];
       linksRoot.innerHTML = '';
@@ -2619,6 +2788,9 @@
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || 'Speichern fehlgeschlagen');
       if (status) status.textContent = 'Gespeichert' + (data.updated_at ? ' · ' + data.updated_at : '');
+      paintInvTagChips(form, (data && data.extra_tags) || (tags
+        ? tags.value.split(/[,;]/).map((s) => s.trim()).filter(Boolean)
+        : []));
     } catch (e) {
       if (status) status.textContent = String(e.message || e);
     }
@@ -2924,6 +3096,7 @@
     } catch (_) {}
     scheduleGuestSparks(guestId);
     loadGuestStackBackups(guestId);
+    loadPveTagStyleForGuest(guestId);
   }
 
   function selectTopoNode(nodeName) {
@@ -3210,6 +3383,7 @@
     }
   }
   initTopoMasterDetail();
+  loadAllPveTagStyles();
 
   document.getElementById('btn-refresh')?.addEventListener('click', (e) => runRefresh(e.currentTarget));
   document.getElementById('fab-refresh')?.addEventListener('click', (e) => runRefresh(e.currentTarget));

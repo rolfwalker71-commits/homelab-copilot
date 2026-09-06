@@ -32,6 +32,7 @@ from app.core.locale import (
 from app.core.push import ensure_vapid_keys
 from app.core.registry import discover_and_load_modules, registry
 from app.core.topology import TopologyStore
+from app.core.pve_tag_colors import tag_chip_vars
 from app.core.tree import build_topology_tree
 
 logging.basicConfig(
@@ -47,6 +48,7 @@ TEMPLATES.env.globals["format_de"] = format_de
 TEMPLATES.env.globals["format_bytes"] = format_bytes
 TEMPLATES.env.globals["format_uptime"] = format_uptime
 TEMPLATES.env.globals["metric_level"] = metric_level
+TEMPLATES.env.globals["pve_tag_chip"] = tag_chip_vars
 
 
 async def _discovery_loop(app: FastAPI) -> None:
