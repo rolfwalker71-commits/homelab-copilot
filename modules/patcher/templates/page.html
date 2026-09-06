@@ -28,6 +28,23 @@
 
 <div id="setup-banner" class="mb-4 hidden animate-in surface p-3 text-sm" role="status"></div>
 
+<article id="wave-banner" class="mb-4 hidden animate-in surface-tinted p-4 sm:p-5" aria-live="polite">
+  <div class="flex flex-wrap items-start justify-between gap-3">
+    <div class="min-w-0 flex-1">
+      <p class="eyebrow">Wellen-Agent</p>
+      <h2 id="wave-title" class="font-display text-lg font-bold leading-snug break-words">Keine Welle</h2>
+      <p id="wave-sub" class="mt-1 text-sm text-[var(--muted)] leading-snug"></p>
+    </div>
+    <div class="flex flex-wrap gap-2 shrink-0">
+      <button type="button" id="btn-wave-plan" class="btn btn-ghost min-h-12">Welle planen</button>
+      <button type="button" id="btn-wave-start" class="btn btn-primary min-h-12" disabled>Welle starten</button>
+      <button type="button" id="btn-wave-confirm-all" class="btn btn-ghost min-h-12" disabled>Diese bestätigen</button>
+      <button type="button" id="btn-wave-stop" class="btn btn-ghost min-h-12" disabled>Welle stoppen</button>
+    </div>
+  </div>
+  <ul id="wave-items" class="mt-3 space-y-2"></ul>
+</article>
+
 <div id="job-progress" class="mb-4 hidden animate-in" aria-live="polite" aria-busy="false">
   <div class="surface p-3 sm:p-4 space-y-3">
     <div class="flex items-start gap-3">
@@ -41,6 +58,7 @@
     <div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" id="jp-bar-wrap" data-jp="bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
       <div id="jp-bar" data-jp="bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>
     </div>
+    <p id="jp-explain" data-jp="explain" class="text-sm text-[var(--text)] break-words leading-snug hidden"></p>
     <p id="jp-message" data-jp="message" class="text-sm text-[var(--muted)] break-words leading-snug">Status wird geladen…</p>
     <p id="jp-liveness" data-jp="liveness" class="text-sm text-[var(--muted)] break-words leading-snug hidden" role="status"></p>
     <pre id="jp-log" data-jp="log" class="max-h-32 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words hidden"></pre>
@@ -252,6 +270,7 @@
       '<div class="h-2 w-full overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--muted)_22%,transparent)]" role="progressbar" data-jp="bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">' +
         '<div data-jp="bar" class="h-full w-0 rounded-full bg-[var(--primary)] transition-[width] duration-300 ease-out"></div>' +
       '</div>' +
+      '<p data-jp="explain" class="text-sm text-[var(--text)] break-words leading-snug hidden"></p>' +
       '<p data-jp="message" class="text-sm text-[var(--muted)] break-words leading-snug">Status wird geladen…</p>' +
       '<p data-jp="liveness" class="text-sm text-[var(--muted)] break-words leading-snug hidden" role="status"></p>' +
       '<pre data-jp="log" class="max-h-32 overflow-y-auto rounded border border-[var(--border)] bg-[color-mix(in_srgb,var(--card)_80%,transparent)] p-2 text-xs leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-words hidden"></pre>' +
@@ -326,6 +345,11 @@
       live.classList.add('hidden');
       live.textContent = '';
       live.style.color = '';
+    }
+    const explain = jp('explain');
+    if (explain) {
+      explain.textContent = '';
+      explain.classList.add('hidden');
     }
     const foot = jp('footer');
     if (foot) {
@@ -413,6 +437,20 @@
     el.style.color = '';
   }
 
+  function updateExplanation(job) {
+    const el = jp('explain');
+    if (!el) return;
+    const text = job && job.explanation;
+    const show = !!(text && job && (job.status === 'failed' || job.status === 'queued' || !job.ok || job.wave_item));
+    if (!show) {
+      el.textContent = '';
+      el.classList.add('hidden');
+      return;
+    }
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
+
   function updateProgress(job) {
     const pct = Math.max(0, Math.min(100, Number(job.percent) || 0));
     const phase = jp('phase');
@@ -433,6 +471,7 @@
       log.scrollTop = log.scrollHeight;
     }
     updateLiveness(job);
+    updateExplanation(job);
   }
 
   function finishProgress(job) {
@@ -480,6 +519,7 @@
       log.classList.remove('hidden');
       log.textContent = lines.join('\n');
     }
+    updateExplanation(job);
     if (progressScope === 'card' && activeTargetId) {
       lastCardJob = {
         targetId: activeTargetId,
@@ -645,6 +685,7 @@
       const done = await pollScanAll();
       if (done) updateScanAllProgress(done);
       await loadTargets();
+      await loadWave();
     } catch (e) {
       finishProgress({
         ok: false,
@@ -920,6 +961,167 @@
     }
   }
 
+  let lastAgent = { enabled: false, auto_security: false, max_parallel: 1, wave: null };
+  let wavePoll = null;
+
+  function waveStatusLabel(st) {
+    if (st === 'running') return 'läuft';
+    if (st === 'waiting') return 'wartet auf Bestätigung';
+    if (st === 'planned') return 'geplant';
+    if (st === 'failed') return 'gestoppt nach Fehler';
+    if (st === 'stopped') return 'gestoppt';
+    if (st === 'completed') return 'fertig';
+    return st || '';
+  }
+
+  function waveItemChip(item) {
+    const st = item.status || '';
+    if (st === 'ready') return chip('bereit', 'chip-running');
+    if (st === 'waiting_confirm' || st === 'planned') return chip('wartet', 'chip-pending');
+    if (st === 'blocked') return chip('Gate', 'chip-unknown');
+    if (st === 'running') return chip('läuft', 'chip-pending');
+    if (st === 'success') return chip('ok', 'chip-running');
+    if (st === 'failed') return chip('Fehler', 'chip-stopped');
+    if (st === 'skipped') return chip('übersprungen', 'chip-unknown');
+    return chip(st, 'chip-unknown');
+  }
+
+  function renderWave(agent) {
+    lastAgent = agent || lastAgent;
+    const root = document.getElementById('wave-banner');
+    if (!root) return;
+    const enabled = !!(agent && agent.enabled);
+    const wave = agent && agent.wave;
+    const title = document.getElementById('wave-title');
+    const sub = document.getElementById('wave-sub');
+    const list = document.getElementById('wave-items');
+    const btnPlan = document.getElementById('btn-wave-plan');
+    const btnStart = document.getElementById('btn-wave-start');
+    const btnConfirm = document.getElementById('btn-wave-confirm-all');
+    const btnStop = document.getElementById('btn-wave-stop');
+    root.classList.remove('hidden');
+    if (!enabled) {
+      if (title) title.textContent = 'Wellen-Agent ist aus';
+      if (sub) {
+        sub.textContent = 'Standard: aus. Einschalten unter Zeitplan oder mit PATCHER_AGENT_ENABLED. Security-Auto bleibt standardmäßig aus.';
+      }
+      if (list) list.innerHTML = '';
+      if (btnPlan) btnPlan.disabled = true;
+      if (btnStart) btnStart.disabled = true;
+      if (btnConfirm) btnConfirm.disabled = true;
+      if (btnStop) btnStop.disabled = true;
+      return;
+    }
+    const items = (wave && wave.items) || [];
+    const live = wave && (wave.status === 'running' || wave.status === 'waiting');
+    if (title) {
+      title.textContent = wave
+        ? (wave.banner || ('Welle · ' + waveStatusLabel(wave.status)))
+        : 'Keine Welle — „Welle planen“ gruppiert Security zuerst.';
+    }
+    if (sub) {
+      const bits = [];
+      bits.push(agent.auto_security
+        ? 'Security automatisch, wenn Gates passen.'
+        : 'Security-Auto aus — alles wartet auf Bestätigung.');
+      bits.push('Max. ' + (agent.max_parallel || 1) + ' Host parallel.');
+      if (wave && wave.stop_reason) bits.push(wave.stop_reason);
+      sub.textContent = bits.join(' ');
+    }
+    if (list) {
+      list.innerHTML = items.map(function (it) {
+        const waiting = it.status === 'waiting_confirm' || it.status === 'blocked' || (it.needs_confirm && !it.confirmed && it.status !== 'success' && it.status !== 'failed' && it.status !== 'skipped');
+        const expl = (it.status === 'failed' || it.status === 'waiting_confirm' || it.status === 'blocked' || it.status === 'ready')
+          ? '<p class="mt-1 text-sm leading-snug break-words">' + esc(it.explanation || '') + '</p>'
+          : '';
+        return (
+          '<li class="entity-card p-3">' +
+            '<div class="flex flex-wrap items-start justify-between gap-2">' +
+              '<div class="min-w-0 flex-1">' +
+                '<p class="font-medium break-words leading-snug">' + esc(it.target_name || it.target_id) +
+                  ' · ' + esc(it.bucket === 'security' ? 'Security' : (it.bucket === 'images' ? 'Images' : 'Bestätigung')) +
+                '</p>' +
+                expl +
+              '</div>' +
+              '<div class="flex flex-wrap items-center gap-2 shrink-0">' +
+                waveItemChip(it) +
+                (waiting
+                  ? '<button type="button" class="btn btn-sm btn-primary min-h-12 btn-wave-confirm" data-id="' + it.id + '">Bestätigen</button>'
+                  : '') +
+              '</div>' +
+            '</div>' +
+          '</li>'
+        );
+      }).join('');
+    }
+    const canStart = !!(wave && items.length && (wave.status === 'planned' || wave.status === 'waiting'));
+    const canConfirm = items.some(function (it) {
+      return it.status === 'waiting_confirm' || it.status === 'blocked' || (it.needs_confirm && !it.confirmed && it.status !== 'success' && it.status !== 'failed' && it.status !== 'skipped');
+    });
+    const canStop = !!(wave && (wave.status === 'running' || wave.status === 'waiting' || wave.status === 'planned'));
+    if (btnPlan) btnPlan.disabled = busy;
+    if (btnStart) btnStart.disabled = busy || !canStart;
+    if (btnConfirm) btnConfirm.disabled = busy || !canConfirm;
+    if (btnStop) btnStop.disabled = busy || !canStop;
+    if (live && !wavePoll) {
+      wavePoll = setInterval(function () { loadWave(); }, 2500);
+    } else if (!live && wavePoll) {
+      clearInterval(wavePoll);
+      wavePoll = null;
+    }
+  }
+
+  async function loadWave() {
+    try {
+      const r = await fetch(API + '/agent');
+      const d = await r.json();
+      if (!r.ok) return;
+      renderWave(d);
+    } catch (_) {}
+  }
+
+  async function postWave(path, body) {
+    const r = await fetch(API + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : '{}',
+    });
+    const d = await r.json().catch(function () { return {}; });
+    if (!r.ok) {
+      alert(d.detail || 'Wellen-Aktion fehlgeschlagen');
+      return null;
+    }
+    if (d.wave || d.enabled != null) {
+      renderWave({
+        enabled: d.enabled != null ? d.enabled : lastAgent.enabled,
+        auto_security: d.auto_security != null ? d.auto_security : lastAgent.auto_security,
+        max_parallel: d.max_parallel != null ? d.max_parallel : lastAgent.max_parallel,
+        wave: d.wave != null ? d.wave : lastAgent.wave,
+      });
+    } else {
+      await loadWave();
+    }
+    return d;
+  }
+
+  document.getElementById('btn-wave-plan')?.addEventListener('click', function () {
+    postWave('/agent/plan');
+  });
+  document.getElementById('btn-wave-start')?.addEventListener('click', function () {
+    postWave('/agent/start');
+  });
+  document.getElementById('btn-wave-confirm-all')?.addEventListener('click', function () {
+    postWave('/agent/confirm', { all_waiting: true });
+  });
+  document.getElementById('btn-wave-stop')?.addEventListener('click', function () {
+    postWave('/agent/stop');
+  });
+  document.getElementById('wave-items')?.addEventListener('click', function (ev) {
+    const btn = ev.target.closest('.btn-wave-confirm');
+    if (!btn) return;
+    postWave('/agent/confirm', { item_ids: [Number(btn.dataset.id)] });
+  });
+
   async function loadStatus() {
     const r = await fetch(API + '/status');
     const d = await r.json();
@@ -933,6 +1135,14 @@
       banner.textContent = notes.join(' ');
     } else {
       banner.classList.add('hidden');
+    }
+    if (d.agent) {
+      renderWave({
+        enabled: d.agent.enabled,
+        auto_security: d.agent.auto_security,
+        max_parallel: d.agent.max_parallel,
+        wave: d.wave || null,
+      });
     }
   }
 
@@ -1419,6 +1629,7 @@
 
   Promise.all([
     loadStatus().catch(function () {}),
+    loadWave().catch(function () {}),
     loadTargets().catch(function (e) {
       document.getElementById('target-list').innerHTML =
         '<p class="text-sm" style="color:var(--danger,#c44)">' + esc(String(e)) + '</p>';

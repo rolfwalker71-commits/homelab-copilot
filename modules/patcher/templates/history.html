@@ -76,6 +76,9 @@
                 (a.reboot_required ? ' · Reboot' : '') + '</p></div>' +
                 statusChip(a.status) +
               '</div>' +
+              (a.explanation && (a.status === 'failed' || a.status === 'running')
+                ? '<p class="mt-2 text-sm leading-snug break-words">' + esc(a.explanation) + '</p>'
+                : '') +
               (a.error_message ? '<p class="mt-1" style="color:var(--danger,#c44)">' + esc(a.error_message) + '</p>' : '') +
             '</article>'
           );

@@ -113,6 +113,55 @@ CREATE TABLE IF NOT EXISTS image_scans (
 );
 CREATE INDEX IF NOT EXISTS idx_patcher_image_scans_target
     ON image_scans(target_id, created_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS agent_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER,
+    auto_security INTEGER,
+    max_parallel INTEGER,
+    updated_at TEXT,
+    updated_at_iso TEXT
+);
+
+CREATE TABLE IF NOT EXISTS waves (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL,
+    stop_reason TEXT,
+    failed_item_id INTEGER,
+    created_at TEXT NOT NULL,
+    created_at_iso TEXT NOT NULL,
+    updated_at TEXT,
+    updated_at_iso TEXT,
+    started_at TEXT,
+    started_at_iso TEXT,
+    finished_at TEXT,
+    finished_at_iso TEXT
+);
+
+CREATE TABLE IF NOT EXISTS wave_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wave_id INTEGER NOT NULL,
+    target_id TEXT NOT NULL,
+    target_name TEXT NOT NULL DEFAULT '',
+    bucket TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    needs_confirm INTEGER NOT NULL DEFAULT 1,
+    confirmed INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    package_filter TEXT NOT NULL,
+    packages_json TEXT,
+    reason TEXT DEFAULT '',
+    confirm_reasons_json TEXT,
+    gate_json TEXT,
+    job_id TEXT,
+    error_message TEXT,
+    explanation TEXT,
+    created_at TEXT NOT NULL,
+    created_at_iso TEXT NOT NULL,
+    FOREIGN KEY (wave_id) REFERENCES waves(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_patcher_wave_items
+    ON wave_items(wave_id, sort_order);
 """
 
 
@@ -664,3 +713,237 @@ class PatcherStore:
         else:
             d["summary"] = {}
         return d
+
+    # --- wave agent ---
+
+    async def get_agent_settings(self) -> dict[str, Any] | None:
+        db = self._require()
+        async with db.execute("SELECT * FROM agent_settings WHERE id = 1") as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        for key in ("enabled", "auto_security"):
+            if d.get(key) is not None:
+                d[key] = bool(d[key])
+        if d.get("max_parallel") is not None:
+            d["max_parallel"] = int(d["max_parallel"])
+        return d
+
+    async def set_agent_settings(
+        self,
+        *,
+        enabled: bool,
+        auto_security: bool,
+        max_parallel: int,
+    ) -> None:
+        db = self._require()
+        stamp, stamp_iso = self._stamp()
+        await db.execute(
+            """
+            INSERT INTO agent_settings (
+                id, enabled, auto_security, max_parallel, updated_at, updated_at_iso
+            ) VALUES (1, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                enabled=excluded.enabled,
+                auto_security=excluded.auto_security,
+                max_parallel=excluded.max_parallel,
+                updated_at=excluded.updated_at,
+                updated_at_iso=excluded.updated_at_iso
+            """,
+            (
+                1 if enabled else 0,
+                1 if auto_security else 0,
+                max(1, int(max_parallel)),
+                stamp,
+                stamp_iso,
+            ),
+        )
+        await db.commit()
+
+    def _wave_dict(self, row: aiosqlite.Row) -> dict[str, Any]:
+        return dict(row)
+
+    def _wave_item_dict(self, row: aiosqlite.Row) -> dict[str, Any]:
+        d = dict(row)
+        d["needs_confirm"] = bool(d.get("needs_confirm"))
+        d["confirmed"] = bool(d.get("confirmed"))
+        for src, dest in (
+            ("packages_json", "packages"),
+            ("confirm_reasons_json", "confirm_reasons"),
+            ("gate_json", "gates"),
+        ):
+            raw = d.pop(src, None)
+            if isinstance(raw, str) and raw:
+                try:
+                    d[dest] = json.loads(raw)
+                except json.JSONDecodeError:
+                    d[dest] = []
+            else:
+                d[dest] = []
+        return d
+
+    async def create_wave(self, *, items: list[dict[str, Any]]) -> int:
+        db = self._require()
+        stamp, stamp_iso = self._stamp()
+        cur = await db.execute(
+            """
+            INSERT INTO waves (
+                status, created_at, created_at_iso, updated_at, updated_at_iso
+            ) VALUES ('planned', ?, ?, ?, ?)
+            """,
+            (stamp, stamp_iso, stamp, stamp_iso),
+        )
+        wave_id = int(cur.lastrowid)
+        for item in items:
+            await db.execute(
+                """
+                INSERT INTO wave_items (
+                    wave_id, target_id, target_name, bucket, sort_order,
+                    needs_confirm, confirmed, status, package_filter,
+                    packages_json, reason, confirm_reasons_json, gate_json,
+                    explanation, created_at, created_at_iso
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    wave_id,
+                    item.get("target_id") or "",
+                    item.get("target_name") or "",
+                    item.get("bucket") or "regular",
+                    int(item.get("sort_order") or 0),
+                    1 if item.get("needs_confirm") else 0,
+                    item.get("status") or "planned",
+                    item.get("package_filter") or "selected",
+                    json.dumps(item.get("packages") or [], ensure_ascii=False),
+                    item.get("reason") or "",
+                    json.dumps(item.get("confirm_reasons") or [], ensure_ascii=False),
+                    json.dumps(item.get("gates") or [], ensure_ascii=False),
+                    item.get("explanation") or "",
+                    stamp,
+                    stamp_iso,
+                ),
+            )
+        await db.commit()
+        return wave_id
+
+    async def get_wave(self, wave_id: int) -> dict[str, Any] | None:
+        db = self._require()
+        async with db.execute("SELECT * FROM waves WHERE id = ?", (wave_id,)) as cur:
+            row = await cur.fetchone()
+        return self._wave_dict(row) if row else None
+
+    async def get_latest_wave(self) -> dict[str, Any] | None:
+        db = self._require()
+        async with db.execute(
+            "SELECT * FROM waves ORDER BY id DESC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+        return self._wave_dict(row) if row else None
+
+    async def delete_wave(self, wave_id: int) -> None:
+        db = self._require()
+        await db.execute("DELETE FROM wave_items WHERE wave_id = ?", (wave_id,))
+        await db.execute("DELETE FROM waves WHERE id = ?", (wave_id,))
+        await db.commit()
+
+    async def update_wave(
+        self,
+        wave_id: int,
+        *,
+        status: str | None = None,
+        stop_reason: str | None = None,
+        failed_item_id: int | None = None,
+    ) -> None:
+        db = self._require()
+        stamp, stamp_iso = self._stamp()
+        fields = ["updated_at=?", "updated_at_iso=?"]
+        vals: list[Any] = [stamp, stamp_iso]
+        if status is not None:
+            fields.append("status=?")
+            vals.append(status)
+            if status == "running":
+                fields.append("started_at=COALESCE(started_at, ?)")
+                fields.append("started_at_iso=COALESCE(started_at_iso, ?)")
+                vals.extend([stamp, stamp_iso])
+            if status in ("stopped", "failed", "completed"):
+                fields.append("finished_at=?")
+                fields.append("finished_at_iso=?")
+                vals.extend([stamp, stamp_iso])
+        if stop_reason is not None:
+            fields.append("stop_reason=?")
+            vals.append(stop_reason)
+        if failed_item_id is not None:
+            fields.append("failed_item_id=?")
+            vals.append(int(failed_item_id))
+        vals.append(wave_id)
+        await db.execute(
+            f"UPDATE waves SET {', '.join(fields)} WHERE id=?",
+            vals,
+        )
+        await db.commit()
+
+    async def list_wave_items(self, wave_id: int) -> list[dict[str, Any]]:
+        db = self._require()
+        async with db.execute(
+            """
+            SELECT * FROM wave_items
+            WHERE wave_id = ?
+            ORDER BY sort_order ASC, id ASC
+            """,
+            (wave_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [self._wave_item_dict(r) for r in rows]
+
+    async def update_wave_item(
+        self,
+        item_id: int,
+        *,
+        status: str | None = None,
+        confirmed: bool | None = None,
+        gates: list[str] | None = None,
+        job_id: str | None = None,
+        error_message: str | None = None,
+        explanation: str | None = None,
+    ) -> None:
+        db = self._require()
+        fields: list[str] = []
+        vals: list[Any] = []
+        if status is not None:
+            fields.append("status=?")
+            vals.append(status)
+        if confirmed is not None:
+            fields.append("confirmed=?")
+            vals.append(1 if confirmed else 0)
+        if gates is not None:
+            fields.append("gate_json=?")
+            vals.append(json.dumps(gates, ensure_ascii=False))
+        if job_id is not None:
+            fields.append("job_id=?")
+            vals.append(job_id)
+        if error_message is not None:
+            fields.append("error_message=?")
+            vals.append(error_message)
+        if explanation is not None:
+            fields.append("explanation=?")
+            vals.append(explanation)
+        if not fields:
+            return
+        vals.append(item_id)
+        await db.execute(
+            f"UPDATE wave_items SET {', '.join(fields)} WHERE id=?",
+            vals,
+        )
+        await db.commit()
+
+    async def get_wave_item_by_job(self, job_id: str) -> dict[str, Any] | None:
+        db = self._require()
+        jid = (job_id or "").strip()
+        if not jid:
+            return None
+        async with db.execute(
+            "SELECT * FROM wave_items WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+            (jid,),
+        ) as cur:
+            row = await cur.fetchone()
+        return self._wave_item_dict(row) if row else None

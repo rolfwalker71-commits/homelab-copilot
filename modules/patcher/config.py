@@ -39,6 +39,11 @@ class PatcherSettings(BaseSettings):
     # Auto-snapshots before apply / release-upgrade. Conservative keep-N.
     patcher_snap_keep: int = Field(default=3, ge=1, le=50)
 
+    # Wellen-Agent (policy on top of apply jobs). Defaults are safe: off.
+    patcher_agent_enabled: bool = False
+    patcher_agent_auto_security: bool = False
+    patcher_agent_max_parallel: int = Field(default=1, ge=1, le=8)
+
     # OpenAI-compatible chat API (Ollama: http://127.0.0.1:11434/v1)
     patcher_llm_api_key: str = ""
     patcher_llm_base_url: str = "https://api.openai.com/v1"

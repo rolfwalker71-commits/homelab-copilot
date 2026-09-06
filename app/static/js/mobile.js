@@ -314,6 +314,85 @@
     }
   }
 
+  function waitingWaveItems(agent) {
+    const items = (agent && agent.wave && agent.wave.items) || [];
+    return items.filter((it) => {
+      const st = it.status || "";
+      return (
+        st === "waiting_confirm" ||
+        st === "blocked" ||
+        (it.needs_confirm && !it.confirmed && st !== "success" && st !== "failed" && st !== "skipped")
+      );
+    });
+  }
+
+  function renderWaveLage(agent) {
+    const root = document.getElementById("m-wave");
+    if (!root) return;
+    if (!agent || !agent.enabled || !agent.wave) {
+      root.hidden = true;
+      root.innerHTML = "";
+      return;
+    }
+    const wave = agent.wave;
+    const waiting = waitingWaveItems(agent);
+    root.hidden = false;
+    root.innerHTML =
+      '<article class="m-card">' +
+      '<h2 class="m-card-title">' +
+      esc(wave.banner || "Welle") +
+      "</h2>" +
+      '<p class="m-card-meta">' +
+      esc(wave.status === "waiting" ? "Wartet auf Bestätigung" : wave.status || "") +
+      "</p>" +
+      (waiting.length
+        ? '<button type="button" class="btn btn-primary" data-m-wave-confirm-all="1">Diese bestätigen</button>'
+        : "") +
+      "</article>" +
+      waiting
+        .map(
+          (it) =>
+            '<article class="m-card">' +
+            '<p class="m-card-title">' +
+            esc(it.target_name || it.target_id) +
+            " · " +
+            esc(it.bucket === "security" ? "Security" : it.bucket === "images" ? "Images" : "Bestätigung") +
+            "</p>" +
+            '<p class="m-card-meta">' +
+            esc(it.explanation || "Wartet auf Bestätigung.") +
+            "</p>" +
+            '<button type="button" class="btn btn-primary" data-m-wave-confirm="' +
+            esc(it.id) +
+            '">Bestätigen</button></article>'
+        )
+        .join("");
+    root.querySelector("[data-m-wave-confirm-all]")?.addEventListener("click", () => {
+      confirmWaveItems({ all_waiting: true });
+    });
+    root.querySelectorAll("[data-m-wave-confirm]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        confirmWaveItems({ item_ids: [Number(btn.getAttribute("data-m-wave-confirm"))] });
+      });
+    });
+  }
+
+  async function confirmWaveItems(body) {
+    confirmSheet({
+      title: "Welle bestätigen?",
+      body: "Nicht-Security und blockierte Positionen werden über die bestehende Apply-Pipeline eingespielt (Snapshot zuerst).",
+      confirmLabel: "Bestätigen",
+      async onConfirm() {
+        await fetchJSON("/api/modules/patcher/agent/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        toast("Bestätigt.");
+        await loadSection();
+      },
+    });
+  }
+
   function hostSubtitle(ent) {
     const kind = kindLabel(kindOf(ent));
     const os = ((ent.meta || {}).ostype || (ent.meta || {}).os || ent.version || "").toString();
@@ -321,7 +400,7 @@
     return [kind, os, ip].filter(Boolean).join(" · ");
   }
 
-  function renderHosts(topo, patcher, checks) {
+  function renderHosts(topo, patcher, checks, agent) {
     const root = document.getElementById("m-hosts-list");
     const stamp = document.getElementById("m-hosts-stamp");
     const entities = listEntities(topo);
@@ -367,7 +446,7 @@
       btn.addEventListener("click", () => {
         const id = btn.getAttribute("data-host-id");
         const ent = entities.find((e) => e.id === id);
-        if (ent) openHostSheet(ent, targets.get(id), checks);
+        if (ent) openHostSheet(ent, targets.get(id), checks, agent);
       });
     });
   }
@@ -386,7 +465,7 @@
     return "Keine Prüfung gespeichert";
   }
 
-  function openHostSheet(ent, target, checks) {
+  function openHostSheet(ent, target, checks, agent) {
     const kind = kindOf(ent);
     const canPower = kind === "lxc" || kind === "qemu";
     const running = statusOf(ent) === "running";
@@ -400,6 +479,14 @@
         (running ? "" : " disabled") +
         ">Stoppen</button></div>"
       : '<p class="m-card-meta">Power nur für LXC/VM über Proxmox.</p>';
+    const waveWaiting = waitingWaveItems(agent).filter((it) => it.target_id === ent.id);
+    const waveBlock = waveWaiting.length
+      ? '<p class="m-sheet-text">' +
+        esc(waveWaiting[0].explanation || "Welle wartet auf Bestätigung.") +
+        '</p><button type="button" class="btn btn-primary" data-m-wave-one="' +
+        waveWaiting[0].id +
+        '">Bestätigen</button>'
+      : "";
     const patchBlock = pending
       ? '<p class="m-sheet-text">' +
         pending +
@@ -421,6 +508,7 @@
         esc(lastCheckText(ent, target, checks)) +
         "</p>" +
         powerBtns +
+        waveBlock +
         patchBlock +
         '<a class="m-text-link" href="/?guest=' +
         encodeURIComponent(ent.id) +
@@ -435,6 +523,10 @@
     });
     sheetBody.querySelector("[data-m-patch]")?.addEventListener("click", () => {
       requestPatch(ent, target);
+    });
+    sheetBody.querySelector("[data-m-wave-one]")?.addEventListener("click", () => {
+      const id = Number(sheetBody.querySelector("[data-m-wave-one]").getAttribute("data-m-wave-one"));
+      confirmWaveItems({ item_ids: [id] });
     });
   }
 
@@ -653,13 +745,14 @@
   }
 
   async function loadBundle() {
-    const [topo, health, stacks, history, backupJobs, patcher] = await Promise.all([
+    const [topo, health, stacks, history, backupJobs, patcher, agent] = await Promise.all([
       fetchSoft("/api/topology"),
       fetchSoft("/api/modules/health/checks"),
       fetchSoft("/api/modules/backup_verifier/stacks"),
       fetchSoft("/api/modules/backup_verifier/history?limit=80"),
       fetchSoft("/api/modules/backup_verifier/jobs?active=true"),
       fetchSoft("/api/modules/patcher/targets"),
+      fetchSoft("/api/modules/patcher/agent"),
     ]);
     return {
       topo: topo || {},
@@ -668,6 +761,7 @@
       runs: (history && history.runs) || [],
       jobs: (backupJobs && backupJobs.jobs) || [],
       patcher: patcher || { targets: [] },
+      agent: agent || { enabled: false, wave: null },
     };
   }
 
@@ -675,8 +769,11 @@
     try {
       const b = await loadBundle();
       const model = lageModel(b.topo, b.checks, b.stacks, b.runs, b.jobs, b.patcher);
-      if (section === "lage") renderLage(model);
-      else if (section === "hosts") renderHosts(b.topo, b.patcher, b.checks);
+      if (section === "lage") {
+        renderLage(model);
+        renderWaveLage(b.agent);
+      }
+      else if (section === "hosts") renderHosts(b.topo, b.patcher, b.checks, b.agent);
       else if (section === "hinweise") renderHinweise(hinweiseItems(model, b.checks, b.runs));
       else if (section === "sichern") renderSichern(b.stacks, b.runs, b.jobs);
     } catch (e) {

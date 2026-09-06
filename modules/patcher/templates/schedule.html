@@ -15,6 +15,32 @@
 <p id="sched-msg" class="mb-3 text-sm text-[var(--muted)]" role="status"></p>
 
 <article class="surface p-4 sm:p-5 mb-6 animate-in">
+  <h2 class="font-display text-lg font-bold leading-snug">Wellen-Agent</h2>
+  <p class="mt-1 text-sm text-[var(--muted)] leading-snug">
+    Policy auf den bestehenden Apply-Jobs. Standard: aus, Security nicht automatisch, ein Host nach dem anderen.
+    Nie DistUpgrade. Env-Defaults: <code>PATCHER_AGENT_*</code>.
+  </p>
+  <form id="agent-form" class="mt-4 grid gap-3">
+    <label class="flex items-center gap-2 text-sm min-h-12">
+      <input type="checkbox" id="agent-enabled" class="h-4 w-4" />
+      Agent an
+    </label>
+    <label class="flex items-center gap-2 text-sm min-h-12">
+      <input type="checkbox" id="agent-auto-security" class="h-4 w-4" />
+      Security automatisch (nur wenn Host online, Disk nicht kritisch, kein Backup/Restore)
+    </label>
+    <div>
+      <label class="label" for="agent-max-parallel">Max. Hosts parallel</label>
+      <input id="agent-max-parallel" class="field" type="number" min="1" max="8" value="1" />
+    </div>
+    <div>
+      <button type="submit" class="btn btn-primary min-h-12">Agent speichern</button>
+    </div>
+  </form>
+  <p id="agent-msg" class="mt-2 text-sm text-[var(--muted)]" role="status"></p>
+</article>
+
+<article class="surface p-4 sm:p-5 mb-6 animate-in">
   <h2 class="font-display text-lg font-bold">Zeitplan anlegen</h2>
   <form id="sched-form" class="mt-4 grid gap-3 sm:grid-cols-2">
     <div class="sm:col-span-2">
@@ -158,7 +184,40 @@
     loadSchedules();
   });
 
-  Promise.all([loadTargets(), loadSchedules()]).catch(function (e) { msg(String(e), false); });
+  async function loadAgent() {
+    const r = await fetch(API + '/agent');
+    const d = await r.json();
+    if (!r.ok) return;
+    document.getElementById('agent-enabled').checked = !!d.enabled;
+    document.getElementById('agent-auto-security').checked = !!d.auto_security;
+    document.getElementById('agent-max-parallel').value = String(d.max_parallel || 1);
+  }
+
+  document.getElementById('agent-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    const note = document.getElementById('agent-msg');
+    const r = await fetch(API + '/agent/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: document.getElementById('agent-enabled').checked,
+        auto_security: document.getElementById('agent-auto-security').checked,
+        max_parallel: Number(document.getElementById('agent-max-parallel').value) || 1,
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      note.textContent = d.detail || 'Speichern fehlgeschlagen';
+      note.style.color = 'var(--danger, #c44)';
+      return;
+    }
+    note.textContent = d.enabled
+      ? 'Agent an. Security-Auto ' + (d.auto_security ? 'an' : 'aus') + ', parallel ' + d.max_parallel + '.'
+      : 'Agent aus — Wellen werden nicht automatisch geplant.';
+    note.style.color = '';
+  });
+
+  Promise.all([loadTargets(), loadSchedules(), loadAgent()]).catch(function (e) { msg(String(e), false); });
 })();
 </script>
 {% endblock %}

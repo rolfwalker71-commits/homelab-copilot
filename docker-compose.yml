@@ -61,6 +61,9 @@ services:
       PATCHER_DAILY_HOUR: ${PATCHER_DAILY_HOUR:-4}
       PATCHER_SNAP_KEEP: ${PATCHER_SNAP_KEEP:-3}
       PATCHER_CRON: ${PATCHER_CRON:-}
+      PATCHER_AGENT_ENABLED: ${PATCHER_AGENT_ENABLED:-false}
+      PATCHER_AGENT_AUTO_SECURITY: ${PATCHER_AGENT_AUTO_SECURITY:-false}
+      PATCHER_AGENT_MAX_PARALLEL: ${PATCHER_AGENT_MAX_PARALLEL:-1}
       # LLM summary (OpenAI-compatible). Host .env alone is not enough — must be listed here.
       PATCHER_LLM_API_KEY: ${PATCHER_LLM_API_KEY:-}
       PATCHER_LLM_BASE_URL: ${PATCHER_LLM_BASE_URL:-https://api.openai.com/v1}

@@ -28,11 +28,13 @@ from app.core.docker_control import (
 from app.core.locale import format_de, now_berlin
 from app.core.topology import TopologyStore
 
+from patcher.agent import WaveEngine, hosts_from_store
 from patcher.apply import ApplyError, apply_updates, reboot_host
 from patcher.pre_snap import maybe_pre_snapshot
 from patcher.release_upgrade import perform_release_upgrade
 from patcher.config import get_patcher_settings
 from patcher import cron as cron_mod
+from patcher.explain import explain_apply_run, explain_patch_job
 from patcher.jobs import JOBS
 from patcher.llm import LlmError, summarize_scan
 from patcher.scan import ScanError, scan_target
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 _store: PatcherStore | None = None
 _daily_task: Any = None
+_engine: WaveEngine | None = None
 
 
 def _make_templates() -> Jinja2Templates:
@@ -70,6 +73,67 @@ def _get_store() -> PatcherStore:
     if _store is None:
         raise HTTPException(status_code=503, detail="Patcher-Store nicht bereit.")
     return _store
+
+
+def _get_engine() -> WaveEngine:
+    if _engine is None:
+        raise HTTPException(status_code=503, detail="Wellen-Agent nicht bereit.")
+    return _engine
+
+
+def _agent_http(exc: Exception) -> HTTPException:
+    msg = getattr(exc, "message", None) or str(exc)
+    return HTTPException(status_code=400, detail=msg)
+
+
+async def _inventory_tags(target_id: str) -> list[str]:
+    try:
+        from app.main import app as fastapi_app
+
+        inv = getattr(fastapi_app.state, "inventory_store", None)
+        if inv is None:
+            return []
+        row = await inv.get(target_id)
+        return [str(t) for t in (row.get("extra_tags") or []) if t]
+    except Exception:
+        return []
+
+
+async def _job_payload(job) -> dict[str, Any]:
+    data = job.to_dict()
+    wave_item = None
+    store = _store
+    if store is not None:
+        try:
+            wave_item = await store.get_wave_item_by_job(job.id)
+        except Exception:
+            wave_item = None
+    if wave_item:
+        data["wave_item"] = wave_item
+        data["explanation"] = wave_item.get("explanation") or explain_patch_job(data)
+    else:
+        data["explanation"] = explain_patch_job(data)
+    return data
+
+
+async def _maybe_plan_after_scan(snapshot) -> None:
+    engine = _engine
+    if engine is None:
+        return
+    try:
+        policy = await engine.policy()
+        if not policy.enabled:
+            return
+        hosts = await hosts_from_store(
+            engine.store, snapshot, tags_for=_inventory_tags
+        )
+        if not hosts:
+            return
+        await engine.plan(hosts)
+    except RuntimeError as exc:
+        logger.info("Welle nach Scan nicht geplant: %s", exc)
+    except Exception:
+        logger.exception("Welle nach Scan nicht geplant")
 
 
 def _snapshot(request: Request):
@@ -173,6 +237,17 @@ class ReleaseUpgradePayload(BaseModel):
     snapshot_first: bool = True
     proceed_without_snapshot: bool = False
     wait: bool = False
+
+
+class AgentSettingsPayload(BaseModel):
+    enabled: bool | None = None
+    auto_security: bool | None = None
+    max_parallel: int | None = Field(default=None, ge=1, le=8)
+
+
+class AgentConfirmPayload(BaseModel):
+    item_ids: list[int] = Field(default_factory=list)
+    all_waiting: bool = False
 
 
 # --- helpers ---
@@ -701,6 +776,7 @@ async def _run_scan_all(
         except Exception:
             logger.exception("patcher last_daily speichern fehlgeschlagen")
         await _notify_scan_findings(summary)
+        await _maybe_plan_after_scan(snapshot)
 
     return await run_scan_all_hosts(
         targets=targets,
@@ -1134,6 +1210,19 @@ async def module_status(request: Request) -> dict[str, Any]:
     targets = await list_targets(store, snap)
     excluded = await store.list_unmonitored_ids()
     unmon = sum(1 for t in targets if t.id in excluded)
+    policy = None
+    wave = None
+    if _engine is not None:
+        try:
+            p = await _engine.policy()
+            policy = {
+                "enabled": p.enabled,
+                "auto_security": p.auto_security,
+                "max_parallel": p.max_parallel,
+            }
+            wave = await _engine.current_wave()
+        except Exception:
+            logger.exception("agent status")
     return {
         "module": "patcher",
         "version": "0.1.0",
@@ -1145,6 +1234,13 @@ async def module_status(request: Request) -> dict[str, Any]:
         "monitored_count": len(targets) - unmon,
         "unmonitored_count": unmon,
         "crontab": cron_mod.crontab_available(),
+        "agent": policy
+        or {
+            "enabled": ps.patcher_agent_enabled,
+            "auto_security": ps.patcher_agent_auto_security,
+            "max_parallel": ps.patcher_agent_max_parallel,
+        },
+        "wave": wave,
     }
 
 
@@ -1190,6 +1286,11 @@ async def api_history(
     store = _get_store()
     scans = await store.list_scans(limit=limit)
     applies = await store.list_apply_runs(limit=limit)
+    for run in applies:
+        if run.get("status") in ("failed", "running") and not run.get("explanation"):
+            run["explanation"] = explain_apply_run(run)
+        elif run.get("status") == "failed":
+            run["explanation"] = run.get("explanation") or explain_apply_run(run)
     return {"scans": scans, "apply_runs": applies}
 
 
@@ -1532,7 +1633,7 @@ async def api_summarize(payload: SummarizePayload) -> dict[str, Any]:
 @router.get("/jobs")
 async def api_jobs(active: bool = True) -> dict[str, Any]:
     jobs = JOBS.list_active() if active else []
-    return {"ok": True, "jobs": [j.to_dict() for j in jobs]}
+    return {"ok": True, "jobs": [await _job_payload(j) for j in jobs]}
 
 
 @router.get("/jobs/{job_id}")
@@ -1540,7 +1641,93 @@ async def api_job(job_id: str) -> dict[str, Any]:
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job nicht gefunden.")
-    return job.to_dict()
+    return await _job_payload(job)
+
+
+@router.get("/agent")
+async def api_agent_status() -> dict[str, Any]:
+    engine = _get_engine()
+    policy = await engine.policy()
+    wave = await engine.current_wave()
+    return {
+        "ok": True,
+        "enabled": policy.enabled,
+        "auto_security": policy.auto_security,
+        "max_parallel": policy.max_parallel,
+        "wave": wave,
+    }
+
+
+@router.post("/agent/settings")
+async def api_agent_settings(payload: AgentSettingsPayload) -> dict[str, Any]:
+    engine = _get_engine()
+    try:
+        policy = await engine.save_policy(
+            enabled=payload.enabled,
+            auto_security=payload.auto_security,
+            max_parallel=payload.max_parallel,
+        )
+    except Exception as exc:
+        raise _agent_http(exc) from exc
+    return {
+        "ok": True,
+        "enabled": policy.enabled,
+        "auto_security": policy.auto_security,
+        "max_parallel": policy.max_parallel,
+    }
+
+
+@router.post("/agent/plan")
+async def api_agent_plan(request: Request) -> dict[str, Any]:
+    engine = _get_engine()
+    policy = await engine.policy()
+    if not policy.enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Wellen-Agent ist aus. Unter Zeitplan oder per PATCHER_AGENT_ENABLED einschalten.",
+        )
+    snap = _snapshot(request)
+    try:
+        hosts = await hosts_from_store(
+            engine.store, snap, tags_for=_inventory_tags
+        )
+        wave = await engine.plan(hosts)
+    except RuntimeError as exc:
+        raise _agent_http(exc) from exc
+    return {"ok": True, "wave": wave}
+
+
+@router.post("/agent/start")
+async def api_agent_start() -> dict[str, Any]:
+    engine = _get_engine()
+    try:
+        wave = await engine.start()
+    except RuntimeError as exc:
+        raise _agent_http(exc) from exc
+    return {"ok": True, "wave": wave}
+
+
+@router.post("/agent/stop")
+async def api_agent_stop() -> dict[str, Any]:
+    engine = _get_engine()
+    try:
+        wave = await engine.stop()
+    except RuntimeError as exc:
+        raise _agent_http(exc) from exc
+    return {"ok": True, "wave": wave}
+
+
+@router.post("/agent/confirm")
+async def api_agent_confirm(payload: AgentConfirmPayload) -> dict[str, Any]:
+    engine = _get_engine()
+    try:
+        wave = await engine.confirm(
+            item_ids=payload.item_ids,
+            all_waiting=payload.all_waiting,
+        )
+    except RuntimeError as exc:
+        raise _agent_http(exc) from exc
+    return {"ok": True, "wave": wave}
 
 
 # --- hosts CRUD ---
@@ -1658,11 +1845,28 @@ class PatcherModule:
         return router
 
     async def on_startup(self, app: FastAPI) -> None:
-        global _store, _daily_task
+        global _store, _daily_task, _engine
         ps = get_patcher_settings()
         _store = PatcherStore(ps.db_path)
         await _store.connect()
         app.state.patcher_store = _store
+
+        def _snap() -> Any:
+            store: TopologyStore | None = getattr(app.state, "topology_store", None)
+            return store.snapshot if store is not None else None
+
+        _engine = WaveEngine(
+            _store,
+            apply_job=_run_apply_job,
+            image_apply_job=_run_image_apply_job,
+            get_snapshot=_snap,
+            get_inventory_tags=_inventory_tags,
+        )
+        app.state.patcher_wave_engine = _engine
+        try:
+            await _engine.resume_if_needed()
+        except Exception:
+            logger.exception("Welle nach Start nicht fortgesetzt")
 
         engine = getattr(app.state, "discovery_engine", None)
         if engine is not None and hasattr(engine, "set_manual_hosts_provider"):
@@ -1741,15 +1945,26 @@ class PatcherModule:
             app.state.patcher_daily_task = _daily_task
 
         logger.info(
-            "patcher ready — DB %s · daily=%s hour=%s cron=%r (OS + Images)",
+            "patcher ready — DB %s · daily=%s hour=%s cron=%r agent=%s (OS + Images)",
             ps.db_path,
             ps.patcher_daily_enabled,
             ps.patcher_daily_hour,
             ps.patcher_cron or "",
+            ps.patcher_agent_enabled,
         )
 
     async def on_shutdown(self, app: FastAPI) -> None:
-        global _store, _daily_task
+        global _store, _daily_task, _engine
+        wave_task = getattr(_engine, "_task", None) if _engine else None
+        if wave_task is not None and not wave_task.done():
+            wave_task.cancel()
+            try:
+                await wave_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        _engine = None
         task = getattr(app.state, "patcher_daily_task", None) or _daily_task
         if task is not None:
             task.cancel()
