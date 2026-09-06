@@ -376,6 +376,70 @@
     });
   }
 
+  function renderOpsLage(ops) {
+    const root = document.getElementById("m-ops");
+    if (!root) return;
+    if (!ops) {
+      root.hidden = true;
+      root.innerHTML = "";
+      return;
+    }
+    const next = (ops.next || []).slice(0, 5);
+    const waiting = ops.waiting || [];
+    if (!next.length && !waiting.length) {
+      root.hidden = true;
+      root.innerHTML = "";
+      return;
+    }
+    root.hidden = false;
+    const nextHtml = next
+      .map(
+        (w) =>
+          '<article class="m-card">' +
+          '<p class="m-card-title">' +
+          esc((w.target_name || w.target_id || "") + (w.stack ? " · " + w.stack : "")) +
+          "</p>" +
+          '<p class="m-card-meta">' +
+          esc((w.kind_label || w.kind || "") + " · " + (w.start_de || w.start_hm || "") + " · " + (w.duration_label || "")) +
+          "</p></article>"
+      )
+      .join("");
+    const waitHtml = waiting
+      .map(
+        (w) =>
+          '<article class="m-card">' +
+          '<p class="m-card-title">' +
+          esc((w.target_name || "") + (w.stack ? " · " + w.stack : "")) +
+          "</p>" +
+          '<p class="m-card-meta">' +
+          esc(w.reason || "Wartet auf Bestätigung.") +
+          "</p>" +
+          '<button type="button" class="btn btn-primary" data-m-ops-confirm="' +
+          esc(w.id) +
+          '">Bestätigen</button></article>'
+      )
+      .join("");
+    root.innerHTML =
+      '<article class="m-card"><h2 class="m-card-title">Nächste Fenster</h2>' +
+      '<p class="m-card-meta"><a href="/ops">Agent-Board</a></p></article>' +
+      nextHtml +
+      waitHtml;
+    root.querySelectorAll("[data-m-ops-confirm]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await fetchJSON("/api/modules/ops_agent/confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ window_id: Number(btn.getAttribute("data-m-ops-confirm")) }),
+          });
+          loadSection();
+        } catch (e) {
+          toast(String(e.message || e), true);
+        }
+      });
+    });
+  }
+
   async function confirmWaveItems(body) {
     confirmSheet({
       title: "Welle bestätigen?",
@@ -745,7 +809,7 @@
   }
 
   async function loadBundle() {
-    const [topo, health, stacks, history, backupJobs, patcher, agent] = await Promise.all([
+    const [topo, health, stacks, history, backupJobs, patcher, agent, ops] = await Promise.all([
       fetchSoft("/api/topology"),
       fetchSoft("/api/modules/health/checks"),
       fetchSoft("/api/modules/backup_verifier/stacks"),
@@ -753,6 +817,7 @@
       fetchSoft("/api/modules/backup_verifier/jobs?active=true"),
       fetchSoft("/api/modules/patcher/targets"),
       fetchSoft("/api/modules/patcher/agent"),
+      fetchSoft("/api/modules/ops_agent/board"),
     ]);
     return {
       topo: topo || {},
@@ -762,6 +827,7 @@
       jobs: (backupJobs && backupJobs.jobs) || [],
       patcher: patcher || { targets: [] },
       agent: agent || { enabled: false, wave: null },
+      ops: ops || null,
     };
   }
 
@@ -772,6 +838,7 @@
       if (section === "lage") {
         renderLage(model);
         renderWaveLage(b.agent);
+        renderOpsLage(b.ops);
       }
       else if (section === "hosts") renderHosts(b.topo, b.patcher, b.checks, b.agent);
       else if (section === "hinweise") renderHinweise(hinweiseItems(model, b.checks, b.runs));

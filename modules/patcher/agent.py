@@ -1023,6 +1023,28 @@ class WaveEngine:
         except Exception:
             logger.info("Wellen-Erklärung nicht angereichert", exc_info=True)
 
+    async def execute_ops_item(
+        self,
+        *,
+        target_id: str,
+        target_name: str,
+        bucket: str,
+        packages: list[str] | None = None,
+    ) -> tuple[bool, str, str | None]:
+        """Apply one host inside an ops-agent window. Never DistUpgrade."""
+        filt = "images" if bucket == BUCKET_IMAGES else (
+            "security" if bucket == BUCKET_SECURITY else "selected"
+        )
+        item = {
+            "id": 0,
+            "target_id": target_id,
+            "target_name": target_name,
+            "bucket": bucket,
+            "package_filter": filt,
+            "packages": list(packages or []),
+        }
+        return await self._execute_item(item)
+
     async def _execute_item(
         self, item: dict[str, Any]
     ) -> tuple[bool, str, str | None]:
@@ -1040,7 +1062,9 @@ class WaveEngine:
         )
         JOBS.append_log(job.id, explain_wave_item({**item, "status": STATUS_RUNNING}))
         try:
-            await self.store.update_wave_item(int(item["id"]), job_id=job.id)
+            iid = int(item.get("id") or 0)
+            if iid > 0:
+                await self.store.update_wave_item(iid, job_id=job.id)
         except Exception:
             logger.exception("job_id an Wellen-Position speichern fehlgeschlagen")
 

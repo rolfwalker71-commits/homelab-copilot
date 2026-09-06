@@ -36,8 +36,9 @@
       <p id="wave-sub" class="mt-1 text-sm text-[var(--muted)] leading-snug"></p>
     </div>
     <div class="flex flex-wrap gap-2 shrink-0">
+      <a href="/ops" class="btn btn-primary min-h-12">im Agent-Board</a>
       <button type="button" id="btn-wave-plan" class="btn btn-ghost min-h-12">Welle planen</button>
-      <button type="button" id="btn-wave-start" class="btn btn-primary min-h-12" disabled>Welle starten</button>
+      <button type="button" id="btn-wave-start" class="btn btn-ghost min-h-12" disabled>Welle jetzt</button>
       <button type="button" id="btn-wave-confirm-all" class="btn btn-ghost min-h-12" disabled>Diese bestätigen</button>
       <button type="button" id="btn-wave-stop" class="btn btn-ghost min-h-12" disabled>Welle stoppen</button>
     </div>
@@ -1003,7 +1004,7 @@
     if (!enabled) {
       if (title) title.textContent = 'Wellen-Agent ist aus';
       if (sub) {
-        sub.textContent = 'Standard: aus. Einschalten unter Zeitplan oder mit PATCHER_AGENT_ENABLED. Security-Auto bleibt standardmäßig aus.';
+        sub.textContent = 'Fenster und Start liegen im Agent-Board. Security-Auto bleibt standardmäßig aus. Nie DistUpgrade.';
       }
       if (list) list.innerHTML = '';
       if (btnPlan) btnPlan.disabled = true;

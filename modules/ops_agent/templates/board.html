@@ -1,0 +1,324 @@
+{% extends "base.html" %}
+{% from "_icons.html" import ico %}
+{% block title %}Agent — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="mb-5 animate-in">
+  <p class="eyebrow">Planung · v{{ module_version }}</p>
+  <h1 class="font-display text-3xl font-extrabold tracking-tight leading-snug break-words">Agent</h1>
+  <p class="mt-2 max-w-3xl text-[var(--muted)] leading-snug">
+    Plant Patch- und Backup-Fenster selbst (10-Minuten-Raster, Europe/Berlin).
+    Bestehende Zeitpläne bleiben und erscheinen hier. DistUpgrade, Wipe und Restore-auf-Prod macht er nie.
+  </p>
+  <p id="ops-quiet" class="mt-1 max-w-3xl text-sm text-[var(--muted)] leading-snug"></p>
+</section>
+
+<article id="ops-interview" class="surface-tinted p-4 sm:p-5 mb-5 animate-in" hidden>
+  <h2 class="font-display text-lg font-bold leading-snug break-words">Was soll der Agent mit dir klären?</h2>
+  <p class="mt-1 text-sm text-[var(--muted)] leading-snug">
+    Einmal festlegen — danach plant und startet er selbst. Vorausgewählt ist der sichere Standard.
+    DistUpgrade, Wipe, Power-Cycle und Restore-auf-Prod bleiben harte Stops.
+  </p>
+  <form id="ops-policy-form" class="mt-4 grid gap-4">
+    <fieldset>
+      <legend class="text-sm font-semibold">Was willst du bestätigt haben?</legend>
+      <label class="flex items-start gap-2 text-sm min-h-12 mt-2">
+        <input type="checkbox" id="pol-kernel" class="mt-1 h-4 w-4" checked />
+        <span>Kernel- / Docker-Engine-Patches</span>
+      </label>
+      <label class="flex items-start gap-2 text-sm min-h-12">
+        <input type="checkbox" id="pol-firstbak" class="mt-1 h-4 w-4" checked />
+        <span>Erstes Backup-Fenster auf einem neuen Gast</span>
+      </label>
+      <label class="flex items-start gap-2 text-sm min-h-12">
+        <input type="checkbox" id="pol-prod" class="mt-1 h-4 w-4" />
+        <span>Alles auf Produktions-Hosts (Tags prod / production)</span>
+      </label>
+      <label class="flex items-start gap-2 text-sm min-h-12">
+        <input type="checkbox" id="pol-nothing" class="mt-1 h-4 w-4" />
+        <span>Nichts — voll autonom (außer harte Stops)</span>
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend class="text-sm font-semibold">Worauf konzentrieren?</legend>
+      <div class="mt-2 flex h-10 min-h-10 max-w-xl rounded-full bg-muted p-0.5" role="radiogroup" aria-label="Fokus">
+        <label class="flex-1">
+          <input type="radio" name="focus-mode" value="all" class="sr-only" checked />
+          <span class="ops-seg flex h-full min-h-0 items-center justify-center rounded-full text-sm">Alle</span>
+        </label>
+        <label class="flex-1">
+          <input type="radio" name="focus-mode" value="only" class="sr-only" />
+          <span class="ops-seg flex h-full min-h-0 items-center justify-center rounded-full text-sm">Nur diese</span>
+        </label>
+        <label class="flex-1">
+          <input type="radio" name="focus-mode" value="exclude" class="sr-only" />
+          <span class="ops-seg flex h-full min-h-0 items-center justify-center rounded-full text-sm">Diese auslassen</span>
+        </label>
+      </div>
+      <label class="label mt-3" for="pol-focus-ids">Hosts / Gäste (IDs, Komma)</label>
+      <input id="pol-focus-ids" class="field" type="text" placeholder="lxc:pve:105, qemu:pve:200" />
+      <label class="label mt-3" for="pol-focus-tags">Tags (Komma)</label>
+      <input id="pol-focus-tags" class="field" type="text" placeholder="mail, wiki" />
+    </fieldset>
+    <div class="flex flex-wrap gap-2">
+      <button type="submit" class="btn btn-primary min-h-12">Speichern und selbst arbeiten lassen</button>
+    </div>
+    <p id="ops-policy-msg" class="text-sm text-[var(--muted)]" role="status"></p>
+  </form>
+</article>
+
+<div class="mb-4 flex flex-wrap items-center gap-2">
+  <button type="button" id="btn-ops-plan" class="btn btn-primary min-h-12 hidden lg:inline-flex">Plan vorschlagen</button>
+  <button type="button" id="btn-ops-policy" class="btn btn-ghost min-h-12">Regeln ändern</button>
+  <label class="flex items-center gap-2 text-sm min-h-12 px-2">
+    <input type="checkbox" id="ops-enabled" class="h-4 w-4" />
+    Agent plant und startet
+  </label>
+  <p id="ops-msg" class="text-sm text-[var(--muted)] leading-snug" role="status"></p>
+</div>
+
+<div id="ops-board" class="ops-board animate-in" aria-live="polite">
+  <section class="ops-col surface p-3 sm:p-4" data-col="next">
+    <h2 class="font-display text-base font-bold leading-snug">Als Nächstes</h2>
+    <div class="ops-col-body mt-3 space-y-2"></div>
+  </section>
+  <section class="ops-col surface p-3 sm:p-4" data-col="running">
+    <h2 class="font-display text-base font-bold leading-snug">Läuft</h2>
+    <div class="ops-col-body mt-3 space-y-2"></div>
+  </section>
+  <section class="ops-col surface p-3 sm:p-4" data-col="waiting">
+    <h2 class="font-display text-base font-bold leading-snug">Wartet auf dich</h2>
+    <div class="ops-col-body mt-3 space-y-2"></div>
+  </section>
+  <section class="ops-col surface p-3 sm:p-4" data-col="shifted">
+    <h2 class="font-display text-base font-bold leading-snug">Verschoben</h2>
+    <div class="ops-col-body mt-3 space-y-2"></div>
+  </section>
+  <section class="ops-col surface p-3 sm:p-4" data-col="done">
+    <h2 class="font-display text-base font-bold leading-snug">Fertig / Fail</h2>
+    <div class="ops-col-body mt-3 space-y-2"></div>
+  </section>
+</div>
+{% endblock %}
+
+{% block fab %}
+<button type="button" id="fab-ops-plan" class="fab" aria-label="Plan vorschlagen">{{ ico('schedule', 26) }}</button>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  async function api(path, opts) {
+    const res = await fetch('/api/modules/ops_agent' + path, Object.assign({
+      headers: { 'Content-Type': 'application/json' },
+    }, opts || {}));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.message || res.statusText);
+    return data;
+  }
+  function splitCsv(v) {
+    return String(v || '').split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
+  }
+  function focusMode() {
+    const el = document.querySelector('input[name="focus-mode"]:checked');
+    return el ? el.value : 'all';
+  }
+  function paintFocusSeg() {
+    document.querySelectorAll('input[name="focus-mode"]').forEach((inp) => {
+      const span = inp.parentElement && inp.parentElement.querySelector('.ops-seg');
+      if (!span) return;
+      if (inp.checked) {
+        span.classList.add('bg-[var(--primary)]', 'text-[var(--on-primary)]');
+      } else {
+        span.classList.remove('bg-[var(--primary)]', 'text-[var(--on-primary)]');
+      }
+    });
+  }
+  function fillPolicy(p) {
+    if (!p) return;
+    $('pol-kernel').checked = !!p.confirm_kernel_docker;
+    $('pol-firstbak').checked = !!p.confirm_new_guest_backup;
+    $('pol-prod').checked = !!p.confirm_production;
+    $('pol-nothing').checked = !!p.confirm_nothing;
+    const mode = p.focus_mode || 'all';
+    document.querySelectorAll('input[name="focus-mode"]').forEach((inp) => {
+      inp.checked = inp.value === mode;
+    });
+    $('pol-focus-ids').value = (p.focus_ids || []).join(', ');
+    $('pol-focus-tags').value = (p.focus_tags || []).join(', ');
+    paintFocusSeg();
+  }
+  function card(title, meta, reason, actions) {
+    return (
+      '<article class="entity-card p-3">' +
+        '<p class="font-medium leading-snug break-words">' + esc(title) + '</p>' +
+        (meta ? '<p class="mt-0.5 text-sm text-[var(--muted)] leading-snug break-words">' + esc(meta) + '</p>' : '') +
+        (reason ? '<p class="mt-1 text-sm leading-snug break-words">' + esc(reason) + '</p>' : '') +
+        (actions ? '<div class="mt-2 flex flex-wrap gap-2">' + actions + '</div>' : '') +
+      '</article>'
+    );
+  }
+  function empty(text) {
+    return '<p class="text-sm text-[var(--muted)] leading-snug">' + esc(text) + '</p>';
+  }
+  function startBtn(id) {
+    return '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-start="' + esc(id) + '">Jetzt starten</button>';
+  }
+  function renderBoard(data) {
+    const quiet = $('ops-quiet');
+    if (quiet) quiet.textContent = data.quiet_rule || '';
+    const en = $('ops-enabled');
+    if (en) en.checked = !!data.enabled;
+    fillPolicy(data.policy);
+    const interview = $('ops-interview');
+    if (interview && data.policy && !data.policy.answered) {
+      interview.hidden = false;
+    }
+    const cols = {
+      next: data.next || [],
+      running: data.running || [],
+      waiting: data.waiting || [],
+      shifted: data.shifted || [],
+      done: (data.done || []).slice(0, 12),
+    };
+    const empties = {
+      next: 'Nichts geplant — „Plan vorschlagen“ oder bestehende Zeitpläne erscheinen hier.',
+      running: 'Kein laufender Auftrag.',
+      waiting: 'Nichts wartet auf dich. Der Agent arbeitet die übrigen Fenster selbst.',
+      shifted: 'Keine Verschiebungen.',
+      done: 'Noch nichts abgeschlossen.',
+    };
+    Object.keys(cols).forEach((key) => {
+      const body = document.querySelector('[data-col="' + key + '"] .ops-col-body');
+      if (!body) return;
+      const items = cols[key];
+      if (!items.length) {
+        body.innerHTML = empty(empties[key]);
+        return;
+      }
+      if (key === 'shifted') {
+        body.innerHTML = items.map((s) => card(
+          (s.target_name || s.stack || 'Fenster') + ' · ' + (s.kind === 'patch' ? 'Patch' : 'Backup'),
+          (s.old_start_hm || '—') + ' → ' + (s.new_start_hm || '—'),
+          s.reason || '',
+          ''
+        )).join('');
+        return;
+      }
+      body.innerHTML = items.map((w) => {
+        const title = (w.target_name || w.target_id || '') +
+          (w.stack ? ' · ' + w.stack : '') +
+          (w.kind_label ? ' · ' + w.kind_label : '');
+        const meta = [w.start_de || w.start_hm, w.duration_label, w.bucket_label]
+          .filter(Boolean).join(' · ');
+        let actions = '';
+        if (key === 'waiting') {
+          actions =
+            '<button type="button" class="btn btn-primary btn-xs min-h-12" data-ops-confirm="' + esc(w.id) + '">Bestätigen</button>' +
+            '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-ops-decline="' + esc(w.id) + '">Ablehnen</button>';
+        } else if (key === 'next' && w.can_start) {
+          actions = startBtn(w.id);
+        }
+        const st = w.status === 'failed' ? 'Fehler' : (w.status === 'skipped' ? 'übersprungen' : '');
+        return card(title, meta + (st ? ' · ' + st : ''), w.reason || '', actions);
+      }).join('');
+    });
+    bindActions();
+  }
+  function bindActions() {
+    document.querySelectorAll('[data-ops-confirm]').forEach((btn) => {
+      btn.addEventListener('click', () => act('/confirm', btn.getAttribute('data-ops-confirm')));
+    });
+    document.querySelectorAll('[data-ops-decline]').forEach((btn) => {
+      btn.addEventListener('click', () => act('/decline', btn.getAttribute('data-ops-decline')));
+    });
+    document.querySelectorAll('[data-ops-start]').forEach((btn) => {
+      btn.addEventListener('click', () => act('/start', btn.getAttribute('data-ops-start')));
+    });
+  }
+  async function act(path, id) {
+    const msg = $('ops-msg');
+    try {
+      await api(path, { method: 'POST', body: JSON.stringify({ window_id: Number(id) }) });
+      if (msg) msg.textContent = 'Aktualisiert.';
+      await load();
+    } catch (e) {
+      if (msg) msg.textContent = String(e.message || e);
+    }
+  }
+  async function load() {
+    try {
+      const data = await api('/board');
+      renderBoard(data);
+    } catch (e) {
+      const msg = $('ops-msg');
+      if (msg) msg.textContent = String(e.message || e);
+    }
+  }
+  async function plan() {
+    const msg = $('ops-msg');
+    try {
+      const data = await api('/plan', { method: 'POST', body: '{}' });
+      if (msg) msg.textContent = data.message || 'Plan übernommen.';
+      await load();
+    } catch (e) {
+      if (msg) msg.textContent = String(e.message || e);
+    }
+  }
+  $('btn-ops-plan')?.addEventListener('click', plan);
+  $('fab-ops-plan')?.addEventListener('click', plan);
+  $('btn-ops-policy')?.addEventListener('click', () => {
+    const box = $('ops-interview');
+    if (box) box.hidden = !box.hidden;
+  });
+  document.querySelectorAll('input[name="focus-mode"]').forEach((inp) => {
+    inp.addEventListener('change', paintFocusSeg);
+  });
+  $('ops-enabled')?.addEventListener('change', async (ev) => {
+    try {
+      await api('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ enabled: ev.target.checked, shift_auto: true }),
+      });
+      await load();
+    } catch (e) {
+      const msg = $('ops-msg');
+      if (msg) msg.textContent = String(e.message || e);
+    }
+  });
+  $('ops-policy-form')?.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const msg = $('ops-policy-msg');
+    try {
+      await api('/policy', {
+        method: 'POST',
+        body: JSON.stringify({
+          confirm_kernel_docker: $('pol-kernel').checked,
+          confirm_new_guest_backup: $('pol-firstbak').checked,
+          confirm_production: $('pol-prod').checked,
+          confirm_nothing: $('pol-nothing').checked,
+          focus_mode: focusMode(),
+          focus_ids: splitCsv($('pol-focus-ids').value),
+          focus_tags: splitCsv($('pol-focus-tags').value),
+          enabled: true,
+        }),
+      });
+      if (msg) msg.textContent = 'Gespeichert. Der Agent arbeitet weiter selbst.';
+      $('ops-interview').hidden = true;
+      await load();
+    } catch (e) {
+      if (msg) msg.textContent = String(e.message || e);
+    }
+  });
+  paintFocusSeg();
+  load();
+  setInterval(load, 20000);
+})();
+</script>
+{% endblock %}

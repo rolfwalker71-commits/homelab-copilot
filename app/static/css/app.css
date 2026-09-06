@@ -4437,3 +4437,23 @@ html.mobile-app[data-chrome="android"] {
 html[data-theme="light"].mobile-app .m-stat-ok {
   background: color-mix(in srgb, var(--success) 10%, var(--card));
 }
+
+/* Ops-Agent board */
+.ops-board {
+  display: grid;
+  gap: 1rem;
+  padding-bottom: 5.5rem;
+}
+@media (min-width: 1024px) {
+  .ops-board {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    padding-bottom: 0;
+    align-items: start;
+  }
+}
+.ops-col h2 {
+  letter-spacing: -0.02em;
+}
+html[data-chrome="android"] .ops-col {
+  border-radius: 1.75rem;
+}

@@ -91,6 +91,9 @@
         <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">
           <span class="nav-ico">{{ ico('topology') }}</span>Topologie
         </a>
+        <a href="/ops" class="{% if request.url.path.startswith('/ops') %}active{% endif %}">
+          <span class="nav-ico">{{ ico('schedule') }}</span>Agent
+        </a>
         <a href="/modules/patcher" class="{% if request.url.path.startswith('/modules/patcher') %}active{% endif %}">
           <span class="nav-ico">{{ ico('patch') }}</span>Patch
         </a>
@@ -149,6 +152,10 @@
       <span class="nav-icon" aria-hidden="true">{{ ico('topology', 22) }}</span>
       Topologie
     </a>
+    <a href="/ops" class="{% if request.url.path.startswith('/ops') %}active{% endif %}">
+      <span class="nav-icon" aria-hidden="true">{{ ico('schedule', 22) }}</span>
+      Agent
+    </a>
     <a href="/modules/patcher" class="{% if request.url.path.startswith('/modules/patcher') %}active{% endif %}">
       <span class="nav-icon" aria-hidden="true">{{ ico('patch', 22) }}</span>
       Patch
@@ -160,10 +167,6 @@
     <a href="/modules/health" class="{% if request.url.path.startswith('/modules/health') %}active{% endif %}">
       <span class="nav-icon" aria-hidden="true">{{ ico('health', 22) }}</span>
       Checks
-    </a>
-    <a href="/setup" class="{% if request.url.path == '/setup' %}active{% endif %}">
-      <span class="nav-icon" aria-hidden="true">{{ ico('setup', 22) }}</span>
-      Setup
     </a>
   </nav>
 

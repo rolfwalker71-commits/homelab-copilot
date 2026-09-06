@@ -19,6 +19,10 @@
     <span class="nav-ico">{{ ico('browse', 15) }}</span>
     Durchsuchen
   </a>
+  <a href="/ops" class="btn btn-sm btn-ghost">
+    <span class="nav-ico">{{ ico('schedule', 15) }}</span>
+    Agent
+  </a>
   <a href="/modules/backup_verifier/schedule"
      class="btn btn-sm {% if active_view == 'schedule' %}btn-primary{% else %}btn-ghost{% endif %}"
      {% if active_view == 'schedule' %}aria-current="page"{% endif %}>

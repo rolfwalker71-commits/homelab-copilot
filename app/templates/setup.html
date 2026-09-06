@@ -215,13 +215,13 @@
 <section id="modules" class="mb-6 scroll-mt-24 animate-in" aria-labelledby="modules-heading">
   <h2 id="modules-heading" class="font-display mb-2 text-xl font-bold leading-snug">Module</h2>
   <p class="mb-4 max-w-xl text-sm text-[var(--muted)]">
-    Geladene Erweiterungen. Patch, Backup und Checks sind auch über die Hauptnavigation erreichbar.
+    Geladene Erweiterungen. Agent, Patch, Backup und Checks sind auch über die Hauptnavigation erreichbar.
   </p>
   <div class="grid gap-3 sm:grid-cols-2 max-w-3xl">
     {% for m in modules %}
     <article class="entity-card">
       <div class="module-card-head">
-        <span class="module-card-ico" aria-hidden="true">{% if m.name == 'backup_verifier' %}{{ ico('backup') }}{% elif m.name == 'patcher' %}{{ ico('patch') }}{% elif m.name == 'health' %}{{ ico('health') }}{% else %}{{ ico('modules') }}{% endif %}</span>
+        <span class="module-card-ico" aria-hidden="true">{% if m.name == 'backup_verifier' %}{{ ico('backup') }}{% elif m.name == 'patcher' %}{{ ico('patch') }}{% elif m.name == 'health' %}{{ ico('health') }}{% elif m.name == 'ops_agent' %}{{ ico('schedule') }}{% else %}{{ ico('modules') }}{% endif %}</span>
         <div class="min-w-0 flex-1">
           <h3 class="font-semibold break-words leading-snug">{{ m.name }} <span class="text-sm font-normal text-[var(--muted)]">v{{ m.version }}</span></h3>
           <p class="mt-1 text-sm text-[var(--muted)]">{{ m.description }}</p>
@@ -236,6 +236,8 @@
             <a href="/modules/backup_verifier" class="btn btn-ghost btn-xs">Öffnen</a>
             {% elif m.name == 'patcher' %}
             <a href="/modules/patcher" class="btn btn-ghost btn-xs">Öffnen</a>
+            {% elif m.name == 'ops_agent' %}
+            <a href="/ops" class="btn btn-ghost btn-xs">Öffnen</a>
             {% endif %}
           </div>
         </div>
