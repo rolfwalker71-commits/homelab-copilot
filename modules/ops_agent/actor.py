@@ -19,6 +19,11 @@ _PHRASES = {
     "window_shifted": "Fenster verschoben",
     "backup_started": "Backup gestartet",
     "wave_stopped": "Welle gestoppt nach Apply-Fehler",
+    "lesson_hold": "Übersprungen: letzte Lektion",
+    "reboot_done": "Reboot ausgelöst",
+    "reboot_wait": "Reboot wartet auf dich",
+    "images_pruned": "Ungenutzte Images bereinigt",
+    "capacity_warn": "Ziel-Speicher wird knapp",
 }
 
 

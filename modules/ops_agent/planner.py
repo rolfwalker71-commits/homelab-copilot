@@ -57,6 +57,23 @@ REASON_OUT_OF_FOCUS = "Liegt außerhalb der Host-Auswahl."
 REASON_HOST_GONE = "Host ist weggefallen — warte auf deine Entscheidung."
 REASON_DRILL_BLOCK = "Restore-Drill um 05:00 — nicht in dieses Fenster legen."
 REASON_SCAN_BLOCK = "Täglicher Scan um 04:00 — nicht in dieses Fenster legen."
+REASON_BACKUP_CHAIN = "durch Agent: Anschluss an voriges Backup"
+REASON_DEST_FULL = "Ziel voll — Backup übersprungen durch Agent"
+REASON_HOST_OFFLINE_CHAIN = "Host offline — Kette geht weiter, später erneut."
+REASON_HUNG = "Auftrag hängt — bitte prüfen. Agent killt nichts."
+REASON_REBOOT_WAIT = "Reboot nötig — wartet auf deine Bestätigung (Regel)."
+REASON_REBOOT_NO_API = (
+    "Reboot nötig, aber keine Gast-/Host-Reboot-API — bitte selbst."
+)
+REASON_REBOOT_DONE = "Reboot ausgelöst nach erfolgreichem Apply"
+REASON_OFFLINE_TODAY = "{name} offline — Backup/Patch heute ausgelassen, fällt auf."
+REASON_CAPACITY_WARN = "Ziel-Speicher wird nach der Kette knapp"
+REASON_SMART_WARN = "SMART/Storage-Warnung — Backups laufen weiter"
+REASON_EOL_PROPOSE = (
+    "Release-Hop / EOL erkannt — nur Vorschlag, DistUpgrade startet der Agent nie."
+)
+REASON_PRUNE = "Ungenutzte Images bereinigt nach grüner Image-Welle"
+REASON_COPILOT_DATA = "Copilot /data hat keinen Backup-Plan. So gewollt?"
 
 DURATION_BACKUP = DEFAULT_INTERVAL
 DURATION_PATCH_SECURITY = 20

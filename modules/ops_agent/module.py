@@ -88,6 +88,7 @@ class ScopePromptPayload(BaseModel):
     prompt_id: int = Field(..., ge=1)
     patch: bool | None = None
     image: bool | None = None
+    backup: bool | None = None
     drop: bool | None = None
 
 
@@ -176,6 +177,7 @@ async def api_answer_scope_prompt(payload: ScopePromptPayload) -> dict[str, Any]
             payload.prompt_id,
             patch=payload.patch,
             image=payload.image,
+            backup=payload.backup,
             drop=payload.drop,
         )
     except RuntimeError as exc:
@@ -222,9 +224,23 @@ async def api_start(payload: WindowIdPayload) -> dict[str, Any]:
     return {"ok": True, "window": window}
 
 
+@router.post("/start-now")
+async def api_start_accepted() -> dict[str, Any]:
+    try:
+        return await _get_engine().start_accepted_now()
+    except RuntimeError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/brief")
+async def api_refresh_brief() -> dict[str, Any]:
+    row = await _get_engine().refresh_evening_brief(force=True)
+    return {"ok": True, "brief": row.get("text") or "", "created_at": row.get("created_at")}
+
+
 class OpsAgentModule:
     name = "ops_agent"
-    version = "0.3.0"
+    version = "0.6.0"
     description = (
         "Plant Patch- und Backup-Fenster selbst, prüft Plausibilität, "
         "verschiebt bei Überlauf und startet über die bestehenden Engines."
@@ -326,14 +342,65 @@ class OpsAgentModule:
 
             return await rollback_pre_snapshot(guest_id, snap_name, via_agent=True)
 
+        async def _reboot(target_id: str) -> dict[str, Any] | None:
+            from patcher.apply import reboot_host
+            from patcher.module import _get_store as patch_store
+            from patcher.targets import resolve_target
+
+            store = patch_store()
+            if store is None:
+                return None
+            try:
+                target = await resolve_target(store, _snap(), target_id)
+            except Exception:
+                return None
+            return await reboot_host(target, confirm=True)
+
+        async def _prune(target_id: str) -> dict[str, Any] | None:
+            from app.core.image_prune import (
+                cmd_dangling_image_prune,
+                format_unused_image_cleanup_message,
+                parse_image_prune_output,
+            )
+            from patcher.config import get_patcher_settings
+            from patcher.module import _get_store as patch_store
+            from patcher.sshutil import ssh_run
+            from patcher.targets import resolve_target
+
+            store = patch_store()
+            if store is None:
+                return None
+            try:
+                target = await resolve_target(store, _snap(), target_id)
+            except Exception:
+                return None
+            ps = get_patcher_settings()
+            stdout, stderr, code = await ssh_run(
+                target.ip,
+                cmd_dangling_image_prune(),
+                timeout=120.0,
+                username=target.ssh_user,
+                port=target.port,
+                connect_timeout=ps.patcher_connect_timeout,
+            )
+            parsed = parse_image_prune_output(f"{stdout or ''}\n{stderr or ''}")
+            warning = None if code == 0 else (stderr or stdout or "Prune fehlgeschlagen")[:180]
+            message = format_unused_image_cleanup_message(
+                dangling_deleted=int(parsed.get("deleted") or 0),
+                dangling_untagged=int(parsed.get("untagged") or 0),
+                reclaimed=str(parsed.get("reclaimed") or ""),
+                warning=warning,
+            )
+            return {"ok": code == 0, "message": message, **parsed}
+
         async def _notify(title: str, body: str) -> None:
             app_store = getattr(app.state, "app_store", None)
             if app_store is None:
                 return
-            if not await push_allowed(app_store, "backup_failure"):
+            if not await push_allowed(app_store, "ops_wait"):
                 return
             await send_push_to_all(
-                app_store, title=title, body=body, url="/ops", tag="ops-agent-shift"
+                app_store, title=title, body=body, url="/ops", tag="ops-agent-wait"
             )
 
         _engine = OpsEngine(
@@ -350,6 +417,8 @@ class OpsAgentModule:
             notify_shift=_notify,
             delete_guest_snap=_delete_snap,
             rollback_guest_snap=_rollback_snap,
+            reboot_host=_reboot,
+            prune_images=_prune,
         )
         app.state.ops_engine = _engine
 

@@ -48,7 +48,8 @@
 </article>
 
 <div class="mb-4 flex flex-wrap items-center gap-2">
-  <button type="button" id="btn-ops-plan" class="btn btn-primary min-h-12 hidden lg:inline-flex">Plan vorschlagen</button>
+  <button type="button" id="btn-ops-plan" class="btn btn-primary min-h-12 hidden lg:inline-flex leading-snug">Plan vorschlagen</button>
+  <button type="button" id="btn-ops-start-now" class="btn btn-ghost min-h-12 leading-snug whitespace-normal text-center">Geplante jetzt starten</button>
   <button type="button" id="btn-ops-policy" class="btn btn-ghost min-h-12">Regeln ändern</button>
   <label class="flex items-center gap-2 text-sm min-h-12 px-2">
     <input type="checkbox" id="ops-enabled" class="h-4 w-4" />
@@ -56,6 +57,15 @@
   </label>
   <p id="ops-msg" class="text-sm text-[var(--muted)] leading-snug" role="status"></p>
 </div>
+
+<article id="ops-brief-card" class="surface-tinted p-4 sm:p-5 mb-5 animate-in">
+  <div class="flex flex-wrap items-start justify-between gap-2">
+    <h2 class="font-display text-lg font-bold leading-snug break-words">Abend-Kurzlage</h2>
+    <button type="button" id="btn-ops-brief" class="btn btn-ghost min-h-12">Kurzlage aktualisieren</button>
+  </div>
+  <p id="ops-brief" class="mt-2 text-sm leading-snug break-words">Heute noch keine Agent-Tätigkeit.</p>
+  <p id="ops-brief-at" class="mt-1 text-sm text-[var(--muted)] leading-snug"></p>
+</article>
 
 <article id="ops-scope" class="surface-tinted p-4 sm:p-5 mb-5 animate-in">
   <h2 class="font-display text-lg font-bold leading-snug break-words">Welche Hosts soll der Agent anfassen?</h2>
@@ -92,6 +102,33 @@
     <div class="ops-col-body mt-3 space-y-2"></div>
   </section>
 </div>
+
+<article class="surface-tinted p-4 sm:p-5 mt-5 mb-5 animate-in">
+  <details id="ops-lessons" class="ops-next-group ops-lessons-group">
+    <summary class="ops-next-summary">
+      <span class="ops-next-summary-inner">
+        <span class="ops-next-chevron" aria-hidden="true"></span>
+        <span class="ops-next-summary-text" id="ops-lessons-title">Lektionen</span>
+      </span>
+    </summary>
+    <div id="ops-lessons-list" class="mt-3 space-y-2"></div>
+  </details>
+</article>
+
+<article class="surface-tinted p-4 sm:p-5 mt-5 mb-5 animate-in">
+  <details id="ops-activity" class="ops-next-group ops-lessons-group">
+    <summary class="ops-next-summary">
+      <span class="ops-next-summary-inner">
+        <span class="ops-next-chevron" aria-hidden="true"></span>
+        <span class="ops-next-summary-text" id="ops-activity-title">Tätigkeitslog</span>
+      </span>
+    </summary>
+    <p class="mt-2 text-sm text-[var(--muted)] leading-snug">
+      Was der Agent getan hat — überlebt Neustarts, neueste zuerst. Zum Nachlesen am Abend oder mittags.
+    </p>
+    <div id="ops-activity-list" class="mt-3 space-y-2"></div>
+  </details>
+</article>
 {% endblock %}
 
 {% block fab %}
@@ -248,15 +285,29 @@
       return (
         '<article class="entity-card p-3" data-scope-prompt="' + esc(p.id) + '">' +
           '<p class="font-medium leading-snug break-words">Neuer Host/Gast ' + esc(name) + '</p>' +
-          '<p class="mt-1 text-sm leading-snug break-words">Automatisch zu Patching? zu Image-Update? Bis du antwortest, bleibt er draußen.</p>' +
+          '<p class="mt-1 text-sm leading-snug break-words">Automatisch zu Patching? zu Image-Update? Backup? Bis du antwortest, bleibt er draußen.</p>' +
           '<div class="mt-2 grid gap-1">' +
             '<label class="flex items-center gap-2 text-sm min-h-12">' +
               '<input type="checkbox" data-prompt-patch class="h-4 w-4" /> <span>Patchen ja</span></label>' +
             '<label class="flex items-center gap-2 text-sm min-h-12">' +
               '<input type="checkbox" data-prompt-image class="h-4 w-4" /> <span>Images ja</span></label>' +
+            '<label class="flex items-center gap-2 text-sm min-h-12">' +
+              '<input type="checkbox" data-prompt-backup class="h-4 w-4" /> <span>Backup einplanen</span></label>' +
           '</div>' +
           '<div class="mt-2 flex flex-wrap gap-2">' +
             '<button type="button" class="btn btn-primary btn-xs min-h-12" data-prompt-save="' + esc(p.id) + '">Übernehmen</button>' +
+          '</div>' +
+        '</article>'
+      );
+    }
+    if (p.kind === 'no_backup') {
+      return (
+        '<article class="entity-card p-3" data-scope-prompt="' + esc(p.id) + '">' +
+          '<p class="font-medium leading-snug break-words">' + esc(name) + ' hat keinen Backup-Plan. So gewollt?</p>' +
+          '<p class="mt-1 text-sm leading-snug break-words">Kein Backup merkt sich der Agent — er fragt nicht bei jedem Tick erneut.</p>' +
+          '<div class="mt-2 flex flex-wrap gap-2">' +
+            '<button type="button" class="btn btn-ghost btn-xs min-h-12" data-prompt-no-bak="' + esc(p.id) + '">Kein Backup</button>' +
+            '<button type="button" class="btn btn-primary btn-xs min-h-12" data-prompt-yes-bak="' + esc(p.id) + '">Backup einplanen</button>' +
           '</div>' +
         '</article>'
       );
@@ -464,6 +515,9 @@
     if (en) en.checked = !!data.enabled;
     fillPolicy(data.policy);
     renderScope(data.hosts || []);
+    renderLessons(data.lessons || []);
+    renderBrief(data);
+    renderActivity(data.activity || []);
     const interview = $('ops-interview');
     if (interview && data.policy && !data.policy.answered) {
       interview.hidden = false;
@@ -498,9 +552,11 @@
         const rbFails = (data.rollback_failed || []).map(rollbackCard).join('');
         const prompts = (data.scope_prompts || []).map(promptCard).join('');
         const wins = items.map((w) => {
+          const offline = w.bucket === 'offline' || (w.reason && String(w.reason).indexOf('fällt auf') >= 0);
           const title = (w.target_name || w.target_id || '') +
             (w.stack ? ' · ' + w.stack : '') +
-            (w.kind_label ? ' · ' + w.kind_label : '');
+            (w.kind_label ? ' · ' + w.kind_label : '') +
+            (offline ? ' · fällt auf' : '');
           const meta = [w.start_de || w.start_hm, w.duration_label, w.bucket_label]
             .filter(Boolean).join(' · ');
           const actions =
@@ -536,10 +592,53 @@
         let st = w.status === 'failed' ? 'Fehler' : (w.status === 'skipped' ? 'übersprungen' : '');
         if (w.rollback && w.rollback.status === 'ok') st = 'Zurückgesetzt';
         else if (w.rollback && w.rollback.status === 'failed') st = 'Fehler · Rollback fehlgeschlagen';
-        return card(title, meta + (st ? ' · ' + st : ''), w.reason || '', actions);
+        if (w.lesson) st = (st ? st + ' · ' : '') + 'Lektion';
+        const reason = [w.reason || '', w.lesson && w.lesson.why_de ? w.lesson.why_de : '']
+          .filter(Boolean).join(' ');
+        return card(title, meta + (st ? ' · ' + st : ''), reason, '');
       }).join('');
     });
     bindActions();
+  }
+  function renderLessons(items) {
+    const title = $('ops-lessons-title');
+    const list = $('ops-lessons-list');
+    if (!title || !list) return;
+    title.textContent = items.length ? ('Lektionen · ' + items.length) : 'Lektionen';
+    if (!items.length) {
+      list.innerHTML = empty('Noch keine Lektionen — Apply-Fehler und Rollbacks merkt der Agent hier.');
+      return;
+    }
+    list.innerHTML = items.map((s) => {
+      const actor = s.actor_label || 'durch Agent';
+      const pkgs = (s.packages || []).join(', ');
+      const meta = [s.job_kind_label, s.host_kind_label, pkgs, s.created_at, actor]
+        .filter(Boolean).join(' · ');
+      const why = s.why_de || s.error_label || '';
+      return card((s.target_name || s.target_id || 'Host') + ' · Lektion', meta, [why, s.next_de].filter(Boolean).join(' '), '');
+    }).join('');
+  }
+  function renderBrief(data) {
+    const p = $('ops-brief');
+    const at = $('ops-brief-at');
+    if (p) p.textContent = data.brief || 'Heute noch keine Agent-Tätigkeit.';
+    if (at) at.textContent = data.brief_at ? ('Stand ' + data.brief_at + ' · durch Agent') : '';
+  }
+  function renderActivity(items) {
+    const title = $('ops-activity-title');
+    const list = $('ops-activity-list');
+    if (!title || !list) return;
+    title.textContent = items.length ? ('Tätigkeitslog · ' + items.length) : 'Tätigkeitslog';
+    if (!items.length) {
+      list.innerHTML = empty('Noch keine Einträge — geplant, gestartet, verschoben, übersprungen und Warnungen erscheinen hier.');
+      return;
+    }
+    list.innerHTML = items.map((s) => {
+      const actor = s.actor_label || 'durch Agent';
+      const who = s.target_name || s.target_id || '';
+      const meta = [s.action_label, s.result, who, s.created_at, actor].filter(Boolean).join(' · ');
+      return card(s.action_label || 'Eintrag', meta, s.detail || '', '');
+    }).join('');
   }
   function bindActions() {
     document.querySelectorAll('[data-ops-confirm]').forEach((btn) => {
@@ -560,6 +659,12 @@
     document.querySelectorAll('[data-prompt-save]').forEach((btn) => {
       btn.addEventListener('click', () => answerPrompt(btn.getAttribute('data-prompt-save'), 'appeared'));
     });
+    document.querySelectorAll('[data-prompt-no-bak]').forEach((btn) => {
+      btn.addEventListener('click', () => answerPrompt(btn.getAttribute('data-prompt-no-bak'), 'no_backup_no'));
+    });
+    document.querySelectorAll('[data-prompt-yes-bak]').forEach((btn) => {
+      btn.addEventListener('click', () => answerPrompt(btn.getAttribute('data-prompt-yes-bak'), 'no_backup_yes'));
+    });
     document.querySelectorAll('[data-prompt-drop]').forEach((btn) => {
       btn.addEventListener('click', () => answerPrompt(btn.getAttribute('data-prompt-drop'), 'drop'));
     });
@@ -574,6 +679,11 @@
     if (mode === 'appeared') {
       body.patch = !!(cardEl && cardEl.querySelector('[data-prompt-patch]')?.checked);
       body.image = !!(cardEl && cardEl.querySelector('[data-prompt-image]')?.checked);
+      body.backup = !!(cardEl && cardEl.querySelector('[data-prompt-backup]')?.checked);
+    } else if (mode === 'no_backup_yes') {
+      body.backup = true;
+    } else if (mode === 'no_backup_no') {
+      body.backup = false;
     } else if (mode === 'drop') {
       body.drop = true;
     } else {
@@ -617,8 +727,35 @@
       if (msg) msg.textContent = String(e.message || e);
     }
   }
+  async function startPlanned() {
+    const msg = $('ops-msg');
+    const btn = $('btn-ops-start-now');
+    if (btn) btn.disabled = true;
+    try {
+      const data = await api('/start-now', { method: 'POST', body: '{}' });
+      if (msg) msg.textContent = data.message || 'Geplante Fenster gestartet.';
+      await load();
+    } catch (e) {
+      if (msg) msg.textContent = String(e.message || e);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
   $('btn-ops-plan')?.addEventListener('click', plan);
   $('fab-ops-plan')?.addEventListener('click', plan);
+  $('btn-ops-start-now')?.addEventListener('click', startPlanned);
+  $('btn-ops-brief')?.addEventListener('click', async () => {
+    const msg = $('ops-msg');
+    try {
+      const data = await api('/brief', { method: 'POST', body: '{}' });
+      if (msg) msg.textContent = 'Kurzlage aktualisiert.';
+      const p = $('ops-brief');
+      if (p) p.textContent = data.brief || p.textContent;
+      await load();
+    } catch (e) {
+      if (msg) msg.textContent = String(e.message || e);
+    }
+  });
   $('btn-ops-policy')?.addEventListener('click', () => {
     const box = $('ops-interview');
     if (box) box.hidden = !box.hidden;

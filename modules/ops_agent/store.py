@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS ops_known_hosts (
     kind TEXT NOT NULL DEFAULT '',
     gone INTEGER NOT NULL DEFAULT 0,
     keep_preference INTEGER NOT NULL DEFAULT 0,
+    skip_backup INTEGER,
     first_seen_iso TEXT,
     last_seen_iso TEXT
 );
@@ -100,6 +101,7 @@ CREATE TABLE IF NOT EXISTS ops_scope_prompts (
     status TEXT NOT NULL DEFAULT 'waiting',
     patch INTEGER,
     image INTEGER,
+    backup INTEGER,
     drop_from_scope INTEGER,
     reason TEXT NOT NULL DEFAULT '',
     created_at TEXT,
@@ -137,6 +139,58 @@ CREATE INDEX IF NOT EXISTS idx_ops_rollbacks_window ON ops_rollbacks(window_id);
 CREATE INDEX IF NOT EXISTS idx_ops_rollbacks_created ON ops_rollbacks(created_at_iso DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_rollbacks_job_uniq
     ON ops_rollbacks(job_id) WHERE job_id != '';
+
+CREATE TABLE IF NOT EXISTS ops_lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_id INTEGER,
+    job_id TEXT NOT NULL DEFAULT '',
+    target_id TEXT NOT NULL,
+    target_name TEXT NOT NULL DEFAULT '',
+    host_kind TEXT NOT NULL DEFAULT '',
+    job_kind TEXT NOT NULL DEFAULT '',
+    packages_json TEXT,
+    packages_key TEXT NOT NULL DEFAULT '',
+    error_class TEXT NOT NULL,
+    error_short TEXT NOT NULL DEFAULT '',
+    why_de TEXT NOT NULL,
+    next_de TEXT NOT NULL DEFAULT '',
+    rollback_ran INTEGER NOT NULL DEFAULT 0,
+    actor TEXT NOT NULL DEFAULT 'Agent',
+    via_agent INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    created_at_iso TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ops_lessons_combo
+    ON ops_lessons(packages_key, host_kind, job_kind, created_at_iso DESC);
+CREATE INDEX IF NOT EXISTS idx_ops_lessons_created ON ops_lessons(created_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS ops_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    result TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    target_id TEXT NOT NULL DEFAULT '',
+    target_name TEXT NOT NULL DEFAULT '',
+    window_id INTEGER,
+    detail TEXT NOT NULL DEFAULT '',
+    actor TEXT NOT NULL DEFAULT 'Agent',
+    via_agent INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    created_at_iso TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ops_activity_created
+    ON ops_activity(created_at_iso DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_ops_activity_action
+    ON ops_activity(action, created_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS ops_briefs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_at_iso TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ops_briefs_day ON ops_briefs(day DESC, id DESC);
 """
 
 
@@ -201,6 +255,14 @@ class OpsStore:
                 await db.execute(
                     "ALTER TABLE ops_rollbacks ADD COLUMN via_agent INTEGER NOT NULL DEFAULT 1"
                 )
+        async with db.execute("PRAGMA table_info(ops_known_hosts)") as cur:
+            known_cols = {row[1] for row in await cur.fetchall()}
+        if known_cols and "skip_backup" not in known_cols:
+            await db.execute("ALTER TABLE ops_known_hosts ADD COLUMN skip_backup INTEGER")
+        async with db.execute("PRAGMA table_info(ops_scope_prompts)") as cur:
+            prompt_cols = {row[1] for row in await cur.fetchall()}
+        if prompt_cols and "backup" not in prompt_cols:
+            await db.execute("ALTER TABLE ops_scope_prompts ADD COLUMN backup INTEGER")
 
     async def _seed_scopes_from_legacy_focus(self) -> None:
         """One-time: copy 'only these IDs' into both matrices. Never imply 'all'."""
@@ -600,6 +662,8 @@ class OpsStore:
         d = dict(row)
         d["gone"] = bool(d.get("gone"))
         d["keep_preference"] = bool(d.get("keep_preference"))
+        raw_skip = d.get("skip_backup")
+        d["skip_backup"] = None if raw_skip is None else bool(raw_skip)
         return d
 
     async def list_known_hosts(self) -> list[dict[str, Any]]:
@@ -710,10 +774,19 @@ class OpsStore:
         await db.execute("DELETE FROM ops_known_hosts WHERE target_id = ?", (target_id,))
         await db.commit()
 
+    async def set_skip_backup(self, target_id: str, skip: bool) -> None:
+        db = self._require()
+        await db.execute(
+            "UPDATE ops_known_hosts SET skip_backup = ? WHERE target_id = ?",
+            (1 if skip else 0, target_id),
+        )
+        await db.commit()
+
     def _prompt_from_row(self, row: aiosqlite.Row) -> dict[str, Any]:
         d = dict(row)
         d["patch"] = None if d.get("patch") is None else bool(d.get("patch"))
         d["image"] = None if d.get("image") is None else bool(d.get("image"))
+        d["backup"] = None if d.get("backup") is None else bool(d.get("backup"))
         d["drop_from_scope"] = (
             None if d.get("drop_from_scope") is None else bool(d.get("drop_from_scope"))
         )
@@ -793,6 +866,7 @@ class OpsStore:
         *,
         patch: bool | None = None,
         image: bool | None = None,
+        backup: bool | None = None,
         drop_from_scope: bool | None = None,
     ) -> dict[str, Any] | None:
         db = self._require()
@@ -803,6 +877,7 @@ class OpsStore:
                 status = 'answered',
                 patch = ?,
                 image = ?,
+                backup = ?,
                 drop_from_scope = ?,
                 answered_at = ?,
                 answered_at_iso = ?
@@ -811,6 +886,7 @@ class OpsStore:
             (
                 None if patch is None else (1 if patch else 0),
                 None if image is None else (1 if image else 0),
+                None if backup is None else (1 if backup else 0),
                 None if drop_from_scope is None else (1 if drop_from_scope else 0),
                 format_de(now),
                 iso_utc(now),
@@ -982,3 +1058,278 @@ class OpsStore:
             "actor": "Agent",
             "via_agent": True,
         }
+
+    def _lesson_from_row(self, row: aiosqlite.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        d = dict(row)
+        d["packages"] = _json_list(d.pop("packages_json", None))
+        d["rollback_ran"] = bool(d.get("rollback_ran"))
+        d["via_agent"] = bool(d.get("via_agent", 1))
+        d["actor"] = str(d.get("actor") or "Agent")
+        return d
+
+    async def insert_lesson(
+        self,
+        *,
+        window_id: int | None,
+        job_id: str,
+        target_id: str,
+        target_name: str,
+        host_kind: str,
+        job_kind: str,
+        packages: list[str],
+        packages_key: str,
+        error_class: str,
+        error_short: str,
+        why_de: str,
+        next_de: str,
+        rollback_ran: bool,
+    ) -> dict[str, Any]:
+        db = self._require()
+        now = now_berlin()
+        cur = await db.execute(
+            """
+            INSERT INTO ops_lessons (
+                window_id, job_id, target_id, target_name, host_kind, job_kind,
+                packages_json, packages_key, error_class, error_short,
+                why_de, next_de, rollback_ran, actor, via_agent,
+                created_at, created_at_iso
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Agent', 1, ?, ?)
+            """,
+            (
+                int(window_id) if window_id is not None else None,
+                str(job_id or ""),
+                str(target_id or ""),
+                str(target_name or ""),
+                str(host_kind or ""),
+                str(job_kind or ""),
+                json.dumps(list(packages or []), ensure_ascii=False),
+                str(packages_key or ""),
+                str(error_class or ""),
+                str(error_short or ""),
+                str(why_de or ""),
+                str(next_de or ""),
+                1 if rollback_ran else 0,
+                format_de(now),
+                iso_utc(now),
+            ),
+        )
+        await db.commit()
+        rid = int(cur.lastrowid) if cur.lastrowid else 0
+        if rid:
+            async with db.execute(
+                "SELECT * FROM ops_lessons WHERE id = ?", (rid,)
+            ) as sel:
+                found = self._lesson_from_row(await sel.fetchone())
+                if found:
+                    return found
+        return {
+            "id": rid,
+            "window_id": window_id,
+            "job_id": job_id,
+            "target_id": target_id,
+            "target_name": target_name,
+            "host_kind": host_kind,
+            "job_kind": job_kind,
+            "packages": list(packages or []),
+            "packages_key": packages_key,
+            "error_class": error_class,
+            "error_short": error_short,
+            "why_de": why_de,
+            "next_de": next_de,
+            "rollback_ran": bool(rollback_ran),
+            "actor": "Agent",
+            "via_agent": True,
+        }
+
+    async def list_lessons(self, *, limit: int = 80) -> list[dict[str, Any]]:
+        db = self._require()
+        limit = max(1, min(int(limit), 200))
+        async with db.execute(
+            """
+            SELECT * FROM ops_lessons
+            ORDER BY created_at_iso DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [r for r in (self._lesson_from_row(row) for row in rows) if r]
+
+    async def get_lesson_for_window(self, window_id: int) -> dict[str, Any] | None:
+        db = self._require()
+        async with db.execute(
+            """
+            SELECT * FROM ops_lessons
+            WHERE window_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (int(window_id),),
+        ) as cur:
+            return self._lesson_from_row(await cur.fetchone())
+
+    def _activity_from_row(self, row: aiosqlite.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        d = dict(row)
+        d["via_agent"] = bool(d.get("via_agent", 1))
+        d["actor"] = str(d.get("actor") or "Agent")
+        return d
+
+    async def insert_activity(
+        self,
+        *,
+        action: str,
+        result: str = "",
+        kind: str = "",
+        target_id: str = "",
+        target_name: str = "",
+        window_id: int | None = None,
+        detail: str = "",
+    ) -> dict[str, Any]:
+        db = self._require()
+        now = now_berlin()
+        cur = await db.execute(
+            """
+            INSERT INTO ops_activity (
+                action, result, kind, target_id, target_name, window_id,
+                detail, actor, via_agent, created_at, created_at_iso
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Agent', 1, ?, ?)
+            """,
+            (
+                str(action or ""),
+                str(result or ""),
+                str(kind or ""),
+                str(target_id or ""),
+                str(target_name or ""),
+                int(window_id) if window_id is not None else None,
+                str(detail or ""),
+                format_de(now),
+                iso_utc(now),
+            ),
+        )
+        await db.commit()
+        rid = int(cur.lastrowid) if cur.lastrowid else 0
+        if rid:
+            async with db.execute(
+                "SELECT * FROM ops_activity WHERE id = ?", (rid,)
+            ) as sel:
+                found = self._activity_from_row(await sel.fetchone())
+                if found:
+                    return found
+        return {
+            "id": rid,
+            "action": action,
+            "result": result,
+            "kind": kind,
+            "target_id": target_id,
+            "target_name": target_name,
+            "window_id": window_id,
+            "detail": detail,
+            "actor": "Agent",
+            "via_agent": True,
+            "created_at": format_de(now),
+            "created_at_iso": iso_utc(now),
+        }
+
+    async def list_activity(self, *, limit: int = 80) -> list[dict[str, Any]]:
+        db = self._require()
+        limit = max(1, min(int(limit), 400))
+        async with db.execute(
+            """
+            SELECT * FROM ops_activity
+            ORDER BY created_at_iso DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [r for r in (self._activity_from_row(row) for row in rows) if r]
+
+    async def has_activity_today(
+        self,
+        *,
+        action: str,
+        target_id: str = "",
+        detail_contains: str = "",
+    ) -> bool:
+        from datetime import datetime
+
+        from app.core.locale import BERLIN
+
+        db = self._require()
+        day = now_berlin().date().isoformat()
+        sql = "SELECT created_at_iso, detail FROM ops_activity WHERE action = ? "
+        args: list[Any] = [action]
+        if target_id:
+            sql += "AND target_id = ? "
+            args.append(target_id)
+        sql += "ORDER BY id DESC LIMIT 40"
+        async with db.execute(sql, args) as cur:
+            rows = await cur.fetchall()
+        needle = (detail_contains or "").lower()
+        for row in rows:
+            iso = str(row["created_at_iso"] or "")
+            try:
+                dt = datetime.fromisoformat(iso)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=BERLIN)
+                if dt.astimezone(BERLIN).date().isoformat() != day:
+                    continue
+            except ValueError:
+                continue
+            if needle and needle not in str(row["detail"] or "").lower():
+                continue
+            return True
+        return False
+
+    async def find_open_bucket(
+        self, *, target_id: str, bucket: str
+    ) -> dict[str, Any] | None:
+        db = self._require()
+        async with db.execute(
+            """
+            SELECT * FROM ops_windows
+            WHERE target_id = ? AND bucket = ?
+              AND status IN ('accepted', 'waiting_confirm', 'running')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (target_id, bucket),
+        ) as cur:
+            row = await cur.fetchone()
+        return self._window_from_row(row) if row else None
+
+    async def save_brief(self, *, day: str, text: str) -> dict[str, Any]:
+        db = self._require()
+        now = now_berlin()
+        cur = await db.execute(
+            """
+            INSERT INTO ops_briefs (day, text, created_at, created_at_iso)
+            VALUES (?, ?, ?, ?)
+            """,
+            (day, text, format_de(now), iso_utc(now)),
+        )
+        await db.commit()
+        rid = int(cur.lastrowid) if cur.lastrowid else 0
+        return {
+            "id": rid,
+            "day": day,
+            "text": text,
+            "created_at": format_de(now),
+            "created_at_iso": iso_utc(now),
+        }
+
+    async def get_brief_for_day(self, day: str) -> dict[str, Any] | None:
+        db = self._require()
+        async with db.execute(
+            """
+            SELECT * FROM ops_briefs
+            WHERE day = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (day,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+

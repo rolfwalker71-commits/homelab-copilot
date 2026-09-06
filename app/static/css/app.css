@@ -4670,3 +4670,8 @@ button.ops-next-start:focus-visible {
 html[data-chrome="android"] button.ops-next-start {
   opacity: 1;
 }
+
+.ops-lessons-group {
+  background: transparent;
+  border: 0;
+}

@@ -11,8 +11,8 @@ from typing import Any, Awaitable, Callable
 from app.core.locale import BERLIN, format_de, iso_utc, now_berlin
 from app.core.snapshots import guest_can_snapshot
 from backup_verifier.cron import preset_to_cron
-from backup_verifier.planner import classify_stacks, parse_hhmm
-from backup_verifier.scheduler import next_run_after, schedule_clock_hm
+from backup_verifier.planner import classify_stacks, format_hhmm, parse_hhmm
+from backup_verifier.scheduler import minute_key, next_run_after, schedule_clock_hm
 from ops_agent.config import get_ops_settings
 from ops_agent.planner import (
     DURATION_BACKUP,
@@ -22,10 +22,23 @@ from ops_agent.planner import (
     KIND_RESTORE,
     Occupied,
     PlannedWindow,
+    REASON_BACKUP_CHAIN,
     REASON_BACKUP_OVERRUN,
+    REASON_DEST_FULL,
     REASON_HOST_GONE,
+    REASON_HOST_OFFLINE_CHAIN,
+    REASON_HUNG,
     REASON_OUT_OF_FOCUS,
+    REASON_CAPACITY_WARN,
+    REASON_COPILOT_DATA,
+    REASON_EOL_PROPOSE,
+    REASON_OFFLINE_TODAY,
     REASON_PATCH_OVERRUN,
+    REASON_PRUNE,
+    REASON_REBOOT_DONE,
+    REASON_REBOOT_NO_API,
+    REASON_REBOOT_WAIT,
+    REASON_SMART_WARN,
     SOURCE_AGENT,
     SOURCE_DRILL,
     SOURCE_INGESTED,
@@ -36,19 +49,62 @@ from ops_agent.planner import (
     STATUS_SKIPPED,
     STATUS_WAITING,
     abs_minutes,
+    clock_of,
     day_start,
     detect_overrun_shift,
     dt_from_abs,
     duration_for,
+    next_free_slot,
+    snap_10_minutes,
     ingest_schedule_windows,
     occupied_from_windows,
     propose_windows,
     Need,
 )
 from ops_agent.hosts import collect_live_hosts, split_inventory_changes
+from ops_agent.activity import (
+    ACTION_APPLY,
+    ACTION_BACKUP_CHAIN,
+    ACTION_BRIEF,
+    ACTION_PLANNED,
+    ACTION_PRUNE,
+    ACTION_REBOOT,
+    ACTION_ROLLBACK,
+    ACTION_SHIFTED,
+    ACTION_SKIPPED,
+    ACTION_STARTED,
+    ACTION_WARN,
+    RESULT_FAIL,
+    RESULT_INFO,
+    RESULT_OK,
+    RESULT_SKIP,
+    RESULT_WAIT,
+    build_evening_brief,
+    serialize_activity,
+)
 from ops_agent.actor import actor_fields, agent_phrase, by_agent
+from ops_agent.capacity import (
+    collect_dests,
+    dest_is_critically_full,
+    estimate_bytes_from_runs,
+    job_fits,
+    warn_lines,
+)
 from ops_agent.image_snaps import ImageSnap, remember_after_image, snap_from_job_result
-from ops_agent.policy import ConfirmPolicy, in_job_scope
+from ops_agent.lessons import (
+    classify_error_class,
+    error_short,
+    host_kind_of,
+    job_kind_of,
+    next_action_de,
+    package_names,
+    packages_key,
+    scan_apply_note,
+    serialize_lesson,
+    should_hold,
+    why_de,
+)
+from ops_agent.policy import ConfirmPolicy, in_job_scope, is_hard_stop, needs_human
 from ops_agent.rollback import (
     job_kind_label_de,
     plan_rollback,
@@ -68,6 +124,13 @@ logger = logging.getLogger(__name__)
 
 StartBackupFn = Callable[[dict[str, Any]], Awaitable[str | None]]
 StartPatchFn = Callable[[dict[str, Any]], Awaitable[tuple[bool, str, str | None]]]
+RebootFn = Callable[[str], Awaitable[dict[str, Any] | None]]
+PruneFn = Callable[[str], Awaitable[dict[str, Any] | None]]
+DestUsageFn = Callable[[], Awaitable[dict[str, Any]]]
+SmartFn = Callable[[], Awaitable[list[dict[str, Any]]]]
+
+COPILOT_DATA_ID = "copilot:data"
+COPILOT_STACK_HINTS = ("homelab-copilot", "hlops-data", "copilot-data")
 
 
 @dataclass
@@ -96,6 +159,10 @@ class OpsEngine:
         notify_shift: Callable[[str, str], Awaitable[None]] | None = None,
         delete_guest_snap: Callable[[str, str], Awaitable[Any]] | None = None,
         rollback_guest_snap: Callable[[str, str], Awaitable[Any]] | None = None,
+        reboot_host: RebootFn | None = None,
+        prune_images: PruneFn | None = None,
+        dest_usage: DestUsageFn | None = None,
+        smart_signals: SmartFn | None = None,
     ) -> None:
         self.store = store
         self._get_snapshot = get_snapshot
@@ -110,11 +177,50 @@ class OpsEngine:
         self._notify_shift = notify_shift
         self._delete_guest_snap = delete_guest_snap
         self._rollback_guest_snap = rollback_guest_snap
+        self._reboot_host = reboot_host
+        self._prune_images = prune_images
+        self._dest_usage = dest_usage
+        self._smart_signals = smart_signals
         self._lock = asyncio.Lock()
+        self._last_proactive = 0.0
 
     @staticmethod
     def _is_image_window(row: dict[str, Any]) -> bool:
         return str(row.get("bucket") or "") == "images" or str(row.get("kind") or "") == "image"
+
+    async def _log_activity(
+        self,
+        action: str,
+        *,
+        result: str = RESULT_INFO,
+        kind: str = "",
+        target_id: str = "",
+        target_name: str = "",
+        window_id: int | None = None,
+        detail: str = "",
+        row: dict[str, Any] | None = None,
+    ) -> None:
+        if row is not None:
+            target_id = target_id or str(row.get("target_id") or "")
+            target_name = target_name or str(row.get("target_name") or target_id)
+            kind = kind or str(row.get("kind") or "")
+            if window_id is None and row.get("id") is not None:
+                try:
+                    window_id = int(row["id"])
+                except (TypeError, ValueError):
+                    window_id = None
+        try:
+            await self.store.insert_activity(
+                action=action,
+                result=result,
+                kind=kind,
+                target_id=target_id,
+                target_name=target_name,
+                window_id=window_id,
+                detail=by_agent(detail) if detail else "",
+            )
+        except Exception:
+            logger.info("Tätigkeitslog nicht geschrieben", exc_info=True)
 
     async def settings(self) -> EffectiveSettings:
         env = get_ops_settings()
@@ -164,6 +270,8 @@ class OpsEngine:
         if not known:
             if live:
                 await self.store.seed_known_hosts(live)
+                await self._prompt_missing_backups(live)
+                await self._prompt_copilot_data()
             return []
         pending = await self.store.list_scope_prompts(status="waiting")
         pending_ids = {str(p.get("target_id") or "") for p in pending if p.get("target_id")}
@@ -201,13 +309,17 @@ class OpsEngine:
                 kind="appeared",
                 reason=(
                     f"Neuer Host/Gast {host.get('name') or tid} — "
-                    "automatisch zu Patching? zu Image-Update?"
+                    "automatisch zu Patching? zu Image-Update? Backup einplanen?"
                 ),
             )
             if pid:
                 row = await self.store.get_scope_prompt(pid)
                 if row:
                     created.append(row)
+                    await self._notify_waiting(
+                        "Wartet auf dich",
+                        f"Neuer Host/Gast {host.get('name') or tid}.",
+                    )
         for tid in sorted(disappeared):
             host = known_by_id.get(tid) or {}
             name = str(host.get("target_name") or tid)
@@ -257,6 +369,8 @@ class OpsEngine:
                     reason="Wieder weg, bevor du entschieden hast.",
                 )
                 await self.store.mark_known_gone(tid)
+        await self._prompt_missing_backups(live)
+        await self._prompt_copilot_data()
         return created
 
     async def _release_ok_image_snap(self) -> None:
@@ -326,6 +440,7 @@ class OpsEngine:
         *,
         patch: bool | None = None,
         image: bool | None = None,
+        backup: bool | None = None,
         drop: bool | None = None,
     ) -> dict[str, Any]:
         row = await self.store.get_scope_prompt(prompt_id)
@@ -346,9 +461,32 @@ class OpsEngine:
             policy.patch_scope_ids = patch_ids
             policy.image_scope_ids = image_ids
             await self.store.save_policy(policy)
+            await self.store.set_skip_backup(tid, skip=not bool(backup))
+            if backup:
+                await self._plan_backup_for_host(tid, str(row.get("target_name") or tid))
             await self.store.answer_scope_prompt(
-                prompt_id, patch=want_patch, image=want_image
+                prompt_id, patch=want_patch, image=want_image, backup=bool(backup)
             )
+        elif kind == "no_backup":
+            await self.store.set_skip_backup(tid, skip=not bool(backup))
+            if backup:
+                if tid == COPILOT_DATA_ID:
+                    planned = await self._plan_copilot_data_if_possible()
+                    if not planned:
+                        await self._log_activity(
+                            ACTION_WARN,
+                            result=RESULT_WAIT,
+                            kind=KIND_BACKUP,
+                            target_id=tid,
+                            target_name="Copilot /data",
+                            detail=REASON_COPILOT_DATA
+                            + " Kein bestehender Copilot-Backup-Job — nichts erfunden.",
+                        )
+                else:
+                    await self._plan_backup_for_host(
+                        tid, str(row.get("target_name") or tid)
+                    )
+            await self.store.answer_scope_prompt(prompt_id, backup=bool(backup))
         elif kind == "disappeared":
             if drop:
                 policy.patch_scope_ids = [
@@ -472,6 +610,10 @@ class OpsEngine:
                         STATUS_DONE,
                         STATUS_FAILED,
                     ):
+                        upserted.append(existing)
+                        continue
+                    existing_reason = str(existing.get("reason") or "")
+                    if "Anschluss" in existing_reason or "durch Agent" in existing_reason:
                         upserted.append(existing)
                         continue
                     await self.store.update_window(
@@ -687,6 +829,17 @@ class OpsEngine:
                 )
             wid = await self.store.insert_window(row)
             created.append(await self.store.get_window(wid) or row)
+            await self._log_activity(
+                ACTION_PLANNED,
+                result=RESULT_OK if str(row.get("status") or "") == STATUS_ACCEPTED else RESULT_WAIT,
+                row=created[-1],
+                detail=str(row.get("reason") or "Fenster geplant"),
+            )
+            if str(row.get("status") or "") == STATUS_WAITING:
+                await self._notify_waiting(
+                    "Wartet auf dich",
+                    f"{row.get('target_name') or row.get('target_id')}: {row.get('reason') or 'Bestätigung'}",
+                )
             if (
                 settings.enabled
                 and win.kind == KIND_BACKUP
@@ -705,6 +858,12 @@ class OpsEngine:
                 reason = str(row.get("reason") or "").strip()
                 row["reason"] = by_agent(reason) if reason else agent_phrase("window_planned")
             await self.store.insert_window(row)
+            await self._log_activity(
+                ACTION_SKIPPED,
+                result=RESULT_SKIP,
+                row=row,
+                detail=str(row.get("reason") or "Übersprungen"),
+            )
         return {
             "ok": True,
             "created": created,
@@ -824,9 +983,11 @@ class OpsEngine:
             )
         await self.store.update_window(int(window["id"]), schedule_id=sid)
 
-    async def watch_and_shift(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+    async def watch_and_shift(
+        self, *, now: datetime | None = None, force: bool = False
+    ) -> list[dict[str, Any]]:
         settings = await self.settings()
-        if not settings.enabled or not settings.shift_auto:
+        if not force and (not settings.enabled or not settings.shift_auto):
             return []
         now = now or now_berlin()
         origin = day_start(now)
@@ -900,6 +1061,12 @@ class OpsEngine:
                     new_start_hm=rec["new_start_hm"],
                     reason=by_agent(rec["reason"]),
                 )
+                await self._log_activity(
+                    ACTION_SHIFTED,
+                    result=RESULT_OK,
+                    row=row,
+                    detail=f"{rec['old_start_hm']} → {rec['new_start_hm']}: {rec['reason']}",
+                )
                 if row.get("schedule_id") and moved.kind == KIND_BACKUP:
                     await self._rewrite_schedule_time(
                         int(row["schedule_id"]), moved.start_hm
@@ -909,6 +1076,7 @@ class OpsEngine:
                 rec["window_id"] = int(row["id"])
                 rec["target_name"] = row.get("target_name")
                 rec["kind"] = row.get("kind")
+                rec["reason"] = by_agent(rec.get("reason") or "")
                 shifts.append(rec)
                 if self._notify_shift is not None:
                     try:
@@ -952,6 +1120,7 @@ class OpsEngine:
             return []
         now = now or now_berlin()
         started: list[dict[str, Any]] = []
+        await self._warn_capacity()
         windows = await self.store.list_windows(statuses=[STATUS_ACCEPTED])
         online, disk, running, no_snap = await self._host_maps()
         for row in windows:
@@ -962,12 +1131,36 @@ class OpsEngine:
                 continue
             tid = str(row.get("target_id") or "")
             kind = str(row.get("kind") or "")
-            if kind == KIND_BACKUP and row.get("schedule_id"):
-                # Existing scheduler fires these — only mark running when a job appears.
-                continue
             if tid in running:
                 continue
+            if kind == KIND_BACKUP:
+                if self._any_backup_running():
+                    continue
+                skip = await self._backup_skip_reason(
+                    row, online=online, disk=disk, running=running
+                )
+                if skip:
+                    await self._apply_backup_skip(row, skip, now=now)
+                    continue
+                job_id = await self._start_backup(row)
+                await self.store.update_window(
+                    int(row["id"]), status=STATUS_RUNNING, job_id=job_id
+                )
+                await self._mark_schedule_used(row)
+                await self._log_activity(
+                    ACTION_STARTED,
+                    result=RESULT_OK,
+                    row=row,
+                    detail="Backup gestartet",
+                )
+                started.append({**row, "status": STATUS_RUNNING, "job_id": job_id})
+                running.add(tid)
+                await self._pack_backup_chain(
+                    now=now, start_min=self._chain_cursor(now)
+                )
+                continue
             if not online.get(tid, True):
+                await self._flag_offline_visible(row, kind_label="Patch")
                 continue
             if disk.get(tid):
                 continue
@@ -989,12 +1182,23 @@ class OpsEngine:
                     continue
                 if any(j for j in self._list_patch_jobs() if str(getattr(j, "kind", "")) in ("apply", "image-apply")):
                     continue
+                held = await self._hold_for_lesson(row)
+                if held:
+                    continue
                 if self._is_image_window(row):
                     await self._release_ok_image_snap()
                 ok, err, job_id = await self._start_patch(row)
                 if ok:
                     await self.store.update_window(
                         int(row["id"]), status=STATUS_RUNNING, job_id=job_id
+                    )
+                    await self._note_scan_on_job(row, job_id)
+                    await self._log_activity(
+                        ACTION_STARTED,
+                        result=RESULT_OK,
+                        row=row,
+                        kind="image" if self._is_image_window(row) else KIND_PATCH,
+                        detail="Apply gestartet",
                     )
                     started.append({**row, "status": STATUS_RUNNING, "job_id": job_id})
                 else:
@@ -1005,12 +1209,6 @@ class OpsEngine:
                         job_id=job_id,
                         error=err or "Patch fehlgeschlagen.",
                     )
-            elif kind == KIND_BACKUP:
-                job_id = await self._start_backup(row)
-                await self.store.update_window(
-                    int(row["id"]), status=STATUS_RUNNING, job_id=job_id
-                )
-                started.append({**row, "status": STATUS_RUNNING, "job_id": job_id})
         return started
 
     async def _skip_remaining_patches(self, reason: str) -> None:
@@ -1147,6 +1345,19 @@ class OpsEngine:
             status="ok" if rb_ok else "failed",
             error="" if rb_ok else rb_err,
         )
+        await self._log_activity(
+            ACTION_ROLLBACK,
+            result=RESULT_OK if rb_ok else RESULT_FAIL,
+            kind=str(row.get("kind") or KIND_PATCH),
+            target_id=target_id,
+            target_name=target_name,
+            window_id=window_id,
+            detail=(
+                f"Rollback auf {plan.snap_name}"
+                if rb_ok
+                else f"Rollback fehlgeschlagen: {rb_err}"
+            ),
+        )
         if rb_ok:
             self._log_job_line(
                 job_id,
@@ -1204,6 +1415,7 @@ class OpsEngine:
         )
         if self._is_image_window(row) and job is not None:
             await self._remember_image_snap(row, job)
+        await self._record_lesson(row, job=job, job_id=job_id, error=error, rollback=rec)
         if halt_wave:
             await self.store.save_settings(patch_halted=True)
             await self._skip_remaining_patches(agent_phrase("wave_stopped"))
@@ -1222,6 +1434,7 @@ class OpsEngine:
             return None
 
     async def sync_jobs(self) -> None:
+        finished_backup = False
         windows = await self.store.list_windows(statuses=[STATUS_RUNNING, STATUS_ACCEPTED])
         backup_jobs = {str(getattr(j, "id", "")): j for j in self._list_backup_jobs()}
         # Also look at finished jobs still in registry
@@ -1265,12 +1478,28 @@ class OpsEngine:
                 st = str(getattr(job, "status", "") or "")
                 if st in ("success", "partial"):
                     await self.store.update_window(int(row["id"]), status=STATUS_DONE)
+                    await self._log_activity(
+                        ACTION_APPLY,
+                        result=RESULT_OK,
+                        kind=KIND_BACKUP,
+                        row=row,
+                        detail="Backup erfolgreich",
+                    )
+                    finished_backup = True
                 elif st == "failed":
                     await self.store.update_window(
                         int(row["id"]),
                         status=STATUS_FAILED,
                         reason=str(getattr(job, "error", "") or "Backup fehlgeschlagen."),
                     )
+                    await self._log_activity(
+                        ACTION_APPLY,
+                        result=RESULT_FAIL,
+                        kind=KIND_BACKUP,
+                        row=row,
+                        detail=str(getattr(job, "error", "") or "Backup fehlgeschlagen."),
+                    )
+                    finished_backup = True
             elif kind == KIND_PATCH:
                 job = next((j for j in patch_all if str(j.id) == job_id), None)
                 if job is None:
@@ -1281,6 +1510,16 @@ class OpsEngine:
                     await self.store.save_settings(patch_halted=False)
                     if self._is_image_window(row):
                         await self._remember_image_snap(row, job)
+                    await self._log_activity(
+                        ACTION_APPLY,
+                        result=RESULT_OK,
+                        kind="image" if self._is_image_window(row) else KIND_PATCH,
+                        row=row,
+                        detail="Apply erfolgreich",
+                    )
+                    await self._maybe_reboot_after_apply(row, job)
+                    if self._is_image_window(row):
+                        await self._maybe_prune_after_image(row)
                 elif st == "failed":
                     await self._fail_patch_window(
                         row,
@@ -1288,13 +1527,1163 @@ class OpsEngine:
                         job_id=job_id,
                         error=str(getattr(job, "error", "") or "Patch fehlgeschlagen."),
                     )
+                    await self._log_activity(
+                        ACTION_APPLY,
+                        result=RESULT_FAIL,
+                        kind="image" if self._is_image_window(row) else KIND_PATCH,
+                        row=row,
+                        detail=str(getattr(job, "error", "") or "Patch fehlgeschlagen."),
+                    )
+        if finished_backup:
+            await self._advance_backup_chain()
+            await self._maybe_refresh_brief()
+        await self._flag_hung_jobs()
 
-    async def start_now(self, window_id: int) -> dict[str, Any]:
+    def _window_job_kind(self, row: dict[str, Any]) -> str:
+        return job_kind_of(kind=str(row.get("kind") or ""), bucket=str(row.get("bucket") or ""))
+
+    def _window_packages(self, row: dict[str, Any]) -> list[str]:
+        return package_names(row.get("packages"))
+
+    async def _hold_for_lesson(self, row: dict[str, Any]) -> str | None:
+        names = self._window_packages(row)
+        hold = should_hold(
+            await self.store.list_lessons(limit=80),
+            packages_key=packages_key(names, bucket=str(row.get("bucket") or "")),
+            host_kind=host_kind_of(str(row.get("target_id") or "")),
+            job_kind=self._window_job_kind(row),
+        )
+        if hold is None:
+            return None
+        await self.store.update_window(
+            int(row["id"]),
+            status=STATUS_WAITING,
+            needs_confirm=True,
+            reason=hold.reason,
+        )
+        return hold.reason
+
+    async def _record_lesson(
+        self,
+        row: dict[str, Any],
+        *,
+        job: Any,
+        job_id: str | None,
+        error: str,
+        rollback: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        names = self._window_packages(row)
+        bucket = str(row.get("bucket") or "")
+        host_kind = host_kind_of(str(row.get("target_id") or ""))
+        job_kind = self._window_job_kind(row)
+        err_class = classify_error_class(error)
+        rollback_ran = str((rollback or {}).get("status") or "") == "ok"
+        why = why_de(err_class)
+        nxt = next_action_de(host_kind=host_kind, job_kind=job_kind)
+        rec = await self.store.insert_lesson(
+            window_id=int(row["id"]) if row.get("id") is not None else None,
+            job_id=str(job_id or row.get("job_id") or ""),
+            target_id=str(row.get("target_id") or ""),
+            target_name=str(row.get("target_name") or ""),
+            host_kind=host_kind,
+            job_kind=job_kind,
+            packages=names,
+            packages_key=packages_key(names, bucket=bucket),
+            error_class=err_class,
+            error_short=error_short(error),
+            why_de=why,
+            next_de=nxt,
+            rollback_ran=rollback_ran,
+        )
+        line = by_agent(f"Lektion: {why.rstrip('.')} {nxt}")
+        self._log_job_line(str(job_id or row.get("job_id") or ""), line)
+        self._attach_job_lesson(job, rec)
+        return rec
+
+    def _attach_job_lesson(self, job: Any, rec: dict[str, Any]) -> None:
+        if job is None:
+            return
+        prev = dict(getattr(job, "result", None) or {})
+        prev["lesson"] = serialize_lesson(rec)
+        try:
+            job.result = prev
+        except Exception:
+            logger.info("Lektion am Job-Result nicht gesetzt", exc_info=True)
+
+    async def _note_scan_on_job(self, row: dict[str, Any], job_id: str | None) -> None:
+        """Surface reboot/breaks only if the latest scan already has them. No USN fetch."""
+        note = await self._scan_note_for_window(row)
+        if not note:
+            return
+        jid = str(job_id or row.get("job_id") or "")
+        self._log_job_line(jid, by_agent(note))
+        job = self._lookup_patch_job(jid)
+        if job is None:
+            return
+        prev = dict(getattr(job, "result", None) or {})
+        prev["scan_note"] = note
+        try:
+            job.result = prev
+        except Exception:
+            logger.info("Scan-Hinweis am Job nicht gesetzt", exc_info=True)
+
+    async def _scan_note_for_window(self, row: dict[str, Any]) -> str | None:
+        tid = str(row.get("target_id") or "")
+        if not tid:
+            return None
+        try:
+            from patcher.module import _get_store as _pstore
+
+            pstore = _pstore()
+            if pstore is None:
+                return None
+            scan = await pstore.latest_scan_for_target(tid)
+            if not scan:
+                return None
+            pkgs: list[dict[str, Any]] = []
+            sid = scan.get("id")
+            if sid is not None and hasattr(pstore, "list_packages"):
+                try:
+                    pkgs = list(await pstore.list_packages(int(sid)))
+                except Exception:
+                    pkgs = []
+            return scan_apply_note(
+                job_packages=self._window_packages(row),
+                reboot_required=bool(scan.get("reboot_required")),
+                scan_packages=pkgs,
+            )
+        except Exception:
+            return None
+
+    def _guest_kinds(self) -> frozenset[str]:
+        return frozenset({"lxc", "qemu", "manual"})
+
+    async def _covered_backup_ids(self) -> set[str]:
+        covered: set[str] = set()
+        bstore = self._get_backup_store()
+        if bstore is not None:
+            try:
+                for row in await bstore.list_schedules():
+                    pid = str(row.get("parent_id") or "")
+                    if pid:
+                        covered.add(pid)
+            except Exception:
+                pass
+        for w in await self.store.list_windows(
+            statuses=[STATUS_ACCEPTED, STATUS_WAITING, STATUS_RUNNING]
+        ):
+            if str(w.get("kind") or "") == KIND_BACKUP:
+                tid = str(w.get("target_id") or "")
+                if tid:
+                    covered.add(tid)
+        return covered
+
+    async def _prompt_missing_backups(self, live: list[dict[str, Any]]) -> None:
+        covered = await self._covered_backup_ids()
+        known = {str(h.get("target_id") or ""): h for h in await self.store.list_known_hosts()}
+        for host in live:
+            kind = str(host.get("kind") or "")
+            if kind not in self._guest_kinds():
+                continue
+            tid = str(host.get("id") or host.get("target_id") or "")
+            if not tid or tid in covered:
+                continue
+            rec = known.get(tid) or {}
+            if rec.get("skip_backup") is not None:
+                continue
+            waiting = await self.store.find_waiting_prompt(tid)
+            if waiting:
+                continue
+            name = str(host.get("name") or tid)
+            pid = await self.store.insert_scope_prompt(
+                target_id=tid,
+                target_name=name,
+                kind="no_backup",
+                reason=f"{name} hat keinen Backup-Plan. So gewollt?",
+            )
+            if pid:
+                await self._notify_waiting(
+                    "Wartet auf dich",
+                    f"{name} hat keinen Backup-Plan.",
+                )
+
+    async def _plan_backup_for_host(self, target_id: str, target_name: str) -> list[dict[str, Any]]:
+        snap = self._get_snapshot()
+        stacks: list[dict[str, Any]] = []
+        if snap is not None:
+            try:
+                discovered = await self._list_backup_stacks(snap)
+                stacks = [
+                    r
+                    for r in discovered
+                    if str(r.get("parent_id") or "") == target_id
+                    and str(r.get("stack") or "")
+                ]
+            except Exception:
+                stacks = []
+        created: list[dict[str, Any]] = []
+        now = now_berlin()
+        settings = await self.settings()
+        existing = await self.store.list_windows(
+            statuses=[STATUS_ACCEPTED, STATUS_WAITING, STATUS_RUNNING]
+        )
+        occupied = self._occupied_from_rows(existing, now)
+        cursor = abs_minutes(snap_10_minutes(now + timedelta(minutes=9)), day_start(now))
+        for item in stacks:
+            stack = str(item.get("stack") or "")
+            open_w = await self.store.find_open_for_target(
+                kind=KIND_BACKUP, target_id=target_id, stack=stack
+            )
+            if open_w:
+                continue
+            try:
+                start_min = next_free_slot(
+                    target_id=target_id,
+                    kind=KIND_BACKUP,
+                    duration_min=DURATION_BACKUP,
+                    occupied=occupied,
+                    start_min=cursor,
+                    quiet_start=settings.quiet_start,
+                    quiet_end=settings.quiet_end,
+                    require_quiet=False,
+                )
+            except RuntimeError:
+                continue
+            row = {
+                "kind": KIND_BACKUP,
+                "target_id": target_id,
+                "target_name": target_name or str(item.get("guest_name") or target_id),
+                "stack": stack,
+                "bucket": KIND_BACKUP,
+                "start_iso": iso_utc(dt_from_abs(now, start_min)),
+                "start_hm": format_hhmm(clock_of(start_min)),
+                "duration_min": DURATION_BACKUP,
+                "status": STATUS_ACCEPTED,
+                "source": SOURCE_AGENT,
+                "engine": str(item.get("engine") or "tar"),
+                "reason": by_agent("Backup-Fenster nach deiner Bestätigung geplant."),
+            }
+            wid = await self.store.insert_window(row)
+            fresh = await self.store.get_window(wid)
+            if fresh:
+                await self._ensure_backup_schedule(fresh, now)
+                created.append(fresh)
+                occupied.append(
+                    Occupied(
+                        target_id=target_id,
+                        kind=KIND_BACKUP,
+                        start_min=start_min,
+                        duration_min=DURATION_BACKUP,
+                        global_backup=True,
+                        label=stack,
+                    )
+                )
+                cursor = start_min + DURATION_BACKUP
+        await self._pack_backup_chain(now=now)
+        return created
+
+    def _job_age_seconds(self, job: Any) -> float:
+        created = float(getattr(job, "created_at", 0) or 0)
+        if not created:
+            return 0.0
+        start = datetime.fromtimestamp(created, tz=BERLIN)
+        return max(0.0, (now_berlin() - start).total_seconds())
+
+    def _hung_limit_seconds(self, kind: str) -> float:
+        if kind in ("apply", "image-apply", "apply-batch"):
+            try:
+                from patcher.config import get_patcher_settings
+
+                return float(get_patcher_settings().patcher_apply_timeout)
+            except Exception:
+                return 2 * 3600.0
+        return 3 * 3600.0
+
+    def _job_is_hung(self, job: Any) -> bool:
+        kind = str(getattr(job, "kind", "") or "")
+        limit = self._hung_limit_seconds(kind if kind in ("apply", "image-apply") else "backup")
+        return self._job_age_seconds(job) > limit
+
+    def _any_backup_running(self) -> bool:
+        for job in self._list_backup_jobs():
+            kind = str(getattr(job, "kind", "") or "backup")
+            if kind not in (KIND_BACKUP, ""):
+                continue
+            if self._job_is_hung(job):
+                continue
+            return True
+        return False
+
+    async def _backup_skip_reason(
+        self,
+        row: dict[str, Any],
+        *,
+        online: dict[str, bool],
+        disk: dict[str, bool],
+        running: set[str],
+    ) -> str | None:
+        tid = str(row.get("target_id") or "")
+        if tid in running:
+            return "Auf diesem Ziel läuft bereits ein Auftrag."
+        if disk.get(tid):
+            return REASON_DEST_FULL
+        if not online.get(tid, True):
+            return REASON_HOST_OFFLINE_CHAIN
+        dest_skip = await self._dest_skip_for_row(row)
+        if dest_skip:
+            return dest_skip
+        return None
+
+    async def _apply_backup_skip(
+        self, row: dict[str, Any], reason: str, *, now: datetime
+    ) -> None:
+        tid = str(row.get("target_id") or "")
+        unexpected_offline = reason == REASON_HOST_OFFLINE_CHAIN and (
+            REASON_HOST_OFFLINE_CHAIN not in (row.get("gates") or [])
+            and (row.get("extra") or {}).get("planned_online", True)
+        )
+        if reason == REASON_DEST_FULL:
+            await self.store.update_window(
+                int(row["id"]), status=STATUS_SKIPPED, reason=reason
+            )
+            await self._record_lesson(
+                row, job=None, job_id=None, error="Ziel voll", rollback=None
+            )
+            await self._log_activity(
+                ACTION_SKIPPED,
+                result=RESULT_SKIP,
+                row=row,
+                detail=reason,
+            )
+        elif reason == REASON_HOST_OFFLINE_CHAIN:
+            await self._flag_offline_visible(row, kind_label="Backup")
+        else:
+            await self.store.update_window(int(row["id"]), reason=by_agent(reason))
+            await self._log_activity(
+                ACTION_SKIPPED,
+                result=RESULT_SKIP,
+                row=row,
+                detail=reason,
+            )
+        if unexpected_offline and reason == REASON_HOST_OFFLINE_CHAIN:
+            await self._record_lesson(
+                row, job=None, job_id=None, error="Host offline", rollback=None
+            )
+        await self._pack_backup_chain(now=now, start_min=self._chain_cursor(now))
+        _ = tid
+
+    def _chain_cursor(self, now: datetime) -> int:
+        return abs_minutes(
+            snap_10_minutes(now + timedelta(minutes=10)), day_start(now)
+        )
+
+    async def _pack_backup_chain(
+        self, *, now: datetime, start_min: int | None = None
+    ) -> list[dict[str, Any]]:
+        settings = await self.settings()
+        rows = [
+            w
+            for w in await self.store.list_windows(statuses=[STATUS_ACCEPTED])
+            if str(w.get("kind") or "") == KIND_BACKUP
+        ]
+        rows.sort(key=self._accepted_start_order)
+        if not rows:
+            return []
+        origin = day_start(now)
+        others = [
+            w
+            for w in await self.store.list_windows(
+                statuses=[STATUS_ACCEPTED, STATUS_WAITING, STATUS_RUNNING]
+            )
+            if w.get("id") not in {r.get("id") for r in rows}
+        ]
+        occupied = self._occupied_from_rows(others, now)
+        cursor = start_min
+        pack = rows
+        if cursor is None:
+            cursor = self._row_abs(rows[0], origin) + int(rows[0].get("duration_min") or DURATION_BACKUP)
+            pack = rows[1:]
+        shifts: list[dict[str, Any]] = []
+        for row in pack:
+            dur = int(row.get("duration_min") or DURATION_BACKUP)
+            try:
+                new_min = next_free_slot(
+                    target_id=str(row.get("target_id") or ""),
+                    kind=KIND_BACKUP,
+                    duration_min=dur,
+                    occupied=occupied,
+                    start_min=cursor,
+                    quiet_start=settings.quiet_start,
+                    quiet_end=settings.quiet_end,
+                    require_quiet=False,
+                )
+            except RuntimeError:
+                continue
+            old_iso = str(row.get("start_iso") or "")
+            old_hm = str(row.get("start_hm") or "")
+            new_dt = dt_from_abs(now, new_min)
+            new_iso = iso_utc(new_dt)
+            new_hm = format_hhmm(clock_of(new_min))
+            await self.store.update_window(
+                int(row["id"]),
+                start_iso=new_iso,
+                start_hm=new_hm,
+                reason=REASON_BACKUP_CHAIN,
+            )
+            if old_iso != new_iso or old_hm != new_hm:
+                await self.store.add_shift(
+                    int(row["id"]),
+                    old_start_iso=old_iso,
+                    old_start_hm=old_hm,
+                    new_start_iso=new_iso,
+                    new_start_hm=new_hm,
+                    reason=REASON_BACKUP_CHAIN,
+                )
+                await self._log_activity(
+                    ACTION_BACKUP_CHAIN,
+                    result=RESULT_OK,
+                    row=row,
+                    detail=f"{old_hm} → {new_hm}",
+                )
+                rec = {
+                    "window_id": int(row["id"]),
+                    "old_start_hm": old_hm,
+                    "new_start_hm": new_hm,
+                    "reason": REASON_BACKUP_CHAIN,
+                    "kind": KIND_BACKUP,
+                    "target_name": row.get("target_name"),
+                }
+                shifts.append(rec)
+            if row.get("schedule_id"):
+                await self._rewrite_schedule_time(int(row["schedule_id"]), new_hm)
+            occupied.append(
+                Occupied(
+                    target_id=str(row.get("target_id") or ""),
+                    kind=KIND_BACKUP,
+                    start_min=new_min,
+                    duration_min=dur,
+                    global_backup=True,
+                )
+            )
+            cursor = new_min + dur
+            if cursor % 10:
+                cursor += 10 - (cursor % 10)
+        return shifts
+
+    async def _advance_backup_chain(self) -> None:
+        if self._any_backup_running():
+            return
+        now = now_berlin()
+        online, disk, running, _ = await self._host_maps()
+        rows = [
+            w
+            for w in await self.store.list_windows(statuses=[STATUS_ACCEPTED])
+            if str(w.get("kind") or "") == KIND_BACKUP and not w.get("needs_confirm")
+        ]
+        rows.sort(key=self._accepted_start_order)
+        for row in rows:
+            skip = await self._backup_skip_reason(
+                row, online=online, disk=disk, running=running
+            )
+            if skip:
+                await self._apply_backup_skip(row, skip, now=now)
+                continue
+            try:
+                await self.start_now(int(row["id"]), replan=False)
+            except RuntimeError:
+                continue
+            await self._pack_backup_chain(now=now, start_min=self._chain_cursor(now))
+            return
+        await self._pack_backup_chain(now=now, start_min=self._chain_cursor(now))
+
+    async def _flag_hung_jobs(self) -> None:
+        now = now_berlin()
+        running = await self.store.list_windows(statuses=[STATUS_RUNNING])
+        jobs: list[Any] = []
+        jobs.extend(self._list_backup_jobs())
+        jobs.extend(self._list_patch_jobs())
+        by_id = {str(getattr(j, "id", "")): j for j in jobs}
+        for row in running:
+            job = by_id.get(str(row.get("job_id") or ""))
+            if job is None or not self._job_is_hung(job):
+                continue
+            if str(row.get("status") or "") == STATUS_WAITING:
+                continue
+            reason = by_agent(REASON_HUNG)
+            await self.store.update_window(
+                int(row["id"]),
+                status=STATUS_WAITING,
+                needs_confirm=True,
+                reason=reason,
+            )
+            await self._log_activity(
+                ACTION_WARN,
+                result=RESULT_WAIT,
+                row=row,
+                detail=REASON_HUNG,
+            )
+            await self._notify_waiting(
+                "Wartet auf dich",
+                f"{row.get('target_name') or row.get('target_id')}: Auftrag hängt.",
+            )
+
+    def _is_kernel_engine_row(self, row: dict[str, Any], job: Any) -> bool:
+        names = [n.lower() for n in self._window_packages(row)]
+        reasons = [str(r).lower() for r in (row.get("confirm_reasons") or [])]
+        if job is not None:
+            result = getattr(job, "result", None) or {}
+            for extra in result.get("packages") or []:
+                if isinstance(extra, str):
+                    names.append(extra.lower())
+                elif isinstance(extra, dict) and extra.get("name"):
+                    names.append(str(extra["name"]).lower())
+        tokens = ("kernel", "linux-image", "docker-ce", "docker.io", "containerd")
+        if any(any(t in n for t in tokens) for n in names):
+            return True
+        return any(r in ("kernel", "docker", "kernel-docker") for r in reasons)
+
+    async def _maybe_wait_reboot(self, row: dict[str, Any], job: Any) -> None:
+        await self._maybe_reboot_after_apply(row, job)
+
+    def _reboot_needs_confirm(self, row: dict[str, Any], job: Any, policy: ConfirmPolicy) -> bool:
+        if policy.confirm_nothing:
+            return False
+        reasons = list(row.get("confirm_reasons") or [])
+        if self._is_kernel_engine_row(row, job):
+            reasons = list({*reasons, "kernel", "docker"})
+        wait, _why = needs_human(
+            policy,
+            kind=KIND_PATCH,
+            bucket=str(row.get("bucket") or ""),
+            confirm_reasons=reasons,
+            tags=list((row.get("extra") or {}).get("tags") or row.get("tags") or []),
+            known_host=True,
+        )
+        return bool(wait)
+
+    async def _insert_notice_window(
+        self,
+        *,
+        target_id: str,
+        target_name: str,
+        bucket: str,
+        reason: str,
+        kind: str = KIND_PATCH,
+        needs_confirm: bool = True,
+    ) -> dict[str, Any] | None:
+        existing = await self.store.find_open_bucket(target_id=target_id, bucket=bucket)
+        if existing:
+            return existing
+        now = now_berlin()
+        wid = await self.store.insert_window(
+            {
+                "kind": kind,
+                "target_id": target_id,
+                "target_name": target_name,
+                "bucket": bucket,
+                "start_iso": iso_utc(now),
+                "start_hm": now.strftime("%H:%M"),
+                "duration_min": 10,
+                "status": STATUS_WAITING if needs_confirm else STATUS_DONE,
+                "needs_confirm": needs_confirm,
+                "source": SOURCE_AGENT,
+                "reason": by_agent(reason),
+            }
+        )
+        return await self.store.get_window(wid)
+
+    async def _maybe_reboot_after_apply(self, row: dict[str, Any], job: Any) -> None:
+        result = getattr(job, "result", None) if job is not None else None
+        reboot = bool(isinstance(result, dict) and result.get("reboot_required"))
+        if not reboot:
+            return
+        tid = str(row.get("target_id") or "")
+        name = str(row.get("target_name") or tid)
+        existing = await self.store.find_open_bucket(target_id=tid, bucket="reboot")
+        if existing:
+            return
+        policy = await self.policy()
+        if self._reboot_needs_confirm(row, job, policy):
+            await self._insert_notice_window(
+                target_id=tid,
+                target_name=name,
+                bucket="reboot",
+                reason=REASON_REBOOT_WAIT,
+            )
+            await self._log_activity(
+                ACTION_REBOOT,
+                result=RESULT_WAIT,
+                row=row,
+                detail=REASON_REBOOT_WAIT,
+            )
+            await self._notify_waiting("Wartet auf dich", f"{name}: Reboot nötig.")
+            return
+        await self._perform_reboot(row)
+
+    async def _perform_reboot(self, row: dict[str, Any]) -> dict[str, Any]:
+        tid = str(row.get("target_id") or "")
+        name = str(row.get("target_name") or tid)
+        if self._reboot_host is None:
+            notice = await self._insert_notice_window(
+                target_id=tid,
+                target_name=name,
+                bucket="reboot",
+                reason=REASON_REBOOT_NO_API,
+            )
+            await self._log_activity(
+                ACTION_REBOOT,
+                result=RESULT_WAIT,
+                row=row,
+                detail=REASON_REBOOT_NO_API,
+            )
+            await self._notify_waiting(
+                "Wartet auf dich",
+                f"{name}: Reboot nötig, keine API.",
+            )
+            return notice or row
+        try:
+            raw = await self._reboot_host(tid)
+        except Exception as exc:
+            raw = None
+            err = getattr(exc, "message", None) or str(exc)
+            notice = await self._insert_notice_window(
+                target_id=tid,
+                target_name=name,
+                bucket="reboot",
+                reason=f"{REASON_REBOOT_NO_API} {err}",
+            )
+            await self._log_activity(
+                ACTION_REBOOT,
+                result=RESULT_FAIL,
+                row=row,
+                detail=err,
+            )
+            await self._notify_waiting("Wartet auf dich", f"{name}: Reboot fehlgeschlagen.")
+            return notice or row
+        if not raw:
+            notice = await self._insert_notice_window(
+                target_id=tid,
+                target_name=name,
+                bucket="reboot",
+                reason=REASON_REBOOT_NO_API,
+            )
+            await self._log_activity(
+                ACTION_REBOOT,
+                result=RESULT_WAIT,
+                row=row,
+                detail=REASON_REBOOT_NO_API,
+            )
+            await self._notify_waiting(
+                "Wartet auf dich",
+                f"{name}: Reboot nötig, keine API.",
+            )
+            return notice or row
+        reason = by_agent(REASON_REBOOT_DONE)
+        if row.get("id") and str(row.get("bucket") or "") == "reboot":
+            await self.store.update_window(
+                int(row["id"]),
+                status=STATUS_DONE,
+                needs_confirm=False,
+                reason=reason,
+            )
+        else:
+            await self._insert_notice_window(
+                target_id=tid,
+                target_name=name,
+                bucket="reboot",
+                reason=REASON_REBOOT_DONE,
+                needs_confirm=False,
+            )
+        await self._log_activity(
+            ACTION_REBOOT,
+            result=RESULT_OK,
+            row=row,
+            detail=REASON_REBOOT_DONE,
+        )
+        return await self.store.find_open_bucket(target_id=tid, bucket="reboot") or row
+
+    async def _flag_offline_visible(self, row: dict[str, Any], *, kind_label: str) -> None:
+        tid = str(row.get("target_id") or "")
+        name = str(row.get("target_name") or tid)
+        reason = REASON_OFFLINE_TODAY.format(name=name).replace(
+            "Backup/Patch", kind_label
+        )
+        if str(row.get("status") or "") == STATUS_ACCEPTED:
+            await self.store.update_window(
+                int(row["id"]),
+                status=STATUS_SKIPPED,
+                reason=by_agent(reason),
+            )
+        notice = await self._insert_notice_window(
+            target_id=tid,
+            target_name=name,
+            bucket="offline",
+            reason=reason,
+            kind=str(row.get("kind") or KIND_BACKUP),
+        )
+        if not await self.store.has_activity_today(
+            action=ACTION_SKIPPED, target_id=tid, detail_contains="offline"
+        ):
+            await self._log_activity(
+                ACTION_SKIPPED,
+                result=RESULT_SKIP,
+                row=row,
+                detail=reason,
+            )
+            await self._notify_waiting("Wartet auf dich", reason)
+        _ = notice
+
+    async def _dest_payload(self) -> dict[str, Any]:
+        if self._dest_usage is not None:
+            try:
+                return await self._dest_usage() or {}
+            except Exception:
+                return {}
+        store = self._get_backup_store()
+        if store is None or not hasattr(store, "list_destinations"):
+            return {}
+        try:
+            from app.core.backup_storage import build_backup_storage
+
+            return await build_backup_storage(store)
+        except Exception:
+            return {}
+
+    async def _estimate_row_bytes(self, row: dict[str, Any]) -> int | None:
+        bstore = self._get_backup_store()
+        if bstore is None:
+            return None
+        fn = getattr(bstore, "list_runs_for_stack", None)
+        if fn is None:
+            return None
+        try:
+            runs = await fn(
+                str(row.get("target_id") or ""),
+                str(row.get("stack") or ""),
+                limit=8,
+            )
+        except Exception:
+            return None
+        return estimate_bytes_from_runs(runs or [])
+
+    async def _dest_skip_for_row(self, row: dict[str, Any]) -> str | None:
+        estimate = await self._estimate_row_bytes(row)
+        dests = collect_dests(await self._dest_payload())
+        for _label, usage in dests:
+            if dest_is_critically_full(usage, estimate=estimate):
+                return REASON_DEST_FULL
+            fits = job_fits(
+                usage.get("free_bytes") if usage.get("quota_known") else None,
+                estimate,
+            )
+            if fits is False:
+                return REASON_DEST_FULL
+        return None
+
+    async def _warn_capacity(self) -> None:
+        rows = [
+            w
+            for w in await self.store.list_windows(statuses=[STATUS_ACCEPTED])
+            if str(w.get("kind") or "") == KIND_BACKUP
+        ]
+        upcoming = 0
+        next_job: int | None = None
+        for row in rows:
+            est = await self._estimate_row_bytes(row)
+            if est:
+                upcoming += est
+                if next_job is None:
+                    next_job = est
+        dests = collect_dests(await self._dest_payload())
+        for line in warn_lines(dests, upcoming_bytes=upcoming, next_job_bytes=next_job):
+            if await self.store.has_activity_today(
+                action=ACTION_WARN, detail_contains=line[:40]
+            ):
+                continue
+            await self._log_activity(
+                ACTION_WARN,
+                result=RESULT_INFO,
+                kind=KIND_BACKUP,
+                detail=line,
+            )
+            await self._insert_notice_window(
+                target_id="dest:capacity",
+                target_name="Speicher",
+                bucket="capacity",
+                reason=f"{REASON_CAPACITY_WARN}: {line}",
+            )
+            await self._notify_waiting("Wartet auf dich", by_agent(line))
+
+    async def _warn_smart(self) -> None:
+        signals: list[dict[str, Any]] = []
+        if self._smart_signals is not None:
+            try:
+                signals = await self._smart_signals() or []
+            except Exception:
+                signals = []
+        else:
+            signals = await self._read_smart_signals()
+        for item in signals:
+            chip = str(item.get("chip") or "").lower()
+            health = str(item.get("health") or "").lower()
+            hot = chip in ("warn", "danger", "critical") or health in (
+                "failed",
+                "failing",
+                "prefail",
+                "pre-fail",
+            )
+            if not hot:
+                continue
+            disk = str(item.get("disk") or item.get("name") or "disk")
+            node = str(item.get("node") or "")
+            tid = f"smart:{node}:{disk}"
+            detail = (
+                f"{node} {disk}: SMART {item.get('health') or chip} "
+                f"— Backups laufen weiter."
+            )
+            if await self.store.has_activity_today(action=ACTION_WARN, target_id=tid):
+                continue
+            await self._log_activity(
+                ACTION_WARN,
+                result=RESULT_INFO,
+                target_id=tid,
+                target_name=f"{node} {disk}".strip(),
+                detail=detail,
+            )
+            await self._insert_notice_window(
+                target_id=tid,
+                target_name=f"{node} {disk}".strip() or "SMART",
+                bucket="smart",
+                reason=f"{REASON_SMART_WARN} {detail}",
+            )
+            await self._notify_waiting("Wartet auf dich", by_agent(detail))
+
+    async def _read_smart_signals(self) -> list[dict[str, Any]]:
+        try:
+            from app.main import app as fastapi_app
+
+            engine = getattr(fastapi_app.state, "discovery_engine", None)
+            snap = getattr(
+                getattr(fastapi_app.state, "topology_store", None), "snapshot", None
+            )
+        except Exception:
+            return []
+        if engine is None or snap is None:
+            return []
+        nodes = list(getattr(snap, "nodes", None) or [])
+        out: list[dict[str, Any]] = []
+        for node in nodes:
+            name = getattr(node, "name", None) or (
+                node.get("name") if isinstance(node, dict) else None
+            )
+            if not name or str(name).startswith("__"):
+                continue
+            try:
+                data = await engine.fetch_node_storage_health(str(name))
+            except Exception:
+                continue
+            for row in data.get("smart") or []:
+                if isinstance(row, dict):
+                    out.append({**row, "node": str(name)})
+        return out
+
+    async def _propose_eol(self) -> None:
+        snap = self._get_snapshot()
+        try:
+            from patcher.module import _get_store as _pstore
+            from patcher.targets import list_targets
+
+            pstore = _pstore()
+            if pstore is None or snap is None:
+                return
+            targets = await list_targets(pstore, snap)
+        except Exception:
+            return
+        for target in targets:
+            tid = str(getattr(target, "id", "") or "")
+            if not tid:
+                continue
+            try:
+                latest = await pstore.latest_scan_for_target(tid)
+            except Exception:
+                continue
+            if str((latest or {}).get("status") or "") != "success":
+                continue
+            ru = ((latest or {}).get("summary") or {}).get("release_upgrade") or {}
+            if not isinstance(ru, dict):
+                continue
+            headline = str(ru.get("headline") or ru.get("title") or "").strip()
+            if not headline:
+                continue
+            if await self.store.find_open_bucket(target_id=tid, bucket="eol"):
+                continue
+            if await self.store.has_activity_today(action=ACTION_WARN, target_id=tid, detail_contains="EOL"):
+                continue
+            name = str(getattr(target, "name", None) or tid)
+            reason = f"{REASON_EOL_PROPOSE} {headline}"
+            await self._insert_notice_window(
+                target_id=tid,
+                target_name=name,
+                bucket="eol",
+                reason=reason,
+            )
+            await self._log_activity(
+                ACTION_WARN,
+                result=RESULT_WAIT,
+                kind=KIND_PATCH,
+                target_id=tid,
+                target_name=name,
+                detail=reason,
+            )
+            await self._notify_waiting("Wartet auf dich", f"{name}: {headline}")
+
+    async def _maybe_prune_after_image(self, row: dict[str, Any]) -> None:
+        tid = str(row.get("target_id") or "")
+        if not tid:
+            return
+        open_img = [
+            w
+            for w in await self.store.list_windows(
+                statuses=[STATUS_ACCEPTED, STATUS_WAITING, STATUS_RUNNING]
+            )
+            if self._is_image_window(w) and str(w.get("target_id") or "") == tid
+        ]
+        if open_img:
+            return
+        today = now_berlin().date().isoformat()
+        failed = [
+            w
+            for w in await self.store.list_windows(statuses=[STATUS_FAILED])
+            if self._is_image_window(w)
+            and str(w.get("target_id") or "") == tid
+            and str(w.get("updated_at_iso") or w.get("start_iso") or "").startswith(today)
+        ]
+        if failed:
+            await self._log_activity(
+                ACTION_PRUNE,
+                result=RESULT_SKIP,
+                row=row,
+                kind="image",
+                detail="Image fehlgeschlagen — kein Prune.",
+            )
+            return
+        if await self.store.has_activity_today(
+            action=ACTION_PRUNE, target_id=tid, detail_contains="bereinigt"
+        ):
+            return
+        if self._prune_images is None:
+            return
+        try:
+            raw = await self._prune_images(tid)
+        except Exception as exc:
+            await self._log_activity(
+                ACTION_PRUNE,
+                result=RESULT_FAIL,
+                row=row,
+                kind="image",
+                detail=str(exc),
+            )
+            return
+        if not raw:
+            return
+        msg = str(raw.get("message") or REASON_PRUNE)
+        await self._log_activity(
+            ACTION_PRUNE,
+            result=RESULT_OK,
+            row=row,
+            kind="image",
+            detail=msg,
+        )
+
+    async def _copilot_backup_stack(self) -> dict[str, Any] | None:
+        snap = self._get_snapshot()
+        if snap is None:
+            return None
+        try:
+            stacks = await self._list_backup_stacks(snap)
+        except Exception:
+            return None
+        for row in stacks or []:
+            stack = str(row.get("stack") or "").lower()
+            if any(hint in stack for hint in COPILOT_STACK_HINTS):
+                return row
+        return None
+
+    async def _copilot_already_planned(self) -> bool:
+        if await self.store.find_open_for_target(
+            kind=KIND_BACKUP, target_id=COPILOT_DATA_ID, stack=""
+        ):
+            return True
+        for w in await self.store.list_windows(
+            statuses=[STATUS_ACCEPTED, STATUS_WAITING, STATUS_RUNNING]
+        ):
+            if str(w.get("kind") or "") != KIND_BACKUP:
+                continue
+            stack = str(w.get("stack") or "").lower()
+            tid = str(w.get("target_id") or "")
+            if tid == COPILOT_DATA_ID or any(h in stack for h in COPILOT_STACK_HINTS):
+                return True
+        bstore = self._get_backup_store()
+        if bstore is None:
+            return False
+        try:
+            for row in await bstore.list_schedules():
+                stack = str(row.get("stack") or "").lower()
+                pid = str(row.get("parent_id") or "")
+                if pid == COPILOT_DATA_ID or any(h in stack for h in COPILOT_STACK_HINTS):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    async def _prompt_copilot_data(self) -> None:
+        known = {
+            str(h.get("target_id") or ""): h
+            for h in await self.store.list_known_hosts()
+        }
+        rec = known.get(COPILOT_DATA_ID) or {}
+        if rec.get("skip_backup") is not None:
+            return
+        if await self._copilot_already_planned():
+            return
+        stack = await self._copilot_backup_stack()
+        if stack:
+            await self._plan_copilot_data_if_possible()
+            return
+        waiting = await self.store.find_waiting_prompt(COPILOT_DATA_ID)
+        if waiting:
+            return
+        await self.store.upsert_known_host(
+            target_id=COPILOT_DATA_ID,
+            target_name="Copilot /data",
+            kind="copilot",
+            gone=False,
+        )
+        pid = await self.store.insert_scope_prompt(
+            target_id=COPILOT_DATA_ID,
+            target_name="Copilot /data",
+            kind="no_backup",
+            reason=REASON_COPILOT_DATA,
+        )
+        if pid:
+            await self._log_activity(
+                ACTION_WARN,
+                result=RESULT_WAIT,
+                kind=KIND_BACKUP,
+                target_id=COPILOT_DATA_ID,
+                target_name="Copilot /data",
+                detail=REASON_COPILOT_DATA,
+            )
+            await self._notify_waiting("Wartet auf dich", REASON_COPILOT_DATA)
+
+    async def _plan_copilot_data_if_possible(self) -> list[dict[str, Any]]:
+        stack = await self._copilot_backup_stack()
+        if not stack:
+            return []
+        tid = str(stack.get("parent_id") or COPILOT_DATA_ID)
+        name = str(stack.get("guest_name") or "Copilot /data")
+        return await self._plan_backup_for_host(tid, name)
+
+    async def refresh_evening_brief(self, *, force: bool = False) -> dict[str, Any]:
+        now = now_berlin()
+        day = now.date().isoformat()
+        existing = await self.store.get_brief_for_day(day)
+        log = await self.store.list_activity(limit=300)
+        text = build_evening_brief(log, now=now)
+        if existing and existing.get("text") == text and not force:
+            return existing
+        saved = await self.store.save_brief(day=day, text=text)
+        await self._log_activity(
+            ACTION_BRIEF,
+            result=RESULT_OK,
+            detail=text,
+        )
+        return saved
+
+    async def _maybe_refresh_brief(self) -> None:
+        leftover = [
+            w
+            for w in await self.store.list_windows(
+                statuses=[STATUS_ACCEPTED, STATUS_RUNNING]
+            )
+            if str(w.get("kind") or "") == KIND_BACKUP
+        ]
+        if leftover:
+            return
+        now = now_berlin()
+        settings = await self.settings()
+        hm = now.strftime("%H:%M")
+        if hm < str(settings.quiet_start or "20:00"):
+            log = await self.store.list_activity(limit=20)
+            if not any(
+                r.get("action") in (ACTION_APPLY, ACTION_REBOOT, ACTION_SKIPPED)
+                for r in log
+            ):
+                return
+        await self.refresh_evening_brief()
+
+    async def _proactive_checks(self) -> None:
+        now = now_berlin().timestamp()
+        if now - self._last_proactive < 120:
+            return
+        self._last_proactive = now
+        try:
+            await self._warn_capacity()
+        except Exception:
+            logger.info("Kapazitätswarnung fehlgeschlagen", exc_info=True)
+        try:
+            await self._warn_smart()
+        except Exception:
+            logger.info("SMART-Warnung fehlgeschlagen", exc_info=True)
+        try:
+            await self._propose_eol()
+        except Exception:
+            logger.info("EOL-Vorschlag fehlgeschlagen", exc_info=True)
+
+    async def _notify_waiting(self, title: str, body: str) -> None:
+        if self._notify_shift is None:
+            return
+        try:
+            await self._notify_shift(title, body)
+        except Exception:
+            logger.info("Push für Wartet-auf-dich fehlgeschlagen", exc_info=True)
+
+    def _accepted_start_order(self, row: dict[str, Any]) -> tuple[int, str, int]:
+        kind = str(row.get("kind") or "")
+        rank = 0 if kind == KIND_BACKUP else 1
+        return (rank, str(row.get("start_iso") or ""), int(row.get("id") or 0))
+
+    async def _mark_schedule_used(self, row: dict[str, Any]) -> None:
+        """Skip tonight's ingested cron so start-now does not double-fire."""
+        sid = row.get("schedule_id")
+        if not sid:
+            return
+        bstore = self._get_backup_store()
+        mark = getattr(bstore, "mark_schedule_fired", None)
+        if bstore is None or mark is None:
+            return
+        start = self._parse_start(row) or now_berlin()
+        try:
+            await mark(int(sid), minute_key=minute_key(start))
+        except Exception:
+            logger.info("Zeitplan nach Sofort-Start nicht markiert", exc_info=True)
+
+    async def start_now(
+        self, window_id: int, *, replan: bool = True, respect_lessons: bool = True
+    ) -> dict[str, Any]:
         row = await self.store.get_window(window_id)
         if not row:
             raise RuntimeError("Fenster nicht gefunden.")
         if row.get("kind") == KIND_DRILL:
             raise RuntimeError("Restore-Drill startet der bestehende Drill-Scheduler.")
+        kind = str(row.get("kind") or "")
+        bucket = str(row.get("bucket") or "")
+        if is_hard_stop(kind) or is_hard_stop(bucket):
+            raise RuntimeError("Harter Stopp — startet der Agent nie.")
+        if bucket == "reboot":
+            return await self._perform_reboot(row)
+        if bucket in ("offline", "eol", "capacity", "smart"):
+            raise RuntimeError("Nur zur Kenntnis — kein Start.")
         online, disk, running, _no_snap = await self._host_maps()
         tid = str(row.get("target_id") or "")
         if not online.get(tid, True):
@@ -1303,12 +2692,13 @@ class OpsEngine:
             raise RuntimeError("Disk ist kritisch — Start blockiert.")
         if tid in running:
             raise RuntimeError("Auf diesem Ziel läuft bereits ein Auftrag.")
-        kind = str(row.get("kind") or "")
+        if kind == KIND_BACKUP and self._any_backup_running():
+            raise RuntimeError("Ein Backup läuft bereits — der Agent startet das nächste im Anschluss.")
         if kind == KIND_PATCH:
             if not in_job_scope(
                 await self.policy(),
                 kind=kind,
-                bucket=str(row.get("bucket") or ""),
+                bucket=bucket,
                 target_id=tid,
                 gone_ids=await self.gone_ids(),
             ):
@@ -1316,6 +2706,10 @@ class OpsEngine:
                     window_id, status=STATUS_SKIPPED, reason=REASON_OUT_OF_FOCUS
                 )
                 raise RuntimeError(REASON_OUT_OF_FOCUS)
+            if respect_lessons:
+                hold = await self._hold_for_lesson(row)
+                if hold:
+                    raise RuntimeError(hold)
             if self._is_image_window(row):
                 await self._release_ok_image_snap()
             ok, err, job_id = await self._start_patch(row)
@@ -1329,19 +2723,145 @@ class OpsEngine:
                 )
                 raise RuntimeError(reason)
             await self.store.update_window(window_id, status=STATUS_RUNNING, job_id=job_id)
+            await self._note_scan_on_job(row, job_id)
+            await self._log_activity(
+                ACTION_STARTED,
+                result=RESULT_OK,
+                row=row,
+                kind="image" if self._is_image_window(row) else KIND_PATCH,
+                detail="Apply gestartet",
+            )
         elif kind == KIND_BACKUP:
             job_id = await self._start_backup(row)
             await self.store.update_window(window_id, status=STATUS_RUNNING, job_id=job_id)
+            await self._mark_schedule_used(row)
+            await self._log_activity(
+                ACTION_STARTED,
+                result=RESULT_OK,
+                row=row,
+                detail="Backup gestartet",
+            )
         else:
             raise RuntimeError("Dieser Fenstertyp lässt sich hier nicht starten.")
+        if replan:
+            await self.watch_and_shift(force=True)
         result = await self.store.get_window(window_id)
         assert result is not None
         return result
+
+    async def start_accepted_now(self) -> dict[str, Any]:
+        """Start accepted upcoming windows now (same gates as slot time, no 20:00 wait)."""
+        windows = [
+            w
+            for w in await self.store.list_windows(statuses=[STATUS_ACCEPTED])
+            if str(w.get("kind") or "") != KIND_DRILL
+            and not w.get("needs_confirm")
+            and not is_hard_stop(str(w.get("kind") or ""))
+            and not is_hard_stop(str(w.get("bucket") or ""))
+        ]
+        windows.sort(key=self._accepted_start_order)
+        await self._warn_capacity()
+        started: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        patch_started = False
+        settings = await self.settings()
+        online, disk, running, _no_snap = await self._host_maps()
+        backup_started = self._any_backup_running()
+        if any(
+            str(getattr(j, "kind", "") or "") in ("apply", "image-apply")
+            for j in self._list_patch_jobs()
+        ):
+            patch_started = True
+
+        for row in windows:
+            wid = int(row["id"])
+            tid = str(row.get("target_id") or "")
+            kind = str(row.get("kind") or "")
+            if kind == KIND_BACKUP:
+                if backup_started:
+                    skipped.append(
+                        {"id": wid, "reason": "Ein Backup läuft — Anschluss folgt."}
+                    )
+                    continue
+                skip = await self._backup_skip_reason(
+                    row, online=online, disk=disk, running=running
+                )
+                if skip:
+                    await self._apply_backup_skip(row, skip, now=now_berlin())
+                    skipped.append({"id": wid, "reason": skip})
+                    continue
+            if kind == KIND_PATCH:
+                if settings.patch_halted:
+                    skipped.append({"id": wid, "reason": "Patch-Welle ist gestoppt."})
+                    continue
+                if patch_started:
+                    skipped.append(
+                        {"id": wid, "reason": "Ein Apply läuft bereits — ein Host nach dem anderen."}
+                    )
+                    continue
+                if tid in running:
+                    skipped.append(
+                        {
+                            "id": wid,
+                            "reason": "Backup, Restore oder Apply läuft bereits auf diesem Ziel.",
+                        }
+                    )
+                    continue
+            try:
+                result = await self.start_now(wid, replan=False)
+            except RuntimeError as exc:
+                skipped.append({"id": wid, "reason": str(exc)})
+                continue
+            started.append(result)
+            if tid:
+                running.add(tid)
+            if kind == KIND_PATCH:
+                patch_started = True
+            if kind == KIND_BACKUP:
+                backup_started = True
+
+        now = now_berlin()
+        chain_shifts = await self._pack_backup_chain(
+            now=now, start_min=self._chain_cursor(now)
+        )
+        shifts = await self.watch_and_shift(force=True)
+        shifts = list(chain_shifts) + list(shifts)
+        n = len(started)
+        n_shift = len(shifts)
+        if n == 0:
+            message = (
+                "Nichts gestartet — keine akzeptierten Fenster frei "
+                "(Gates, Wartet auf dich, oder schon laufend)."
+            )
+        else:
+            message = f"{n} Fenster gestartet."
+            if n_shift:
+                message += f" {n_shift} später verschoben."
+        return {
+            "ok": True,
+            "started": started,
+            "skipped": skipped,
+            "shifted": shifts,
+            "message": message,
+        }
 
     async def confirm_window(self, window_id: int) -> dict[str, Any]:
         row = await self.store.get_window(window_id)
         if not row:
             raise RuntimeError("Fenster nicht gefunden.")
+        bucket = str(row.get("bucket") or "")
+        if bucket == "reboot":
+            return await self._perform_reboot(row)
+        if bucket in ("offline", "eol", "capacity", "smart"):
+            await self.store.update_window(
+                window_id,
+                status=STATUS_DONE,
+                needs_confirm=False,
+                reason=by_agent("Zur Kenntnis genommen."),
+            )
+            result = await self.store.get_window(window_id)
+            assert result is not None
+            return result
         await self.store.update_window(
             window_id,
             status=STATUS_ACCEPTED,
@@ -1354,7 +2874,7 @@ class OpsEngine:
                 await self._ensure_backup_schedule(fresh, now_berlin())
         start = self._parse_start(row)
         if start is not None and start <= now_berlin() + timedelta(minutes=1):
-            return await self.start_now(window_id)
+            return await self.start_now(window_id, respect_lessons=False)
         result = await self.store.get_window(window_id)
         assert result is not None
         return result
@@ -1394,6 +2914,14 @@ class OpsEngine:
                 await self.start_due()
             except Exception:
                 logger.exception("Agent-Start fehlgeschlagen")
+            try:
+                await self._proactive_checks()
+            except Exception:
+                logger.exception("Proaktive Agent-Checks fehlgeschlagen")
+            try:
+                await self._maybe_refresh_brief()
+            except Exception:
+                logger.info("Abend-Kurzlage nicht aktualisiert", exc_info=True)
 
     async def board(self) -> dict[str, Any]:
         now = now_berlin()
@@ -1415,9 +2943,15 @@ class OpsEngine:
         all_rows = await self.store.list_windows(limit=300)
         shifts = await self.store.list_shifts(limit=30)
         rollbacks = await self.store.list_rollbacks(limit=40)
+        lessons = await self.store.list_lessons(limit=40)
         rb_by_window = {
             int(r["window_id"]): r
             for r in rollbacks
+            if r.get("window_id") is not None
+        }
+        lesson_by_window = {
+            int(r["window_id"]): r
+            for r in lessons
             if r.get("window_id") is not None
         }
         live_backup = [j.to_dict() for j in self._list_backup_jobs()]
@@ -1432,6 +2966,7 @@ class OpsEngine:
                 row,
                 now,
                 rollback=rb_by_window.get(int(wid)) if wid is not None else None,
+                lesson=lesson_by_window.get(int(wid)) if wid is not None else None,
             )
             st = str(row.get("status") or "")
             if st == STATUS_WAITING:
@@ -1444,6 +2979,8 @@ class OpsEngine:
                 next_up.append(packed)
         done.sort(key=lambda r: str(r.get("updated_at_iso") or r.get("start_iso") or ""), reverse=True)
         rollback_events = [self._serialize_rollback(r) for r in rollbacks]
+        activity = [serialize_activity(r) for r in await self.store.list_activity(limit=80)]
+        brief = await self.store.get_brief_for_day(now.date().isoformat())
         shifted: list[dict[str, Any]] = [
             {
                 "event": "shift",
@@ -1491,6 +3028,10 @@ class OpsEngine:
             "rollback_failed": [e for e in rollback_events if e.get("status") == "failed"],
             "shifted": shifted,
             "rollbacks": rollback_events,
+            "lessons": [serialize_lesson(r) for r in lessons],
+            "activity": activity,
+            "brief": (brief or {}).get("text") or "",
+            "brief_at": (brief or {}).get("created_at") or "",
             "done": done[:40],
             "live_jobs": {"backup": live_backup, "patch": live_patch},
             "time": format_de(now),
@@ -1531,6 +3072,7 @@ class OpsEngine:
         now: datetime,
         *,
         rollback: dict[str, Any] | None = None,
+        lesson: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         start = self._parse_start(row)
         out = dict(row)
@@ -1547,6 +3089,11 @@ class OpsEngine:
             "images": "Images",
             "backup": "Backup",
             "drill": "Drill",
+            "reboot": "Reboot",
+            "offline": "Offline",
+            "eol": "EOL",
+            "capacity": "Speicher",
+            "smart": "SMART",
         }.get(bucket, bucket)
         out["can_start"] = str(row.get("status") or "") in (
             STATUS_ACCEPTED,
@@ -1558,6 +3105,8 @@ class OpsEngine:
         out.update(actor_fields(via_agent=via))
         if rollback:
             out["rollback"] = self._serialize_rollback(rollback)
+        if lesson:
+            out["lesson"] = serialize_lesson(lesson)
         return out
 
 

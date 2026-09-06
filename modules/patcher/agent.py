@@ -1095,7 +1095,7 @@ class WaveEngine:
                     snapshot=snapshot,
                     names=names,
                     restart=True,
-                    prune=True,
+                    prune=False,
                 )
             else:
                 await self._apply_job(
