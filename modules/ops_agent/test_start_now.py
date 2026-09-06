@@ -232,6 +232,34 @@ class StartAcceptedNowTests(unittest.IsolatedAsyncioTestCase):
         assert running is not None
         self.assertEqual(running["status"], STATUS_RUNNING)
 
+    async def test_non_runtime_error_skips_and_starts_next(self) -> None:
+        class Boom(Exception):
+            pass
+
+        original = self.engine._start_backup
+
+        async def _boom(row: dict) -> str | None:
+            if row.get("target_id") == "lxc:boom":
+                raise Boom("Backup-Store nicht bereit.")
+            return await original(row)
+
+        self.engine._start_backup = _boom
+        await self._win(kind=KIND_BACKUP, target_id="lxc:boom", hm="20:00", stack="bad")
+        ok = await self._win(kind=KIND_BACKUP, target_id="lxc:ok", hm="20:10", stack="good")
+        result = await self.engine.start_accepted_now()
+        self.assertEqual(self.started_backup, ["lxc:ok"])
+        self.assertEqual(len(result["started"]), 1)
+        self.assertEqual(int(result["started"][0]["id"]), int(ok["id"]))
+        self.assertTrue(any("Backup-Store nicht bereit" in s["reason"] for s in result["skipped"]))
+        self.assertIn("Läuft", result["message"])
+        self.assertIn("good", result["message"])
+
+    async def test_empty_start_message_explains_why(self) -> None:
+        result = await self.engine.start_accepted_now()
+        self.assertEqual(result["started"], [])
+        self.assertIn("Nichts gestartet", result["message"])
+        self.assertIn("Als Nächstes", result["message"])
+
     async def test_hard_stop_and_waiting_never_started(self) -> None:
         await self._win(
             kind="distupgrade",
@@ -243,6 +271,12 @@ class StartAcceptedNowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.started_backup, [])
         self.assertEqual(self.started_patch, [])
         self.assertEqual(result["started"], [])
+        self.assertIn("Nichts gestartet", result["message"])
+        self.assertTrue(
+            "nicht selbst starten" in result["message"]
+            or "harten Stopp" in result["message"]
+            or "Harter Stopp" in result["message"]
+        )
 
 
 if __name__ == "__main__":

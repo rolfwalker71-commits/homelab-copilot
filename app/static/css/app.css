@@ -4675,3 +4675,10 @@ html[data-chrome="android"] button.ops-next-start {
   background: transparent;
   border: 0;
 }
+
+.ops-running-note:empty {
+  display: none;
+}
+.ops-running-note {
+  color: var(--foreground);
+}

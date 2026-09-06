@@ -288,10 +288,13 @@ class OpsAgentModule:
             return []
 
         async def _start_backup(window: dict[str, Any]) -> str | None:
-            from backup_verifier.module import _enqueue_backup, _get_store as bak_store
+            from backup_verifier.module import _enqueue_backup
 
+            store = _backup_store()
+            if store is None:
+                raise RuntimeError("Backup-Speicher nicht bereit.")
             job, coro = _enqueue_backup(
-                store=bak_store(),
+                store=store,
                 parent_id=str(window.get("target_id") or ""),
                 project=str(window.get("stack") or ""),
                 snapshot=_snap(),

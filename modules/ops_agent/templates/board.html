@@ -87,6 +87,7 @@
   </section>
   <section class="ops-col surface p-3 sm:p-4" data-col="running">
     <h2 class="font-display text-base font-bold leading-snug">Läuft</h2>
+    <p id="ops-running-note" class="ops-running-note mt-2 text-sm leading-snug break-words" role="status"></p>
     <div class="ops-col-body mt-3 space-y-2"></div>
   </section>
   <section class="ops-col surface p-3 sm:p-4" data-col="waiting">
@@ -143,6 +144,7 @@
   const ICO_PLAY = ($('ops-ico-play') && $('ops-ico-play').innerHTML) || '';
   const BERLIN_TZ = 'Europe/Berlin';
   const nextSlotOpen = Object.create(null);
+  let lastStartMsg = '';
   function esc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -531,7 +533,7 @@
     };
     const empties = {
       next: 'Nichts geplant — „Plan vorschlagen“ oder bestehende Zeitpläne erscheinen hier.',
-      running: 'Kein laufender Auftrag.',
+      running: lastStartMsg || 'Kein laufender Auftrag.',
       waiting: 'Nichts wartet auf dich. Der Agent arbeitet die übrigen Fenster selbst.',
       shifted: 'Keine Verschiebungen oder Zurücksetzungen.',
       done: 'Noch nichts abgeschlossen.',
@@ -599,6 +601,8 @@
       }).join('');
     });
     bindActions();
+    const runningNote = $('ops-running-note');
+    if (runningNote && lastStartMsg) runningNote.textContent = lastStartMsg;
   }
   function renderLessons(items) {
     const title = $('ops-lessons-title');
@@ -729,16 +733,33 @@
   }
   async function startPlanned() {
     const msg = $('ops-msg');
+    const note = $('ops-running-note');
     const btn = $('btn-ops-start-now');
-    if (btn) btn.disabled = true;
+    const prev = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Startet…';
+    }
+    lastStartMsg = 'Startet geplante Fenster…';
+    if (note) note.textContent = lastStartMsg;
+    if (msg) msg.textContent = lastStartMsg;
     try {
       const data = await api('/start-now', { method: 'POST', body: '{}' });
-      if (msg) msg.textContent = data.message || 'Geplante Fenster gestartet.';
-      await load();
+      lastStartMsg = data.message || 'Geplante Fenster gestartet — siehe Läuft.';
+      if (msg) msg.textContent = lastStartMsg;
+      if (note) note.textContent = lastStartMsg;
     } catch (e) {
-      if (msg) msg.textContent = String(e.message || e);
+      lastStartMsg = String(e.message || e);
+      if (msg) msg.textContent = lastStartMsg;
+      if (note) note.textContent = lastStartMsg;
     } finally {
-      if (btn) btn.disabled = false;
+      try {
+        await load();
+      } catch (_) { /* load setzt ops-msg selbst */ }
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = prev || 'Geplante jetzt starten';
+      }
     }
   }
   $('btn-ops-plan')?.addEventListener('click', plan);

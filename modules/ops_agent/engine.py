@@ -2751,14 +2751,18 @@ class OpsEngine:
 
     async def start_accepted_now(self) -> dict[str, Any]:
         """Start accepted upcoming windows now (same gates as slot time, no 20:00 wait)."""
-        windows = [
-            w
-            for w in await self.store.list_windows(statuses=[STATUS_ACCEPTED])
-            if str(w.get("kind") or "") != KIND_DRILL
-            and not w.get("needs_confirm")
-            and not is_hard_stop(str(w.get("kind") or ""))
-            and not is_hard_stop(str(w.get("bucket") or ""))
-        ]
+        blocked: list[str] = []
+        windows: list[dict[str, Any]] = []
+        for w in await self.store.list_windows(statuses=[STATUS_ACCEPTED]):
+            kind = str(w.get("kind") or "")
+            bucket = str(w.get("bucket") or "")
+            if kind == KIND_DRILL or is_hard_stop(kind) or is_hard_stop(bucket):
+                blocked.append(kind or bucket or "stop")
+                continue
+            if w.get("needs_confirm"):
+                blocked.append("confirm")
+                continue
+            windows.append(w)
         windows.sort(key=self._accepted_start_order)
         await self._warn_capacity()
         started: list[dict[str, Any]] = []
@@ -2809,8 +2813,10 @@ class OpsEngine:
                     continue
             try:
                 result = await self.start_now(wid, replan=False)
-            except RuntimeError as exc:
-                skipped.append({"id": wid, "reason": str(exc)})
+            except Exception as exc:
+                skipped.append(
+                    {"id": wid, "reason": str(exc) or exc.__class__.__name__}
+                )
                 continue
             started.append(result)
             if tid:
@@ -2820,23 +2826,22 @@ class OpsEngine:
             if kind == KIND_BACKUP:
                 backup_started = True
 
-        now = now_berlin()
-        chain_shifts = await self._pack_backup_chain(
-            now=now, start_min=self._chain_cursor(now)
-        )
-        shifts = await self.watch_and_shift(force=True)
-        shifts = list(chain_shifts) + list(shifts)
-        n = len(started)
-        n_shift = len(shifts)
-        if n == 0:
-            message = (
-                "Nichts gestartet — keine akzeptierten Fenster frei "
-                "(Gates, Wartet auf dich, oder schon laufend)."
+        shifts: list[dict[str, Any]] = []
+        try:
+            now = now_berlin()
+            chain_shifts = await self._pack_backup_chain(
+                now=now, start_min=self._chain_cursor(now)
             )
-        else:
-            message = f"{n} Fenster gestartet."
-            if n_shift:
-                message += f" {n_shift} später verschoben."
+            later = await self.watch_and_shift(force=True)
+            shifts = list(chain_shifts) + list(later)
+        except Exception:
+            logger.exception("Nach Sofort-Start nicht neu geplant")
+        message = self._start_now_message(started, skipped, shifts, blocked=blocked)
+        await self._log_activity(
+            ACTION_STARTED,
+            result=RESULT_OK if started else RESULT_SKIP,
+            detail=message,
+        )
         return {
             "ok": True,
             "started": started,
@@ -2844,6 +2849,57 @@ class OpsEngine:
             "shifted": shifts,
             "message": message,
         }
+
+    def _start_now_message(
+        self,
+        started: list[dict[str, Any]],
+        skipped: list[dict[str, Any]],
+        shifts: list[dict[str, Any]],
+        *,
+        blocked: list[str] | None = None,
+    ) -> str:
+        names: list[str] = []
+        for row in started:
+            label = str(row.get("target_name") or row.get("target_id") or "Fenster")
+            stack = str(row.get("stack") or "")
+            kind = "Backup" if str(row.get("kind") or "") == KIND_BACKUP else "Patch"
+            bit = f"{label} · {stack}" if stack else label
+            names.append(f"{bit} ({kind})")
+        if not started:
+            reasons: list[str] = []
+            seen: set[str] = set()
+            for item in skipped:
+                reason = str(item.get("reason") or "").strip()
+                if not reason or reason in seen:
+                    continue
+                seen.add(reason)
+                reasons.append(reason)
+                if len(reasons) >= 3:
+                    break
+            if reasons:
+                return "Nichts gestartet — " + "; ".join(reasons)
+            kinds = {str(k) for k in (blocked or [])}
+            if kinds and kinds <= {KIND_DRILL, "drill"}:
+                return (
+                    "Nichts gestartet — der Restore-Drill in „Als Nächstes“ "
+                    "läuft über den bestehenden Scheduler, nicht über diesen Knopf."
+                )
+            if kinds:
+                return (
+                    "Nichts gestartet — die Fenster in „Als Nächstes“ darf der "
+                    "Agent nicht selbst starten (Drill, harter Stopp oder Bestätigung)."
+                )
+            return (
+                "Nichts gestartet — in „Als Nächstes“ liegt kein übernommenes "
+                "Fenster, das der Agent jetzt anfassen darf."
+            )
+        msg = f"{len(started)} gestartet: " + ", ".join(names[:4])
+        if len(names) > 4:
+            msg += " …"
+        msg += " — steht unter Läuft."
+        if shifts:
+            msg += f" {len(shifts)} später verschoben."
+        return msg
 
     async def confirm_window(self, window_id: int) -> dict[str, Any]:
         row = await self.store.get_window(window_id)
@@ -3023,7 +3079,7 @@ class OpsEngine:
             },
             "scope_prompts": matrix["prompts"],
             "next": next_up,
-            "running": running,
+            "running": self._merge_live_into_running(running, live_backup, live_patch),
             "waiting": waiting,
             "rollback_failed": [e for e in rollback_events if e.get("status") == "failed"],
             "shifted": shifted,
@@ -3037,6 +3093,48 @@ class OpsEngine:
             "time": format_de(now),
             "timezone": "Europe/Berlin",
         }
+
+    def _card_from_live_job(self, raw: dict[str, Any], *, kind: str) -> dict[str, Any]:
+        tid = str(raw.get("parent_id") or raw.get("target_id") or "")
+        stack = str(raw.get("project") or "")
+        name = stack or tid or "Auftrag"
+        phase = str(raw.get("phase") or raw.get("message") or "läuft")
+        pct = raw.get("percent")
+        via = bool(raw.get("via_agent"))
+        return {
+            "id": f"live:{raw.get('id') or raw.get('job_id')}",
+            "kind": kind,
+            "kind_label": "Backup" if kind == KIND_BACKUP else "Patch",
+            "target_id": tid,
+            "target_name": name,
+            "stack": stack,
+            "status": STATUS_RUNNING,
+            "job_id": raw.get("id") or raw.get("job_id"),
+            "reason": phase,
+            "start_de": phase,
+            "duration_label": f"{int(pct)} %" if pct is not None else "",
+            "bucket_label": phase,
+            **actor_fields(via_agent=via),
+        }
+
+    def _merge_live_into_running(
+        self,
+        running: list[dict[str, Any]],
+        live_backup: list[dict[str, Any]],
+        live_patch: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        seen = {str(row.get("job_id") or "") for row in running if row.get("job_id")}
+        extra: list[dict[str, Any]] = []
+        for raw, kind in [(j, KIND_BACKUP) for j in live_backup] + [
+            (j, KIND_PATCH) for j in live_patch
+        ]:
+            jid = str(raw.get("id") or raw.get("job_id") or "")
+            st = str(raw.get("status") or "")
+            if not jid or jid in seen or st not in ("queued", "running"):
+                continue
+            extra.append(self._card_from_live_job(raw, kind=kind))
+            seen.add(jid)
+        return extra + running
 
     def _serialize_rollback(self, rec: dict[str, Any]) -> dict[str, Any]:
         status = str(rec.get("status") or "")
