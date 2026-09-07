@@ -25,6 +25,7 @@ from app.core.proxmox import (
     ProxmoxEndpoint,
     ProxmoxNodeUnboundError,
     format_proxmox_api_error,
+    format_proxmox_host_error,
     strip_unbound_metrics,
     unbound_message,
 )
@@ -499,6 +500,13 @@ class DiscoveryEngine:
         hints: list[str] = []
         try:
             perms = await self._proxmox_get(client, "/access/permissions", headers)
+        except httpx.HTTPStatusError as exc:
+            if self._is_http_status(exc, 401):
+                raise
+            hints.append(
+                f"Proxmox-Berechtigungen konnten nicht geprüft werden: {self._exc_text(exc)}"
+            )
+            return hints
         except Exception as exc:
             hints.append(
                 f"Proxmox-Berechtigungen konnten nicht geprüft werden: {self._exc_text(exc)}"
@@ -566,6 +574,53 @@ class DiscoveryEngine:
                 return name
         return "dem verbundenen Host"
 
+    def _display_name_for_endpoint(self, ep: ProxmoxEndpoint) -> str:
+        label = (ep.label or "").strip()
+        if label:
+            return label
+        for name, mapped in self._node_endpoints.items():
+            if mapped.id == ep.id and (name or "").strip():
+                return name.strip()
+        return (ep.host or "").strip() or ep.id
+
+    @staticmethod
+    def _is_http_status(exc: BaseException, code: int) -> bool:
+        if not isinstance(exc, httpx.HTTPStatusError) or exc.response is None:
+            return False
+        return int(exc.response.status_code) == int(code)
+
+    def _unreachable_node_entity(
+        self,
+        ep: ProxmoxEndpoint,
+        display_name: str,
+        error_msg: str,
+        *,
+        auth_error: bool = False,
+    ) -> TopologyEntity:
+        """Keep a configured host visible when its last API call failed (e.g. 401)."""
+        stamp = format_de()
+        stamp_iso = iso_utc()
+        name = (display_name or ep.host or ep.id).strip()
+        host = (ep.host or "").strip()
+        ips = [host] if host and _IP_RE.fullmatch(host) else []
+        return TopologyEntity(
+            id=f"node:{name}",
+            kind=EntityKind.NODE,
+            name=name,
+            status=EntityStatus.ERROR if auth_error else EntityStatus.UNKNOWN,
+            node=name,
+            hostname=name,
+            ip_addresses=ips,
+            meta={
+                "pve_endpoint_id": ep.id,
+                "pve_endpoint": host,
+                "api_error": error_msg,
+                "api_auth_error": bool(auth_error),
+            },
+            discovered_at=stamp,
+            discovered_at_iso=stamp_iso,
+        )
+
     def _require_endpoint_for_node(self, node: str) -> ProxmoxEndpoint:
         node = (node or "").strip()
         if node in self._unbound_via:
@@ -604,9 +659,21 @@ class DiscoveryEngine:
         errors: list[str] = []
         for ep, raw in zip(endpoints, gathered):
             if isinstance(raw, BaseException):
-                msg = f"Proxmox {ep.host}: {format_proxmox_api_error(raw)}"
+                name = self._display_name_for_endpoint(ep)
+                msg = format_proxmox_host_error(
+                    raw, host=ep.host, display_name=name
+                )
                 logger.warning(msg)
                 errors.append(msg)
+                stub = self._unreachable_node_entity(
+                    ep,
+                    name,
+                    msg,
+                    auth_error=self._is_http_status(raw, 401),
+                )
+                parsed.append((ep, [stub], [], [], {name}))
+                if ep.id != "primary":
+                    extra_owned.add(name)
                 continue
             nodes_e, guests_e, errs_e, owned_e = raw
             parsed.append((ep, nodes_e, guests_e, errs_e, owned_e))
@@ -706,9 +773,22 @@ class DiscoveryEngine:
                     f"{ep.host}: Keine Proxmox-Auth — Token oder Passwort setzen."
                 ], owned_names
 
-            errors.extend(await self._probe_token_acl(client, headers, ep))
-
-            node_list = await self._proxmox_get(client, "/nodes", headers)
+            try:
+                errors.extend(await self._probe_token_acl(client, headers, ep))
+                node_list = await self._proxmox_get(client, "/nodes", headers)
+            except Exception as exc:
+                name = self._display_name_for_endpoint(ep)
+                msg = format_proxmox_host_error(
+                    exc, host=ep.host, display_name=name
+                )
+                logger.warning(msg)
+                stub = self._unreachable_node_entity(
+                    ep,
+                    name,
+                    msg,
+                    auth_error=self._is_http_status(exc, 401),
+                )
+                return [stub], guests, [msg], {name}
             listed: list[tuple[str, dict[str, Any]]] = []
             for n in node_list or []:
                 if not isinstance(n, dict):

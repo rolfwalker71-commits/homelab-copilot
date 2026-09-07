@@ -210,6 +210,18 @@ def reconcile_topology(
         [g for g in live.guests if is_live_rail_guest(g)],
         listed,
     )
+    failed_nodes = {
+        (n.name or "").strip()
+        for n in live.nodes
+        if (n.meta or {}).get("api_auth_error") and (n.name or "").strip()
+    }
+    if previous is not None and failed_nodes:
+        have = {_id_key(g) for g in live_guests}
+        for g in previous.guests:
+            node = (g.node or "").strip()
+            if node in failed_nodes and _is_pve_guest(g) and _id_key(g) not in have:
+                live_guests.append(g)
+                have.add(_id_key(g))
     prev_guests = [
         g for g in (previous.guests if previous else []) if _is_pve_guest(g)
     ]

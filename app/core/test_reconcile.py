@@ -153,6 +153,42 @@ class ReconcileMergeTests(unittest.TestCase):
         tree = build_topology_tree(out)
         self.assertEqual([n["name"] for n in tree["nodes"]], ["pve01"])
 
+    def test_401_keeps_failed_node_and_previous_guests(self) -> None:
+        prev = _snap(
+            nodes=[_node("pve01"), _node("pve02")],
+            guests=[
+                _guest("vaultwarden", 113),
+                _guest("paperless", 105, node="pve02"),
+            ],
+        )
+        live = _snap(
+            nodes=[
+                _node("pve01"),
+                TopologyEntity(
+                    id="node:pve02",
+                    kind=EntityKind.NODE,
+                    name="pve02",
+                    status=EntityStatus.ERROR,
+                    node="pve02",
+                    hostname="pve02",
+                    meta={
+                        "pve_endpoint_id": "extra:2",
+                        "pve_endpoint": "100.117.60.250",
+                        "api_auth_error": True,
+                        "api_error": "Proxmox pve02: HTTP 401",
+                    },
+                ),
+            ],
+            guests=[_guest("vaultwarden", 113)],
+            errors=["Proxmox pve02 (100.117.60.250): HTTP 401 — Token zurückweisen — in Setup prüfen"],
+        )
+        out, stats = reconcile_topology(prev, live)
+        self.assertEqual([n.name for n in out.nodes], ["pve01", "pve02"])
+        self.assertEqual({g.name for g in out.guests}, {"vaultwarden", "paperless"})
+        self.assertFalse(stats.pve_kept_previous)
+        tree = build_topology_tree(out)
+        self.assertEqual([n["name"] for n in tree["nodes"]], ["pve01", "pve02"])
+
     def test_pve_hard_fail_keeps_previous_guests(self) -> None:
         prev = _snap(guests=[_guest("vaultwarden", 113)])
         live = _snap(

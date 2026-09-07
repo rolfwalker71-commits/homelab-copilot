@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -65,6 +65,7 @@ class ProxmoxHostRow:
             token_secret=self.token_secret,
             password=self.password,
             verify_ssl=self.verify_ssl,
+            label=self.label,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,8 +75,8 @@ class ProxmoxHostRow:
             "port": int(self.port or 8006),
             "user": (self.user or "root@pam").strip() or "root@pam",
             "token_id": (self.token_id or "").strip(),
-            "token_secret": self.token_secret or "",
-            "password": self.password or "",
+            "token_secret": (self.token_secret or "").strip(),
+            "password": (self.password or "").strip(),
             "verify_ssl": bool(self.verify_ssl),
             "label": (self.label or "").strip(),
         }
@@ -94,30 +95,51 @@ class ProxmoxEndpoint:
     password: str = ""
     verify_ssl: bool = False
     node_filter: str = ""
+    label: str = ""
 
     @property
     def configured(self) -> bool:
         host = (self.host or "").strip()
-        has_auth = bool(self.token_secret) or bool(self.password)
+        has_auth = bool((self.token_secret or "").strip()) or bool(
+            (self.password or "").strip()
+        )
         return bool(host) and has_auth
 
     @property
     def base_url(self) -> str:
         return f"https://{(self.host or '').strip()}:{int(self.port or 8006)}/api2/json"
 
+    @property
+    def display_name(self) -> str:
+        return (self.label or "").strip() or (self.host or "").strip() or self.id
+
     def auth_headers(self) -> dict[str, str]:
-        if self.token_id and self.token_secret:
-            token_id = self.token_id
-            if "!" not in token_id:
-                token_id = f"{self.user}!{token_id}"
-            return {"Authorization": f"PVEAPIToken={token_id}={self.token_secret}"}
+        secret = (self.token_secret or "").strip()
+        token_id = normalize_pve_token_id(self.user, self.token_id)
+        if token_id and secret:
+            return {"Authorization": f"PVEAPIToken={token_id}={secret}"}
         return {}
 
     def token_acl_subject(self) -> str:
-        tid = self.token_id or "?"
-        if "!" in tid:
-            return tid
-        return f"{self.user}!{tid}"
+        return normalize_pve_token_id(self.user, self.token_id) or "?"
+
+
+def normalize_pve_token_id(user: str, token_id: str) -> str:
+    """``USER@REALM!id`` — strip whitespace; ``USER@REALM:id`` → bang form."""
+    tid = (token_id or "").strip()
+    user = (user or "").strip()
+    if not tid:
+        return ""
+    if "!" in tid:
+        return tid
+    if ":" in tid and "@" in tid.split(":", 1)[0]:
+        left, right = tid.split(":", 1)
+        right = right.strip()
+        if right:
+            return f"{left}!{right}"
+    if user:
+        return f"{user}!{tid}"
+    return tid
 
 
 def host_row_from_dict(data: dict[str, Any]) -> ProxmoxHostRow:
@@ -127,8 +149,8 @@ def host_row_from_dict(data: dict[str, Any]) -> ProxmoxHostRow:
         port=int(data.get("port") or 8006),
         user=str(data.get("user") or "root@pam").strip() or "root@pam",
         token_id=str(data.get("token_id") or "").strip(),
-        token_secret=str(data.get("token_secret") or ""),
-        password=str(data.get("password") or ""),
+        token_secret=str(data.get("token_secret") or "").strip(),
+        password=str(data.get("password") or "").strip(),
         verify_ssl=bool(data.get("verify_ssl", False)),
         label=str(data.get("label") or "").strip(),
     )
@@ -157,9 +179,9 @@ def hosts_from_env(settings: Any) -> list[ProxmoxHostRow]:
         host=str(getattr(settings, "proxmox_host", "") or ""),
         port=int(getattr(settings, "proxmox_port", 8006) or 8006),
         user=str(getattr(settings, "proxmox_user", "root@pam") or "root@pam"),
-        token_id=str(getattr(settings, "proxmox_token_id", "") or ""),
-        token_secret=str(getattr(settings, "proxmox_token_secret", "") or ""),
-        password=str(getattr(settings, "proxmox_password", "") or ""),
+        token_id=str(getattr(settings, "proxmox_token_id", "") or "").strip(),
+        token_secret=str(getattr(settings, "proxmox_token_secret", "") or "").strip(),
+        password=str(getattr(settings, "proxmox_password", "") or "").strip(),
         verify_ssl=bool(getattr(settings, "proxmox_verify_ssl", False)),
         label=str(getattr(settings, "proxmox_node", "") or ""),
     )
@@ -168,9 +190,9 @@ def hosts_from_env(settings: Any) -> list[ProxmoxHostRow]:
         host=str(getattr(settings, "proxmox_2_host", "") or ""),
         port=int(getattr(settings, "proxmox_2_port", 8006) or 8006),
         user=str(getattr(settings, "proxmox_2_user", "root@pam") or "root@pam"),
-        token_id=str(getattr(settings, "proxmox_2_token_id", "") or ""),
-        token_secret=str(getattr(settings, "proxmox_2_token_secret", "") or ""),
-        password=str(getattr(settings, "proxmox_2_password", "") or ""),
+        token_id=str(getattr(settings, "proxmox_2_token_id", "") or "").strip(),
+        token_secret=str(getattr(settings, "proxmox_2_token_secret", "") or "").strip(),
+        password=str(getattr(settings, "proxmox_2_password", "") or "").strip(),
         verify_ssl=bool(getattr(settings, "proxmox_2_verify_ssl", False)),
         label="",
     )
@@ -184,14 +206,46 @@ def hosts_from_env(settings: Any) -> list[ProxmoxHostRow]:
     return out
 
 
+def _row_has_auth(row: ProxmoxHostRow) -> bool:
+    return bool((row.token_secret or "").strip() or (row.password or "").strip())
+
+
+def _fill_empty_secrets(db: ProxmoxHostRow, env: ProxmoxHostRow | None) -> ProxmoxHostRow:
+    """Keep a stored token; only borrow env auth when the DB row has none."""
+    if _row_has_auth(db) or env is None or not _same_host_port(db, env):
+        return db
+    if not _row_has_auth(env):
+        return db
+    return replace(
+        db,
+        token_id=(db.token_id or "").strip() or env.token_id,
+        token_secret=env.token_secret,
+        password=env.password or db.password,
+        user=(db.user or "").strip() or env.user,
+    )
+
+
 def merge_proxmox_hosts(
     db_rows: list[ProxmoxHostRow] | None, settings: Any
 ) -> list[ProxmoxHostRow]:
-    """DB rows if present (after Setup save) else env bootstrap."""
-    db = [r for r in (db_rows or []) if (r.host or "").strip()]
-    if db:
-        return db
-    return hosts_from_env(settings)
+    """DB identity wins; empty DB token falls back to matching ``PROXMOX_*`` / ``PROXMOX_2_*``.
+
+    A good DB secret is never replaced by an empty env value. Env-only slots
+    (e.g. ``PROXMOX_2_*`` when SQLite has only host 1) stay available.
+    """
+    env_by_slot = {r.slot: r for r in hosts_from_env(settings)}
+    db_by_slot = {r.slot: r for r in (db_rows or []) if (r.host or "").strip()}
+    if not db_by_slot and not env_by_slot:
+        return []
+    out: list[ProxmoxHostRow] = []
+    for slot in sorted(set(env_by_slot) | set(db_by_slot)):
+        db = db_by_slot.get(slot)
+        env = env_by_slot.get(slot)
+        if db is not None:
+            out.append(_fill_empty_secrets(db, env))
+        elif env is not None:
+            out.append(env)
+    return out
 
 
 def apply_host_rows_to_settings(settings: Any, rows: list[ProxmoxHostRow]) -> None:
@@ -237,7 +291,8 @@ def apply_host_rows_to_settings(settings: Any, rows: list[ProxmoxHostRow]) -> No
 
 
 def _keep_secret(new: str | None, previous: str) -> str:
-    return new if new else previous
+    cleaned = (new or "").strip() if new else ""
+    return cleaned if cleaned else (previous or "").strip()
 
 
 def host_rows_from_setup_payload(
@@ -406,6 +461,11 @@ def format_proxmox_api_error(exc: BaseException) -> str:
         if hint:
             head = f"{head} ({hint})"
         detail = pve_response_detail(exc.response)
+        if code == 401:
+            setup = "Token zurückweisen — in Setup prüfen"
+            if detail:
+                return f"{head} — {detail} — {setup}"
+            return f"{head} — {setup}"
         if detail:
             return f"{head} — {detail}"
         return head
@@ -426,3 +486,18 @@ def format_proxmox_api_error(exc: BaseException) -> str:
     if text:
         return text
     return type(exc).__name__
+
+
+def format_proxmox_host_error(
+    exc: BaseException,
+    *,
+    host: str = "",
+    display_name: str = "",
+) -> str:
+    """``Proxmox pve02 (IP): HTTP 401 …`` — name first, IP only as extra."""
+    api = format_proxmox_api_error(exc)
+    name = (display_name or "").strip()
+    addr = (host or "").strip()
+    if name and addr and name != addr:
+        return f"Proxmox {name} ({addr}): {api}"
+    return f"Proxmox {name or addr or '?'}: {api}"

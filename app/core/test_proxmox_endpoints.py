@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import AsyncMock
 
 import httpx
 
 from app.config import Settings
 from app.core.discovery import DiscoveryEngine
 from app.core.models import EntityKind, EntityStatus, TopologyEntity, TopologySnapshot
+from app.core.tree import build_topology_tree
 from app.core.proxmox import (
     ProxmoxEndpoint,
     ProxmoxHostRow,
@@ -16,6 +18,7 @@ from app.core.proxmox import (
     apply_host_rows_to_settings,
     endpoints_from_settings,
     format_proxmox_api_error,
+    format_proxmox_host_error,
     host_rows_from_setup_payload,
     hosts_from_env,
     merge_proxmox_hosts,
@@ -49,15 +52,23 @@ class EndpointTests(unittest.TestCase):
     def test_primary_and_standalone_second(self) -> None:
         s = _settings(
             proxmox_host="192.168.5.101",
-            proxmox_token_secret="a",
+            proxmox_token_id="copilot",
+            proxmox_token_secret="sec-a",
             proxmox_2_host="192.168.5.102",
             proxmox_2_token_id="copilot",
-            proxmox_2_token_secret="b",
+            proxmox_2_token_secret="sec-b",
         )
         eps = endpoints_from_settings(s)
         self.assertEqual([e.id for e in eps], ["primary", "extra:2"])
         self.assertEqual(eps[1].host, "192.168.5.102")
-        self.assertIn("PVEAPIToken=", eps[1].auth_headers()["Authorization"])
+        self.assertEqual(
+            eps[0].auth_headers()["Authorization"],
+            "PVEAPIToken=root@pam!copilot=sec-a",
+        )
+        self.assertEqual(
+            eps[1].auth_headers()["Authorization"],
+            "PVEAPIToken=root@pam!copilot=sec-b",
+        )
 
     def test_skip_duplicate_host_port(self) -> None:
         s = _settings(
@@ -102,6 +113,34 @@ class ErrorFormatTests(unittest.TestCase):
         self.assertIn("HTTP 404", text)
         self.assertIn("nicht gefunden", text)
         self.assertIn("pve02", text)
+
+    def test_http_401_setup_hint(self) -> None:
+        req = httpx.Request("GET", "https://100.117.60.250:8006/api2/json/nodes")
+        resp = httpx.Response(401, request=req)
+        exc = httpx.HTTPStatusError("boom", request=req, response=resp)
+        text = format_proxmox_api_error(exc)
+        self.assertIn("HTTP 401", text)
+        self.assertIn("nicht autorisiert", text)
+        self.assertIn("Token zurückweisen — in Setup prüfen", text)
+        named = format_proxmox_host_error(
+            exc, host="100.117.60.250", display_name="pve02"
+        )
+        self.assertTrue(named.startswith("Proxmox pve02"))
+        self.assertIn("100.117.60.250", named)
+        self.assertIn("Token zurückweisen — in Setup prüfen", named)
+
+    def test_token_header_strips_whitespace_and_colon(self) -> None:
+        ep = ProxmoxEndpoint(
+            id="extra:2",
+            host="100.117.60.250",
+            user="root@pam",
+            token_id="root@pam:copilot\n",
+            token_secret="  sec-b \n",
+        )
+        self.assertEqual(
+            ep.auth_headers()["Authorization"],
+            "PVEAPIToken=root@pam!copilot=sec-b",
+        )
 
     def test_http_403(self) -> None:
         req = httpx.Request("GET", "https://pve01:8006/api2/json/nodes/pve01/status")
@@ -209,11 +248,12 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(eps[1].host, "192.168.5.102")
         self.assertEqual(s.proxmox_2_host, "192.168.5.102")
 
-    def test_db_primary_only_does_not_keep_env_pve02(self) -> None:
+    def test_db_primary_only_keeps_env_pve02(self) -> None:
         s = _settings(
             proxmox_host="192.168.5.101",
             proxmox_token_secret="env-a",
             proxmox_2_host="192.168.5.102",
+            proxmox_2_token_id="copilot",
             proxmox_2_token_secret="env-b",
         )
         db = [
@@ -221,9 +261,49 @@ class MergeTests(unittest.TestCase):
         ]
         merged = merge_proxmox_hosts(db, s)
         apply_host_rows_to_settings(s, merged)
-        self.assertEqual(len(endpoints_from_settings(s)), 1)
-        self.assertEqual(s.proxmox_2_host, "")
-        self.assertEqual(s.proxmox_2_token_secret, "")
+        eps = endpoints_from_settings(s)
+        self.assertEqual([e.id for e in eps], ["primary", "extra:2"])
+        self.assertEqual(eps[1].host, "192.168.5.102")
+        self.assertEqual(eps[1].token_secret, "env-b")
+        self.assertEqual(s.proxmox_2_host, "192.168.5.102")
+        self.assertEqual(s.proxmox_2_token_secret, "env-b")
+
+    def test_empty_db_token_uses_env_same_host(self) -> None:
+        s = _settings(
+            proxmox_2_host="100.117.60.250",
+            proxmox_2_token_id="copilot",
+            proxmox_2_token_secret="env-b",
+        )
+        db = [
+            ProxmoxHostRow(
+                slot=2, host="100.117.60.250", token_id="copilot", token_secret=""
+            ),
+        ]
+        merged = merge_proxmox_hosts(db, s)
+        self.assertEqual(merged[0].token_secret, "env-b")
+        apply_host_rows_to_settings(s, merged)
+        ep = endpoints_from_settings(s)[0]
+        self.assertEqual(ep.host, "100.117.60.250")
+        self.assertEqual(ep.token_secret, "env-b")
+
+    def test_good_db_token_not_overwritten_by_empty_env(self) -> None:
+        s = _settings(
+            proxmox_2_host="100.117.60.250",
+            proxmox_2_token_secret="",
+        )
+        db = [
+            ProxmoxHostRow(
+                slot=2,
+                host="100.117.60.250",
+                token_id="copilot",
+                token_secret="db-b",
+                label="pve02",
+            ),
+        ]
+        merged = merge_proxmox_hosts(db, s)
+        self.assertEqual(merged[0].token_secret, "db-b")
+        apply_host_rows_to_settings(s, merged)
+        self.assertEqual(endpoints_from_settings(s)[0].token_secret, "db-b")
 
     def test_setup_save_keeps_blank_secrets(self) -> None:
         previous = hosts_from_env(
@@ -281,6 +361,102 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(rows[1].token_secret, "")  # new slot2, no previous secret
         self.assertEqual([r.slot for r in rows], [1, 2, 3])
         self.assertEqual(rows[2].host, "192.168.5.103")
+
+
+class MultiHostDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    def _dual_settings(self) -> Settings:
+        s = _settings(
+            proxmox_host="192.168.5.101",
+            proxmox_token_id="copilot",
+            proxmox_token_secret="sec-a",
+            proxmox_2_host="100.117.60.250",
+            proxmox_2_user="root@pam",
+            proxmox_2_token_id="copilot",
+            proxmox_2_token_secret="sec-b",
+        )
+        apply_host_rows_to_settings(s, hosts_from_env(s))
+        return s
+
+    async def test_host2_queries_use_host2_token_only(self) -> None:
+        s = self._dual_settings()
+        engine = DiscoveryEngine(s)
+        seen: list[tuple[str, str, str]] = []
+
+        async def _get(client, path, headers):
+            ep = getattr(client, "_pve_endpoint", None)
+            auth = str((headers or {}).get("Authorization") or "")
+            seen.append((ep.host if ep else "", str(path), auth))
+            if str(path) == "/nodes":
+                node = "pve01" if ep and ep.id == "primary" else "pve02"
+                return [{"node": node, "status": "online"}]
+            if "cluster/resources" in str(path):
+                return []
+            if str(path).endswith("/lxc") or str(path).endswith("/qemu"):
+                return []
+            if str(path).endswith("/status"):
+                return {"status": "online"}
+            return {}
+
+        engine._proxmox_get = AsyncMock(side_effect=_get)
+        engine._probe_token_acl = AsyncMock(return_value=[])
+        engine._enrich_node_ips = AsyncMock()
+        nodes, _guests, errors = await engine._discover_proxmox()
+        self.assertFalse(any("401" in e for e in errors))
+        self.assertEqual(sorted(n.name for n in nodes), ["pve01", "pve02"])
+        host2 = [c for c in seen if c[0] == "100.117.60.250"]
+        host1 = [c for c in seen if c[0] == "192.168.5.101"]
+        self.assertTrue(host2)
+        self.assertTrue(all("sec-b" in auth and "sec-a" not in auth for _h, _p, auth in host2))
+        self.assertTrue(all("sec-a" in auth and "sec-b" not in auth for _h, _p, auth in host1))
+        self.assertEqual(engine._node_endpoints["pve02"].host, "100.117.60.250")
+        self.assertEqual(engine._node_endpoints["pve02"].token_secret, "sec-b")
+
+    async def test_401_keeps_host2_in_inventory_list(self) -> None:
+        s = self._dual_settings()
+        engine = DiscoveryEngine(s)
+        extra = endpoints_from_settings(s)[1]
+        engine._node_endpoints["pve02"] = extra
+
+        async def _get(client, path, headers):
+            ep = getattr(client, "_pve_endpoint", None)
+            if ep and ep.id != "primary":
+                req = httpx.Request("GET", f"{ep.base_url}{path}")
+                raise httpx.HTTPStatusError(
+                    "no",
+                    request=req,
+                    response=httpx.Response(401, request=req),
+                )
+            if str(path) == "/nodes":
+                return [{"node": "pve01", "status": "online"}]
+            if "cluster/resources" in str(path):
+                return []
+            if str(path).endswith("/lxc") or str(path).endswith("/qemu"):
+                return []
+            return {}
+
+        engine._proxmox_get = AsyncMock(side_effect=_get)
+        engine._probe_token_acl = AsyncMock(return_value=[])
+        engine._enrich_node_ips = AsyncMock()
+        nodes, _guests, errors = await engine._discover_proxmox()
+        names = [n.name for n in nodes]
+        self.assertIn("pve01", names)
+        self.assertIn("pve02", names)
+        stub = next(n for n in nodes if n.name == "pve02")
+        self.assertEqual(stub.status, EntityStatus.ERROR)
+        self.assertTrue((stub.meta or {}).get("api_auth_error"))
+        self.assertTrue(any("pve02" in e for e in errors))
+        self.assertTrue(any("Token zurückweisen — in Setup prüfen" in e for e in errors))
+        self.assertTrue(any("100.117.60.250" in e for e in errors))
+        tree = build_topology_tree(
+            TopologySnapshot(
+                refreshed_at="x",
+                refreshed_at_iso="x",
+                nodes=nodes,
+                errors=errors,
+                proxmox_configured=True,
+            )
+        )
+        self.assertEqual([n["name"] for n in tree["nodes"]], ["pve01", "pve02"])
 
 
 if __name__ == "__main__":

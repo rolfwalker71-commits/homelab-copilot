@@ -80,6 +80,36 @@ class ProxmoxStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fresh.proxmox_2_host, "192.168.5.102")
         self.assertTrue(fresh.proxmox_configured)
 
+    async def test_db_empty_token_falls_back_to_env_pve02(self) -> None:
+        await self.store.replace_proxmox_hosts(
+            [
+                {
+                    "slot": 1,
+                    "host": "192.168.5.101",
+                    "token_secret": "db-a",
+                    "label": "pve01",
+                },
+                {
+                    "slot": 2,
+                    "host": "100.117.60.250",
+                    "token_id": "copilot",
+                    "token_secret": "",
+                    "label": "pve02",
+                },
+            ]
+        )
+        s = _settings(
+            proxmox_2_host="100.117.60.250",
+            proxmox_2_token_id="copilot",
+            proxmox_2_token_secret="env-b",
+        )
+        rows = await hydrate_proxmox_settings(s, self.store)
+        self.assertEqual(rows[1].token_secret, "env-b")
+        self.assertEqual(rows[0].token_secret, "db-a")
+        eps = endpoints_from_settings(s)
+        self.assertEqual(eps[1].host, "100.117.60.250")
+        self.assertEqual(eps[1].token_secret, "env-b")
+
     async def test_empty_db_falls_back_to_env(self) -> None:
         s = _settings(
             proxmox_host="192.168.5.101",
